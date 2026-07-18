@@ -193,6 +193,11 @@ class Settings(BaseSettings):
     db_path: Path = DEFAULT_DB_PATH
     out_dir: Path = Path("out")
 
+    # Phone digest (`scout publish --push`): a PUBLIC repo that serves the
+    # rendered docs/ page via GitHub Pages. Kept separate from the code repo
+    # so only the digest — never code, config, or the watchlist — is public.
+    digest_repo: str | None = None
+
 
 def load_thesis(path: Path = Path("thesis.yaml")) -> Thesis:
     with open(path, encoding="utf-8") as f:

@@ -1145,6 +1145,64 @@ def strategy(
         console.print("[dim]Preview only — re-run with --apply to write the config.[/dim]")
 
 
+# --------------------------------------------------------------------- publish
+
+
+@app.command()
+def publish(
+    push: Annotated[
+        bool,
+        typer.Option("--push", help="Commit docs/ and push — updates GitHub Pages."),
+    ] = False,
+    thesis_path: Annotated[Path, typer.Option("--thesis")] = Path("thesis.yaml"),
+) -> None:
+    """Render the phone digest (docs/index.html) for GitHub Pages.
+
+    A read-only, mobile-first snapshot of the deal flow: launched startups
+    grouped by company, the pre-launch watchlist, briefs. Lead data only —
+    never secrets or config.
+    """
+    import subprocess as sp
+
+    from scout.publish import build_digest
+
+    settings = Settings()
+    thesis = _load_thesis_or_exit(thesis_path)
+    store = Store(settings.db_path)
+    docs = Path("docs")
+    path = build_digest(store, thesis, docs)
+    console.print(f"Digest written: [bold]{path}[/bold]")
+    if not push:
+        console.print("[dim]Re-run with --push to publish it to GitHub Pages.[/dim]")
+        return
+    if not settings.digest_repo:
+        console.print(
+            "[red]DIGEST_REPO is not set in .env[/red] — point it at a PUBLIC "
+            "repo (e.g. https://github.com/you/scout-digest.git). The digest "
+            "repo is separate from the code repo on purpose: only the rendered "
+            "page goes public."
+        )
+        raise typer.Exit(1)
+
+    def git(*args: str) -> sp.CompletedProcess:
+        return sp.run(["git", "-C", str(docs), *args], capture_output=True, text=True)
+
+    # docs/ is its own tiny checkout of the digest repo (ignored by the code repo).
+    if not (docs / ".git").exists():
+        git("init", "-b", "main")
+        git("remote", "add", "origin", settings.digest_repo)
+    git("add", "-A")
+    commit = git("commit", "-m", "Update digest")
+    if commit.returncode != 0 and "nothing to commit" in (commit.stdout + commit.stderr):
+        console.print("Digest unchanged — nothing to push.")
+        return
+    pushed = git("push", "-u", "origin", "main")
+    if pushed.returncode != 0:
+        console.print(f"[red]git push failed:[/red] {pushed.stderr.strip()}")
+        raise typer.Exit(1)
+    console.print("Pushed — GitHub Pages refreshes in about a minute.")
+
+
 # ----------------------------------------------------------------------- probe
 
 

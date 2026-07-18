@@ -21,3 +21,6 @@ __pycache__/
 
 # macOS
 .DS_Store
+
+# Phone digest checkout (its own repo: scout-digest)
+docs/

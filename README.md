@@ -261,6 +261,20 @@ Outputs land in `./out/`: `leads_YYYYMMDD.csv` (full columns) and
 `report_YYYYMMDD.md` (top-20 cards — the thing you paste into the one-pager).
 Top 10 also prints to the terminal.
 
+## Phone digest (GitHub Pages)
+
+`./scout-cli publish --push` renders the deal flow into a single mobile-first
+page (launched startups grouped by company, pre-launch watch, briefs, client-
+side search) and pushes it to the public repo named in `DIGEST_REPO`, which
+GitHub Pages serves. On your phone, open the page in Safari → Share →
+**Add to Home Screen** — it installs like an app (Scout icon, full-screen)
+and refreshes every time you publish after a scan.
+
+Read-only by design: triage lives in the desktop app. The page contains only
+lead data (never keys, config, or the watchlist), is `noindex`, and lives in
+a separate repo so the code stays private. Remember the URL is still public —
+anyone with the link can read your thesis statement and lead cards.
+
 ## Operational notes
 
 Deliberate single-user, single-machine assumptions — fine for an internal
