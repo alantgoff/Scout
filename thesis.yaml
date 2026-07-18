@@ -1,0 +1,69 @@
+# Managed by `scout ui` — edit there or here, both work.
+# All targeting lives in this file; the code never hardcodes it.
+# keywords -> bio_intent | target_bios -> departure_signal (literal bio substrings,
+# include the marker: 'ex-OpenAI') | disqualifiers drop the account entirely |
+# launch_phrases -> launch_traction | weights are relative (normalized at score time).
+thesis: Technical founders leaving top AI labs/FAANG to build vertical agents on unique and differentiated
+  datasets — agents must create their own training data in production at customers
+keywords:
+- stealth
+- building something new
+- day 1
+- founding engineer
+- working on something
+- Leaving
+target_bios:
+- ex-OpenAI
+- ex-Anthropic
+- ex-DeepMind
+- ex-Google Brain
+- ex-Meta AI
+- prev @
+sectors:
+- ai infra
+- devtools
+- agents
+- evals
+- RL environments
+disqualifiers:
+- crypto airdrop
+- NFT
+- follow back
+- growth hacker
+# Which company stages to target. Drives WHICH searches run (launch queries vs
+# departure queries vs stealth intent) and scoring: leads whose classified stage
+# is off-target get score × signal_params.stage_mismatch_multiplier.
+target_stages:
+- launched
+
+# Tunable constants behind the deterministic signals (editable in the UI).
+signal_params:
+  traction_floor: 0.05
+  traction_saturation: 0.25
+  traction_window_days: 30
+  convergence_full_credit: 2
+  stage_mismatch_multiplier: 0.5
+  # How much Claude's thesis_fit (0..1) sways the final score:
+  # multiplier = (1 - w) + w * fit.
+  thesis_fit_weight: 0.5
+
+weights:
+  bio_intent: 20.0
+  smart_money_convergence: 20.0
+  departure_signal: 20.0
+  bio_change: 10.0
+  smart_money_follow: 10.0
+  launch_traction: 10.0
+  builder_evidence: 5.0
+  github_evidence: 5.0
+  source_corroboration: 5.0
+launch_phrases:
+- launch
+- launching
+- launched
+- introducing
+- shipped
+- we built
+- day 1
+- beta
+- waitlist

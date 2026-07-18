@@ -1,0 +1,31 @@
+[project]
+name = "scout"
+version = "0.1.0"
+description = "Lightweight Twitter/X founder-sourcing engine for VC analysts"
+requires-python = ">=3.11"
+dependencies = [
+    "typer>=0.12",
+    "pydantic>=2.7",
+    "pydantic-settings>=2.3",
+    "twscrape>=0.13",
+    "httpx>=0.27",
+    "anthropic>=0.40",
+    "sqlite-utils>=3.37",
+    "rich>=13.7",
+    "tenacity>=8.3",
+    "pyyaml>=6.0",
+    "streamlit>=1.59.2",
+]
+
+[project.scripts]
+scout = "scout.cli:app"
+
+[dependency-groups]
+dev = ["pytest>=8.2"]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["scout"]

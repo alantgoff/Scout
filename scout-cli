@@ -1,0 +1,6 @@
+#!/usr/bin/env bash
+# Stable launcher for scout. Uses `python -m` from the repo root, which is
+# immune to the macOS/uv hidden-.pth issue that can break the `scout` console
+# script after a dependency sync. Usage: ./scout-cli demo   ./scout-cli ui
+cd "$(dirname "$0")" || exit 1
+exec uv run python -m scout.cli "$@"

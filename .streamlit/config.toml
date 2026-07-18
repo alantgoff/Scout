@@ -1,0 +1,16 @@
+[server]
+headless = true
+port = 8501
+address = "localhost"
+
+[browser]
+gatherUsageStats = false
+
+[theme]
+# Committed light appearance (Apple design language) — one deterministic look
+# on every machine; native widgets share the same accent as the custom CSS.
+base = "light"
+primaryColor = "#0071e3"
+backgroundColor = "#fbfbfd"
+secondaryBackgroundColor = "#ffffff"
+textColor = "#1d1d1f"

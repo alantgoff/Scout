@@ -1,0 +1,23 @@
+# Virtual env (recreate with `uv sync`)
+.venv/
+
+# Secrets & credentials — never commit
+.env
+cookies.json
+*.cookies
+
+# Local data: budget ledger / cache lives at ~/.scout/scout.db, but a legacy
+# or DB_PATH-overridden copy may land here
+scout.db
+*.db
+
+# Run artifacts
+out/
+
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+
+# macOS
+.DS_Store
