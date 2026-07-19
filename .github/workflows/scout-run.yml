@@ -1,0 +1,75 @@
+# Headless scout run — the backend behind the phone digest's "Run scan now".
+#
+# The store lives IN THIS REPO at data/scout.db (DB_PATH below), so startups
+# accumulate across runs with no laptop involved: each run restores the DB
+# from the checkout, folds in phone triage from remote/inbox/, discovers +
+# scores, republishes the digest, and commits the updated DB back.
+#
+# Secrets (Settings → Secrets and variables → Actions):
+#   ANTHROPIC_API_KEY   Claude classification (omit = heuristics-only)
+#   DIGEST_REPO         push URL for the PUBLIC digest repo, token embedded:
+#                       https://x-access-token:<PAT>@github.com/<owner>/scout-digest.git
+#   X_BEARER_TOKEN      optional — paid X API (budget-guarded)
+#   TW_COOKIES_B64      optional — base64 of the twscrape cookies file; without
+#                       it the run degrades to the free github/hn legs.
+name: scout-run
+
+on:
+  schedule:
+    - cron: "0 7 * * *" # daily sweep; the phone button covers on-demand
+  workflow_dispatch:
+    inputs:
+      max_accounts:
+        description: Cap accounts ingested this run
+        required: false
+        default: "500"
+
+# One writer to data/scout.db at a time; queued runs wait instead of racing.
+concurrency:
+  group: scout-db
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+
+env:
+  DB_PATH: data/scout.db
+  ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+  X_BEARER_TOKEN: ${{ secrets.X_BEARER_TOKEN }}
+  DIGEST_REPO: ${{ secrets.DIGEST_REPO }}
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+      - name: Install
+        run: uv sync --frozen
+      - name: Restore X cookies (optional)
+        env:
+          TW_COOKIES_B64: ${{ secrets.TW_COOKIES_B64 }}
+        run: |
+          if [ -n "$TW_COOKIES_B64" ]; then
+            echo "$TW_COOKIES_B64" | base64 -d > cookies.json
+            echo "TW_COOKIES=cookies.json" >> "$GITHUB_ENV"
+            echo "twscrape cookies restored"
+          else
+            echo "no TW_COOKIES_B64 secret — running on github/hn legs only"
+          fi
+      - name: Fold in phone triage (remote/inbox)
+        run: uv run python -m scout.cli inbox --apply --delete
+      - name: Discovery run
+        run: uv run python -m scout.cli run --max-accounts "${{ inputs.max_accounts || '500' }}"
+      - name: Publish digest
+        if: env.DIGEST_REPO != ''
+        run: uv run python -m scout.cli publish --push
+      - name: Commit accumulated DB + applied inbox
+        run: |
+          git config user.name "scout-bot"
+          git config user.email "scout-bot@users.noreply.github.com"
+          git add -A data remote/inbox
+          git commit -m "scout run: accumulate DB, fold inbox [skip ci]" || echo "nothing to commit"
+          git pull --rebase origin "${GITHUB_REF_NAME}" || true
+          git push

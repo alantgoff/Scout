@@ -10,6 +10,9 @@ cookies.json
 # or DB_PATH-overridden copy may land here
 scout.db
 *.db
+# EXCEPT the headless-runner store: GitHub Actions accumulates startups in
+# data/scout.db and commits it back after every run (see .github/workflows).
+!data/scout.db
 
 # Run artifacts
 out/

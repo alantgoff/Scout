@@ -242,6 +242,10 @@ verify       Hydrate the current shortlist with FRESH paid X API data and re-sco
   --tweets N         tweets to pull per account (default 10)
   --discovered       hydrate recently-discovered accounts instead of the scored run
 
+inbox        List (default) or apply phone-digest triage decisions
+  --apply --delete         fold remote/inbox/*.json into the pipeline, remove applied
+  --dir PATH               inbox directory (default remote/inbox)
+
 probe        One-time ~$0.50 empirical check of X API capabilities on your tier
 demo         $0 offline end-to-end test on built-in sample founders
 export       Re-export the last run from the cache DB (--format md|csv|both)
@@ -298,16 +302,60 @@ are never included in the phone digest.
 ## Phone digest (GitHub Pages)
 
 `./scout-cli publish --push` renders the deal flow into a single mobile-first
-page (launched startups grouped by company, pre-launch watch, briefs, client-
-side search) and pushes it to the public repo named in `DIGEST_REPO`, which
-GitHub Pages serves. On your phone, open the page in Safari → Share →
+page (launched startups grouped by company, pre-launch watch, briefs, tags,
+client-side search) and pushes it to the public repo named in `DIGEST_REPO`,
+which GitHub Pages serves. On your phone, open the page in Safari → Share →
 **Add to Home Screen** — it installs like an app (Scout icon, full-screen)
-and refreshes every time you publish after a scan.
+and refreshes every time a scan publishes.
 
-Read-only by design: triage lives in the desktop app. The page contains only
-lead data (never keys, config, or the watchlist), is `noindex`, and lives in
-a separate repo so the code stays private. Remember the URL is still public —
-anyone with the link can read your thesis statement and lead cards.
+The page contains only lead data (never keys, config, or the watchlist), is
+`noindex`, and lives in a separate repo so the code stays private. Remember
+the URL is still public — anyone with the link can read your thesis statement
+and lead cards. Without the remote setup below it is exactly what it always
+was: a read-only digest.
+
+### Remote control — triage, tag, and start runs from the phone
+
+The page is static, so its "backend" is the GitHub API plus GitHub Actions in
+the private code repo. One-time setup:
+
+1. **Give the system a home for its data.** The headless runner keeps the
+   store at `data/scout.db` IN the code repo (committed back after every
+   run), so startups accumulate across runs with no laptop involved. Your
+   local `~/.scout/scout.db` is separate — pick one home: if the Actions
+   runner is doing your scans, treat `data/scout.db` as the system of record
+   (pull the repo to browse it in the desktop UI with
+   `DB_PATH=data/scout.db`).
+2. **Add repo secrets** (code repo → Settings → Secrets → Actions):
+   `ANTHROPIC_API_KEY` (classification + deep analysis), `DIGEST_REPO`
+   (`https://x-access-token:<token>@github.com/<you>/scout-digest.git`,
+   token = fine-grained PAT with Contents RW on the digest repo), optionally
+   `TW_COOKIES_B64` (`base64 -i cookies.json`) for the X legs and
+   `X_BEARER_TOKEN` for the paid API. Without cookies, headless runs degrade
+   gracefully to the free GitHub/HN legs.
+3. **Create the phone token**: a fine-grained PAT scoped to the code repo
+   only, with **Contents: read/write** and **Actions: read/write**. Nothing
+   else.
+4. **Connect on the phone**: open the digest → "⚙︎ Remote" at the bottom →
+   enter `owner/code-repo` + the token → Connect. Both live only in that
+   browser's localStorage. (Set `CONTROL_REPO=owner/repo` in `.env` before
+   publishing if you want the repo field pre-filled — that puts the private
+   repo's *name* on the public page, your call.)
+
+What each tap does:
+
+- **Shortlist / Pass / + Tag / + Note** commit one tiny JSON decision file to
+  `remote/inbox/` in the code repo (unique filenames — no write races). The
+  `scout-apply` workflow fires on that push, folds decisions into the
+  pipeline table (`scout inbox --apply --delete`), republishes the digest,
+  and commits the DB back — the page reflects your triage a minute or two
+  later. Tap a `#tag` chip to remove it.
+- **Run scan now** dispatches the `scout-run` workflow (also on a daily
+  cron): fold inbox → discover → score → publish → commit `data/scout.db`.
+- **Analyze** on a startup card dispatches `scout-analyze` after a cost
+  confirm (~$4–8). The memo lands in the DB — read it at your desk with
+  `scout memo <name>`; memos are never published to the public page.
+- The bar under the header polls Actions and shows the latest run's status.
 
 ## Operational notes
 

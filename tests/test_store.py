@@ -135,6 +135,32 @@ def test_pipeline_brief_persists_without_clobbering(tmp_path: Path) -> None:
     assert row["brief"].startswith("**What")
 
 
+def test_pipeline_tags_roundtrip_and_dedupe(tmp_path: Path) -> None:
+    from scout.store import pipeline_tags
+
+    store = make_store(tmp_path)
+    store.set_pipeline("alice", tags=["Intro-Ready", "healthcare", " intro-ready "])
+    assert pipeline_tags(store.get_pipeline("alice")) == ["Intro-Ready", "healthcare"]
+    store.tag_lead("alice", "b2b")
+    store.tag_lead("alice", "B2B")  # case-insensitive dedupe
+    assert pipeline_tags(store.get_pipeline("alice")) == ["Intro-Ready", "healthcare", "b2b"]
+    store.untag_lead("alice", "HEALTHCARE")
+    assert pipeline_tags(store.get_pipeline("alice")) == ["Intro-Ready", "b2b"]
+    # tags update never clobbers other fields (read-merge-write)
+    store.set_pipeline("alice", status="shortlisted")
+    store.set_pipeline("alice", tags=["solo"])
+    assert store.get_pipeline("alice")["status"] == "shortlisted"
+
+
+def test_pipeline_tags_tolerates_legacy_and_garbage() -> None:
+    from scout.store import pipeline_tags
+
+    assert pipeline_tags({}) == []
+    assert pipeline_tags({"tags": None}) == []
+    assert pipeline_tags({"tags": "a, b , a"}) == ["a", "b"]  # legacy comma string
+    assert pipeline_tags({"tags": '["x", "", "x"]'}) == ["x"]
+
+
 # --- lead ledger + runs ---------------------------------------------------------
 
 T1 = "2026-07-01T00:00:00+00:00"

@@ -1,0 +1,44 @@
+# Fast feedback loop for phone triage: every decision the digest page commits
+# into remote/inbox/ triggers this — it folds the decisions into the store
+# and republishes the digest within a minute or two, WITHOUT a full discovery
+# run. The commit it makes carries [skip ci] so it can't retrigger itself.
+name: scout-apply
+
+on:
+  push:
+    branches: [main]
+    paths: ["remote/inbox/**.json"]
+
+concurrency:
+  group: scout-db # shares the DB-writer lock with scout-run / scout-analyze
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+
+env:
+  DB_PATH: data/scout.db
+  DIGEST_REPO: ${{ secrets.DIGEST_REPO }}
+
+jobs:
+  apply:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+      - name: Install
+        run: uv sync --frozen
+      - name: Apply inbox decisions
+        run: uv run python -m scout.cli inbox --apply --delete
+      - name: Republish digest
+        if: env.DIGEST_REPO != ''
+        run: uv run python -m scout.cli publish --push
+      - name: Commit DB + clear applied inbox
+        run: |
+          git config user.name "scout-bot"
+          git config user.email "scout-bot@users.noreply.github.com"
+          git add -A data remote/inbox
+          git commit -m "apply phone triage [skip ci]" || echo "nothing to commit"
+          git pull --rebase origin "${GITHUB_REF_NAME}" || true
+          git push

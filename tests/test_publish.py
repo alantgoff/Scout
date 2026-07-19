@@ -71,3 +71,67 @@ def test_digest_search_index_is_lowercased(tmp_path: Path) -> None:
     start = page.index('data-search="') + len('data-search="')
     blob = page[start:page.index('"', start)]
     assert blob == blob.lower()
+
+
+# --- remote control -------------------------------------------------------------
+
+
+def test_digest_remote_markup(tmp_path: Path) -> None:
+    store = seeded_store(tmp_path)
+    store.set_pipeline("ada_infra", tags=["intro-ready"])
+    page = build_digest(
+        store, Thesis(thesis="t"), tmp_path / "docs", control_repo="owner/code-repo"
+    ).read_text(encoding="utf-8")
+
+    # Cards are addressable + carry the triage actions (hidden until a token).
+    assert 'data-handle="ada_infra"' in page
+    assert 'data-act="shortlist"' in page and 'data-act="pass"' in page
+    assert 'data-act="tag"' in page and 'data-act="note"' in page
+    assert 'data-act="analyze"' in page  # startup card only
+    # Tags render as tappable chips.
+    assert 'class="chip tag" data-tag="intro-ready"' in page
+    # Setup panel + config: control repo embedded only because it was passed.
+    assert "SCOUT_REMOTE_DEFAULTS" in page and "owner/code-repo" in page
+    assert 'id="r-token"' in page and 'type="password"' in page
+    assert "localStorage" in page
+    # Dispatch targets match the workflow files.
+    assert "scout-run.yml" in page and "scout-analyze.yml" in page
+    assert "remote/inbox/" in page
+    # Run button exists and starts hidden (read-only without a token).
+    assert 'id="runbtn"' in page
+    # Still nothing secret-shaped on the page.
+    assert "ANTHROPIC" not in page and "BEARER" not in page and ".env" not in page
+    assert "github_pat" not in page
+
+
+def test_digest_control_repo_off_by_default(tmp_path: Path) -> None:
+    """Without CONTROL_REPO the private repo's name stays off the public page
+    (the setup panel still works — the user types the slug on the phone)."""
+    store = seeded_store(tmp_path)
+    page = build_digest(store, Thesis(), tmp_path / "docs").read_text(encoding="utf-8")
+    assert '"controlRepo": ""' in page
+    assert 'id="r-repo"' in page  # panel still there
+
+
+def test_analyze_button_only_on_startup_cards(tmp_path: Path) -> None:
+    store = seeded_store(tmp_path)
+    page = build_digest(store, Thesis(), tmp_path / "docs").read_text(encoding="utf-8")
+    watch_section = page.split("Pre-launch watch", 1)[1]
+    assert 'data-act="analyze"' not in watch_section
+    assert 'data-act="shortlist"' in watch_section  # triage still available
+
+
+def test_workflow_files_parse_and_match_dispatch_targets() -> None:
+    import yaml
+
+    from scout.publish import ANALYZE_WORKFLOW, RUN_WORKFLOW
+
+    root = Path(__file__).resolve().parent.parent / ".github" / "workflows"
+    for name in (RUN_WORKFLOW, ANALYZE_WORKFLOW, "scout-apply.yml"):
+        data = yaml.safe_load((root / name).read_text(encoding="utf-8"))
+        assert "jobs" in data, name
+        # YAML 1.1 parses the `on:` key as boolean True.
+        triggers = data.get("on") or data.get(True)
+        assert triggers, name
+        if name in (RUN_WORKFLOW, ANALYZE_WORKFLOW):
+            assert "workflow_dispatch" in triggers, name

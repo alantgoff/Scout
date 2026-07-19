@@ -1,0 +1,50 @@
+# Deep analysis on demand from the phone digest's per-card "Analyze" button.
+# Spends real money (~$4-8, hard-capped by DILIGENCE_COST_CAP_USD) — the page
+# shows a cost confirm before dispatching, and this workflow only ever runs
+# on explicit dispatch, never on a schedule.
+#
+# The memo lands in data/scout.db (read it in the desktop app or via
+# `scout memo <name>`); memos are deliberately NEVER published to the digest.
+name: scout-analyze
+
+on:
+  workflow_dispatch:
+    inputs:
+      query:
+        description: Startup name or account handle
+        required: true
+
+concurrency:
+  group: scout-db
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+
+env:
+  DB_PATH: data/scout.db
+  ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+
+jobs:
+  analyze:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+      - name: Install
+        run: uv sync --frozen
+      - name: Deep analysis
+        env:
+          QUERY: ${{ inputs.query }}
+        run: uv run python -m scout.cli analyze "$QUERY" --yes
+      - name: Commit accumulated DB (memo + knowledge graph)
+        env:
+          QUERY: ${{ inputs.query }}
+        run: |
+          git config user.name "scout-bot"
+          git config user.email "scout-bot@users.noreply.github.com"
+          git add -A data
+          git commit -m "scout analyze: $QUERY [skip ci]" || echo "nothing to commit"
+          git pull --rebase origin "${GITHUB_REF_NAME}" || true
+          git push

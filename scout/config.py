@@ -216,6 +216,13 @@ class Settings(BaseSettings):
     # rendered docs/ page via GitHub Pages. Kept separate from the code repo
     # so only the digest — never code, config, or the watchlist — is public.
     digest_repo: str | None = None
+    # Remote control: "owner/repo" of the PRIVATE code repo. When set, the
+    # digest page pre-fills its remote setup panel with it, enabling phone
+    # triage (decisions → remote/inbox/) and run dispatch (GitHub Actions).
+    # The user's fine-grained PAT is never embedded — it lives only in the
+    # phone browser's localStorage. Leaving this unset keeps even the private
+    # repo's NAME off the public page (it can be typed in the panel instead).
+    control_repo: str | None = None
 
 
 def load_thesis(path: Path = Path("thesis.yaml")) -> Thesis:

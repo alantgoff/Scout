@@ -313,7 +313,7 @@ def _merge_accounts(*groups: list[Account]) -> list[Account]:
 
 
 def _run_pipeline(
-    adapter: SourceAdapter,
+    adapter: SourceAdapter | None,
     source: Source,
     settings: Settings,
     thesis: Thesis,
@@ -323,6 +323,8 @@ def _run_pipeline(
     min_score: float,
     ttl_days: int,
 ) -> None:
+    """adapter=None means the X leg is unavailable (headless run without
+    cookies) — the pipeline continues on github/hn discovery + cached data."""
     console.print(
         f"Targeting stages: [bold]{', '.join(thesis.target_stages)}[/bold] → "
         f"queries: {', '.join(sorted(thesis.active_search_categories))}"
@@ -337,7 +339,9 @@ def _run_pipeline(
     network_deadline = time.monotonic() + settings.sourcing_time_budget_s
     store.scan_update("discovering", f"X {source.value} + github/hn legs")
     with console.status(f"Fetching accounts via {source.value}..."):
-        if source is Source.twscrape:
+        if adapter is None:
+            accounts = []
+        elif source is Source.twscrape:
             strategies = {"lists", "searches"} | (
                 {"bio", "graph"} if thesis.bio_graph_active else set()
             )
@@ -406,6 +410,13 @@ def _run_pipeline(
         to_fetch = kept
 
     tweets_by_handle: dict[str, list[Tweet]] = {}
+    if to_fetch and adapter is None:
+        # No X adapter — cached timelines from earlier runs are all we have.
+        for account in to_fetch:
+            tweets_by_handle[account.handle] = store.get_tweets(
+                account.id, settings.tweets_per_account
+            )
+        to_fetch = []
     if to_fetch:
         # Strongest bio signals first — if the time budget cuts the phase
         # short, the timelines that matter most are already in.
@@ -554,7 +565,20 @@ def run(
     store.scan_start("run", os.getpid())
     ok = False
     try:
-        adapter = _build_adapter(source, settings, store)
+        adapter: SourceAdapter | None
+        try:
+            adapter = _build_adapter(source, settings, store)
+        except RuntimeError as exc:
+            if source is not Source.twscrape:
+                raise  # a paid source misconfigured should fail loudly
+            # Headless environments (GitHub Actions) usually have no X
+            # cookies — keep the run alive on the free github/hn legs and
+            # whatever the store already knows.
+            adapter = None
+            console.print(
+                f"[yellow]X adapter unavailable ({exc}) — continuing with "
+                "github/hn discovery and cached data only.[/yellow]"
+            )
         _run_pipeline(
             adapter,
             source,
@@ -1344,6 +1368,62 @@ def strategy(
         console.print("[dim]Preview only — re-run with --apply to write the config.[/dim]")
 
 
+# ----------------------------------------------------------------------- inbox
+
+
+@app.command()
+def inbox(
+    apply: Annotated[
+        bool, typer.Option("--apply", help="Apply pending decisions to the store.")
+    ] = False,
+    delete: Annotated[
+        bool, typer.Option("--delete", help="Delete decision files after applying.")
+    ] = False,
+    inbox_dir: Annotated[
+        Path, typer.Option("--dir", help="Decision inbox directory.")
+    ] = Path("remote/inbox"),
+) -> None:
+    """List (default) or apply phone-digest triage decisions.
+
+    The published digest writes one JSON file per decision into remote/inbox/
+    of the code repo; this folds them into the pipeline table. Idempotent —
+    safe to re-run. Malformed files are reported and left in place.
+    """
+    from scout.inbox import apply_inbox, load_decisions
+
+    settings = Settings()
+    store = Store(settings.db_path)
+    try:
+        if not apply:
+            parsed, malformed = load_decisions(inbox_dir)
+            if not parsed and not malformed:
+                console.print(f"Inbox empty ({inbox_dir}).")
+                return
+            for path, decision in parsed:
+                extra = decision.tag or decision.note
+                console.print(
+                    f"  {path.name}: {decision.action} @{decision.handle}"
+                    + (f" · {extra}" if extra else "")
+                )
+            if malformed:
+                console.print(f"[yellow]{len(malformed)} malformed file(s) skipped:[/yellow] "
+                              + ", ".join(p.name for p in malformed))
+            console.print(f"{len(parsed)} pending — run `scout inbox --apply` to fold in.")
+            return
+        lines, malformed = apply_inbox(store, inbox_dir, delete=delete)
+        for line in lines:
+            console.print(f"  {line}")
+        console.print(f"Applied [bold]{len(lines)}[/bold] decision(s).")
+        if malformed:
+            console.print(
+                f"[yellow]{len(malformed)} malformed file(s) left in place:[/yellow] "
+                + ", ".join(p.name for p in malformed)
+            )
+    except Exception as exc:
+        console.print(f"[red]{type(exc).__name__}:[/red] {exc}")
+        raise typer.Exit(1) from None
+
+
 # --------------------------------------------------------------------- publish
 
 
@@ -1369,7 +1449,7 @@ def publish(
     thesis = _load_thesis_or_exit(thesis_path)
     store = Store(settings.db_path)
     docs = Path("docs")
-    path = build_digest(store, thesis, docs)
+    path = build_digest(store, thesis, docs, control_repo=settings.control_repo or "")
     console.print(f"Digest written: [bold]{path}[/bold]")
     if not push:
         console.print("[dim]Re-run with --push to publish it to GitHub Pages.[/dim]")
@@ -1396,6 +1476,13 @@ def publish(
         console.print("Digest unchanged — nothing to push.")
         return
     pushed = git("push", "-u", "origin", "main")
+    if pushed.returncode != 0:
+        # docs/ is a fully generated artifact, so remote history is
+        # disposable — a fresh checkout (headless CI re-inits docs/.git every
+        # run) force-replaces it rather than failing on non-fast-forward.
+        stderr = pushed.stderr + pushed.stdout
+        if "rejected" in stderr or "non-fast-forward" in stderr or "fetch first" in stderr:
+            pushed = git("push", "-u", "--force", "origin", "main")
     if pushed.returncode != 0:
         console.print(f"[red]git push failed:[/red] {pushed.stderr.strip()}")
         raise typer.Exit(1)

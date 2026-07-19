@@ -90,7 +90,17 @@ scout/
                     feeds the UI insights panel and the weight-tuning agent.
   companies.py      Pure company grouping: company_key/group_by_company fold
                     accounts sharing a classifier-extracted company_name into
-                    one startup entry (primary = highest score).
+                    one startup entry (primary = highest score). startup_key
+                    is the CANONICAL diligence identity (memos + KG nodes).
+  inbox.py          Remote decision inbox: the phone digest commits one JSON
+                    file per triage tap into remote/inbox/ of the code repo;
+                    `scout inbox --apply` folds them into the pipeline table
+                    (idempotent; malformed files skipped, never fatal).
+  publish.py        Digest builder — now REMOTE-CAPABLE: the static page talks
+                    to the GitHub API (token pasted once on the phone, stored
+                    only in that browser's localStorage) to write inbox
+                    decisions, dispatch the scout-run/scout-analyze workflows,
+                    and poll run status. Read-only without a token.
   demo_data.py      8 synthetic sample founders for `scout demo` (obviously fake handles).
   ui.py             Streamlit app: Leads / Pipeline / Sourcing / Settings.
                     Apple design language; lead cards; agent flows. ~800 lines.
@@ -210,7 +220,7 @@ multiplier) are UI-editable, read by the heuristics — do not re-hardcode them.
 | follow_edges, follow_meta | investor follow-graph snapshots + per-watcher baseline |
 | bio_snapshots | bio history for bio_change detection |
 | unlinked_leads | github/hn founders with no X handle (manual lookup) |
-| pipeline | deal-flow state: status, notes, outreach, channel, brief |
+| pipeline | deal-flow state: status, notes, outreach, channel, brief, tags (JSON list; parse with store.pipeline_tags) |
 | llm_verdicts | **verdict cache** — Claude verdict per handle, keyed by an input fingerprint (bio + tweets + thesis + model); TTL `VERDICT_TTL_DAYS` |
 | xapi_usage | **budget ledger** — every paid call, cumulative spend |
 | memos | deep-analysis memos, pk company_key; fingerprint-cached (bios + website + thesis + both model ids) — unchanged inputs re-serve for $0 |
@@ -273,6 +283,18 @@ silently widen its input set to all-time).
   provenance="user" rows; nothing may delete user edges.
 - **Memos never reach the public digest** (scout publish stays lead-cards
   only — memos are private work product).
+- **The digest page never carries secrets.** The remote-control layer works
+  by the USER pasting a fine-grained PAT into the page on their phone
+  (localStorage only). Nothing token-shaped may ever be rendered into
+  docs/index.html; the private repo's slug is embedded only when
+  CONTROL_REPO is explicitly set. test_publish enforces this.
+- **Headless DB home.** GitHub Actions runs use DB_PATH=data/scout.db,
+  committed back after every run ([skip ci]) — that file is the accumulating
+  system of record for headless operation; workflows serialize on the
+  `scout-db` concurrency group. Never point a workflow at ~/.scout.
+- **Inbox decisions are files, one per decision, applied idempotently.**
+  The page writes unique filenames (no write races, no lost updates);
+  `scout inbox --apply` must stay safe to re-run after partial failure.
 
 ---
 
@@ -336,6 +358,15 @@ silently widen its input set to all-time).
   with expander state preservation (see the stateless-expander note in ui.py),
   triage insights + AI weight suggestions (insights.py + suggest_weights),
   pipeline CSV export, agent timeouts, staleness nudge.
+- v5.1 additions: the **remote-control digest** — pipeline tags, the decision
+  inbox (`scout/inbox.py` + `scout inbox`), the GitHub-API-driven page
+  (`publish.py`), and the Actions backend (`.github/workflows/scout-run|
+  scout-apply|scout-analyze.yml`) accumulating the store at `data/scout.db`.
+  Headless `scout run` degrades gracefully without X cookies (github/hn legs
+  + cached data). NOT yet exercised against live GitHub: the user still needs
+  to add the Actions secrets, create the phone PAT, and tap through the flow
+  (see README → Remote control) — the page↔API contract is covered by offline
+  tests only.
 - v5 additions: the **diligence engine** (`scout/diligence/`) — `scout analyze`
   / `scout memo`, Diligence Score scorecard + native investment memos in the
   UI, knowledge graph with manual competitor linking, the "Worth a deep look"

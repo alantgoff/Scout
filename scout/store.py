@@ -22,6 +22,31 @@ from scout.models import Account, Lead, LedgerEntry, LLMVerdict, Tweet, Unlinked
 _LEGACY_DB_PATH = Path("scout.db")
 
 
+def _clean_tags(tags: list) -> list[str]:
+    """Strip, drop empties, dedupe case-insensitively (first casing wins)."""
+    seen: dict[str, str] = {}
+    for tag in tags:
+        cleaned = str(tag).strip()
+        if cleaned and cleaned.lower() not in seen:
+            seen[cleaned.lower()] = cleaned
+    return list(seen.values())
+
+
+def pipeline_tags(row: dict) -> list[str]:
+    """Parse a pipeline row's tags column (JSON list; tolerant of legacy
+    comma-separated strings and missing/garbage values)."""
+    raw = (row or {}).get("tags")
+    if not raw:
+        return []
+    try:
+        data = json.loads(raw)
+        if isinstance(data, list):
+            return _clean_tags(data)
+    except (json.JSONDecodeError, TypeError):
+        pass
+    return _clean_tags(str(raw).split(","))
+
+
 class Store:
     def __init__(self, db_path: Path = DEFAULT_DB_PATH) -> None:
         db_path = Path(db_path).expanduser()
@@ -487,9 +512,11 @@ class Store:
         outreach: str | None = None,
         channel: str | None = None,
         brief: str | None = None,
+        tags: list[str] | None = None,
     ) -> None:
         """Upsert deal-flow state for one lead (read-merge-write so partial
-        updates never clobber the other fields)."""
+        updates never clobber the other fields). `tags` REPLACES the tag list
+        (use tag_lead/untag_lead for incremental edits)."""
         handle = handle.lstrip("@").lower()
         row = {"handle": handle}
         if self.db["pipeline"].exists():
@@ -509,8 +536,25 @@ class Store:
         if brief is not None:
             row["brief"] = brief
             row["brief_at"] = now
+        if tags is not None:
+            row["tags"] = json.dumps(_clean_tags(tags))
         row["updated_at"] = datetime.now(timezone.utc).isoformat()
         self.db["pipeline"].upsert(row, pk="handle", alter=True)
+
+    def tag_lead(self, handle: str, tag: str) -> None:
+        """Add one tag to a lead (deduped case-insensitively, order kept)."""
+        tag = tag.strip()
+        if not tag:
+            return
+        current = pipeline_tags(self.get_pipeline(handle))
+        if tag.lower() not in {t.lower() for t in current}:
+            self.set_pipeline(handle, tags=[*current, tag])
+
+    def untag_lead(self, handle: str, tag: str) -> None:
+        current = pipeline_tags(self.get_pipeline(handle))
+        kept = [t for t in current if t.lower() != tag.strip().lower()]
+        if len(kept) != len(current):
+            self.set_pipeline(handle, tags=kept)
 
     def get_pipeline(self, handle: str) -> dict:
         handle = handle.lstrip("@").lower()

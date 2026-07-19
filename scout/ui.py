@@ -55,7 +55,7 @@ from scout.models import Lead, LedgerEntry
 from scout.outreach import CHANNELS, draft_outreach
 from scout.score import score_breakdown
 from scout.signals.llm import DEFAULT_PROMPT_TEMPLATE
-from scout.store import Store
+from scout.store import Store, pipeline_tags
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 THESIS_PATH = PROJECT_ROOT / "thesis.yaml"
@@ -626,7 +626,10 @@ def _lead_card(
         chips.append((f"New follows: {', '.join(account.recent_followed_by[:3])}", "accent"))
     # Keep the card face calm; tags, provenance, and any overflow live in Details.
     face_chips = chips[:7]
-    detail_chips: list[tuple[str, str]] = [(t, "") for t in (verdict.tags if verdict else [])]
+    detail_chips: list[tuple[str, str]] = [
+        (f"#{t}", "accent") for t in pipeline_tags(pipeline.get(handle_key, {}))
+    ]
+    detail_chips += [(t, "") for t in (verdict.tags if verdict else [])]
     if len({s for s in account.sources if s}) > 1:
         detail_chips.append((f"sources: {', '.join(sorted({s for s in account.sources if s}))}", ""))
     detail_chips += chips[7:]
@@ -1130,11 +1133,12 @@ with tab_pipeline:
                 "Fit": (f"{verdict.thesis_fit:.0%}" if verdict and verdict.thesis_fit is not None else "—"),
                 "Score": lead.score if lead else 0,
                 "Status": STATUS_LABELS.get(row.get("status", "shortlisted"), "To reach out"),
+                "Tags": ", ".join(pipeline_tags(row)),
                 "Notes": row.get("notes") or "",
             })
         edited = st.data_editor(
             editor_rows, hide_index=True, use_container_width=True, key="pipeline_editor",
-            column_order=["Lead", "Fit", "Score", "Status", "Notes"],
+            column_order=["Lead", "Fit", "Score", "Status", "Tags", "Notes"],
             column_config={
                 "handle": None,
                 "Lead": st.column_config.LinkColumn("Lead", display_text=r"x\.com/(.+)",
@@ -1146,14 +1150,19 @@ with tab_pipeline:
                     "Status",
                     options=[STATUS_LABELS[s] for s in WIN_STAGES] + [STATUS_LABELS["passed"]],
                     required=True),
+                "Tags": st.column_config.TextColumn(
+                    "Tags", width="medium", help="Comma-separated — e.g. intro-ready, healthcare"),
                 "Notes": st.column_config.TextColumn("Notes", width="large"),
             },
         )
         for orig, new in zip(editor_rows, edited):
-            if new["Status"] != orig["Status"] or new["Notes"] != orig["Notes"]:
+            if (new["Status"] != orig["Status"] or new["Notes"] != orig["Notes"]
+                    or new["Tags"] != orig["Tags"]):
                 store.set_pipeline(orig["handle"],
                                    status=LABEL_TO_STATUS.get(new["Status"], "shortlisted"),
-                                   notes=new["Notes"])
+                                   notes=new["Notes"],
+                                   tags=[t.strip() for t in (new["Tags"] or "").split(",")
+                                         if t.strip()])
                 st.rerun()
 
         st.write("")
