@@ -29,6 +29,7 @@ class TriageStats(BaseModel):
     sector_counts: dict[str, dict[str, int]]  # group -> sector -> count
     stage_counts: dict[str, dict[str, int]]
     model_counts: dict[str, dict[str, int]]
+    ctype_counts: dict[str, dict[str, int]] = Field(default_factory=dict)  # b2b vs b2c
     signal_means: dict[str, dict[str, float]]  # group -> signal -> mean points
     fit_means: dict[str, float | None]
     findings: list[str] = Field(default_factory=list)
@@ -84,6 +85,7 @@ def triage_stats(
         sector_counts={g: _count_by(ls, "sector") for g, ls in groups.items()},
         stage_counts={g: _count_by(ls, "stage") for g, ls in groups.items()},
         model_counts={g: _count_by(ls, "business_model") for g, ls in groups.items()},
+        ctype_counts={g: _count_by(ls, "customer_type") for g, ls in groups.items()},
         signal_means={g: _signal_means(ls) for g, ls in groups.items()},
         fit_means={g: _fit_mean(ls) for g, ls in groups.items()},
     )
@@ -162,6 +164,8 @@ def stats_prompt(stats: TriageStats) -> str:
         f"Stages — passed: {stats.stage_counts.get('passed', {})}",
         f"Business models — shortlisted: {stats.model_counts.get('shortlisted', {})}",
         f"Business models — passed: {stats.model_counts.get('passed', {})}",
+        f"Customer types — shortlisted: {stats.ctype_counts.get('shortlisted', {})}",
+        f"Customer types — passed: {stats.ctype_counts.get('passed', {})}",
         f"Mean thesis fit — shortlisted: {stats.fit_means.get('shortlisted')}, "
         f"passed: {stats.fit_means.get('passed')}",
     ]

@@ -624,7 +624,7 @@ def _run_pipeline(
     run_id = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S-%f")
     store.save_leads(run_id, leads)
     _record_run(store, run_id, source.value, thesis, seeds)
-    csv_path = write_csv(leads, settings.out_dir)
+    csv_path = write_csv(leads, settings.out_dir, thesis)
     md_path = write_markdown(leads, thesis, settings.out_dir)
 
     print_top_table(leads)
@@ -807,7 +807,7 @@ def reclassify(
         run_id = datetime.now(timezone.utc).strftime("reclass-%Y%m%d-%H%M%S-%f")
         store.save_leads(run_id, leads)
         _record_run(store, run_id, "reclassify", thesis, _load_seeds_or_default())
-        csv_path = write_csv(leads, settings.out_dir)
+        csv_path = write_csv(leads, settings.out_dir, thesis)
         md_path = write_markdown(leads, thesis, settings.out_dir)
         print_top_table(leads)
         console.print(f"Saved [bold]{len(leads)}[/bold] reclassified leads (run {run_id}).")
@@ -972,10 +972,10 @@ def export(
         raise typer.Exit()
 
     paths: list[Path] = []
+    thesis = _load_thesis_or_exit(Path("thesis.yaml"))
     if fmt in (ExportFormat.csv, ExportFormat.both):
-        paths.append(write_csv(leads, settings.out_dir))
+        paths.append(write_csv(leads, settings.out_dir, thesis))
     if fmt in (ExportFormat.md, ExportFormat.both):
-        thesis = _load_thesis_or_exit(Path("thesis.yaml"))
         paths.append(write_markdown(leads, thesis, settings.out_dir))
     rendered = ", ".join(f"[bold]{p}[/bold]" for p in paths)
     console.print(f"Re-exported [bold]{len(leads)}[/bold] leads: {rendered}")
@@ -1295,7 +1295,7 @@ def verify(
         run_id = datetime.now(timezone.utc).strftime("verify-%Y%m%d-%H%M%S-%f")
         store.save_leads(run_id, fresh_leads)
         _record_run(store, run_id, "xapi", thesis, _load_seeds_or_default())
-        csv_path = write_csv(fresh_leads, settings.out_dir)
+        csv_path = write_csv(fresh_leads, settings.out_dir, thesis)
         md_path = write_markdown(fresh_leads, thesis, settings.out_dir)
         print_top_table(fresh_leads)
         console.print(f"Verified [bold]{len(fresh_leads)}[/bold] leads (run {run_id}).")
@@ -1669,7 +1669,7 @@ def demo(
     run_id = datetime.now(timezone.utc).strftime("demo-%Y%m%d-%H%M%S-%f")
     store.save_leads(run_id, leads)
     _record_run(store, run_id, "demo", thesis, _load_seeds_or_default())
-    csv_path = write_csv(leads, settings.out_dir)
+    csv_path = write_csv(leads, settings.out_dir, thesis)
     md_path = write_markdown(leads, thesis, settings.out_dir)
 
     print_top_table(leads)

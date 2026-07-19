@@ -67,6 +67,9 @@ def _chips(lead: Lead, entry: LedgerEntry | None, status: str | None,
         chips.append(("New", "accent"))
     if verdict and verdict.stage:
         chips.append((verdict.stage.capitalize(), ""))
+    if verdict and verdict.customer_type:
+        chips.append((verdict.customer_type.upper() if len(verdict.customer_type) <= 5
+                      else verdict.customer_type, ""))
     sector = " · ".join(x for x in [verdict.sector if verdict else "",
                                     verdict.subsector if verdict else ""] if x)
     if sector:

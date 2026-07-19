@@ -181,18 +181,21 @@ shortlist / pass, persisted in the `pipeline` table as statuses `longlisted` /
 `score_breakdown(lead, thesis)` in `score.py` is the **single source of truth**;
 `score_leads` just takes its last value, and the UI renders every step. The math:
 
-1. `base = 100 × Σ(value_i × weight_i) / Σ(all thesis weights)` — weights relative.
-2. `× llm.confidence` when a verdict is attached.
-3. `× 0.2` when `llm.is_founder` is false (kills corporate/commentator accounts).
-4. `× signal_params.stage_mismatch_multiplier` (0.5) when `llm.stage` ∉ `target_stages`.
-5. `× ((1 − w) + w × llm.thesis_fit)` when the verdict carries `thesis_fit`
-   (w = `signal_params.thesis_fit_weight`, default 0.5). Legacy verdicts without
-   fit skip this step.
-6. Same shape for `llm.value_add_fit` (w = `signal_params.value_add_weight`) —
-   but the default weight is **0**, so the step only appears when opted into.
-   The value-add dimension (firm levers in `thesis.firm_value_add`, per-lever
-   scores in `llm.value_add_levers`) is otherwise informational: card chip +
-   lever bars, sort option, CSV/report columns, brief context, digest chip.
+1. Components (each 0–100, absent when unevidenced):
+   `signals = 100 × Σ(value_i × weight_i) / Σ(all thesis weights)`;
+   `quality = 100 × Σ(dim_i × quality_weight_i) / Σ(weights of PRESENT dims)`
+   (dims from `llm.quality` — the evidence-backed rubric, keys in
+   `config.QUALITY_DIMENSIONS`, weights in `thesis.quality_weights`);
+   `fit = 100 × llm.thesis_fit`.
+2. `base = Σ(score_weight_c × component_c) / Σ(weights of PRESENT components)`
+   — the 45/35/20 blend (`signal_params.score_weight_quality/_fit/_signals`),
+   renormalized so a lead is never punished for a component nobody could
+   evidence. No verdict → signals only (demo unchanged).
+3. `× llm.confidence` when a verdict is attached.
+4. `× 0.2` when `llm.is_founder` is false (kills corporate/commentator accounts).
+5. `× signal_params.stage_mismatch_multiplier` (0.5) when `llm.stage` ∉ `target_stages`.
+6. `× ((1 − w) + w × llm.value_add_fit)` (w = `signal_params.value_add_weight`,
+   default **0** — opt-in). The value-add dimension is otherwise informational.
 7. `× signal_params.ungrounded_multiplier` (0.6) when the product claim never
    traced to evidence: audit says "unverifiable", or the lead was never
    audited AND `llm.grounding` ∈ {None, "none", "bio"}. Audit-confirmed/
@@ -200,6 +203,12 @@ shortlist / pass, persisted in the `pipeline` table as statuses `longlisted` /
    below MIN_CONFIDENCE are no longer dropped — they attach and sink via the
    confidence multiplier (dropping them used to RESTORE the full heuristic
    score, rewarding speculation over honest unknowns).
+
+The quality rubric is scored through a **customer_type lens** (b2b / b2c /
+b2b2c / mixed): B2B traction = logos/pilots/pipeline/SOC2, B2C = users/
+growth/retention/virality. `team` is the one dimension where founder
+background counts (as cited team evidence — never product evidence);
+`investors` needs NAMED investors (watchlist follows cap it at 0.3).
 
 The 9 signals (heuristics.py). Three read enrichment fields set by the pipeline
 from store history, not by adapters — `recent_followed_by`, `bio_changed`,

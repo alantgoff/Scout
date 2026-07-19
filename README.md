@@ -202,19 +202,22 @@ All targeting lives here — the code never hardcodes keywords.
 | `firm_value_add` | The firm's strategic value-add levers (`key`/`label`/`description`), fed verbatim to the classifier. Ships with Headline's four levers; edit to re-target. |
 | `llm_prompt` | Optional override of the Claude classification prompt (placeholders `{thesis}` `{sectors}` `{stages}` `{firm}` `{value_add}`). Empty = built-in default. |
 
-**How the score works** (see it stepped out live in each lead card):
-`base = 100 × Σ(weight_i × value_i) / Σ(all weights)` — weights are relative, so
-`20/20/20/…` is identical to `2/2/2/…`. Then, when a Claude verdict is attached:
-`× confidence`, `× 0.2` if classified not-a-founder, `× stage multiplier`
-(default 0.5) when the classified stage is off-target, and
-`× ((1 − w) + w × thesis_fit)` where `w = signal_params.thesis_fit_weight`
-(default 0.5) — a textbook thesis match keeps its score, an off-thesis lead is
-scaled down but never zeroed on fit alone. The same shape applies to
-`value_add_fit` via `signal_params.value_add_weight`, but that weight defaults
-to **0** — the value-add dimension is informational unless you opt it into the
-ranking. Finally `× signal_params.ungrounded_multiplier` (default 0.6) when
-the product claim never traced to real evidence (audit "unverifiable", or
-unaudited with grounding none/bio) — speculation sinks, verified leads don't.
+**How the score works** (see it stepped out live in each lead card): three
+components, each 0–100 —
+**company quality** (Claude scores six evidence-backed dimensions — team,
+tech & product, market, defensibility, traction, investors — through the
+company's **B2B or B2C lens**; dimensions without evidence are omitted and
+the quality score renormalizes over what's actually evidenced),
+**thesis fit** (100 × `thesis_fit`), and
+**X signals** (`100 × Σ(weight_i × value_i) / Σ(all weights)` — smart-money
+follows, launch traction, departures). Final base =
+`Σ(w_c × component) / Σ(weights of present components)` with default weights
+**45/35/20** (`signal_params.score_weight_*`, editable in the UI). Then, when
+a verdict is attached: `× confidence`, `× 0.2` if classified not-a-founder,
+`× stage multiplier` (default 0.5) when off-target, `× value-add multiplier`
+(weight defaults to **0** — informational unless opted in), and
+`× signal_params.ungrounded_multiplier` (default 0.6) when the product claim
+never traced to real evidence — speculation sinks, verified leads don't.
 
 **Grounded classification.** The classifier doesn't take the bio's word for
 anything: each candidate's **company website is fetched** (cached in the

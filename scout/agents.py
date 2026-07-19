@@ -333,6 +333,15 @@ def _brief_context(lead: Lead, thesis: Thesis) -> str:
         ]
         if verdict.thesis_fit is not None:
             lines.append(f"Thesis fit: {verdict.thesis_fit:.2f} — {verdict.fit_reason}")
+        if verdict.customer_type:
+            lines.append(f"Customer type: {verdict.customer_type}")
+        if verdict.quality:
+            dims = ", ".join(
+                f"{k} {v:.0%}"
+                + (f" ({verdict.quality_reasons[k]})" if verdict.quality_reasons.get(k) else "")
+                for k, v in sorted(verdict.quality.items(), key=lambda kv: -kv[1])
+            )
+            lines.append(f"Quality (evidence-backed): {dims}")
         if verdict.value_add_fit is not None:
             lever_labels = {x.key: x.label for x in thesis.firm_value_add}
             top = sorted(verdict.value_add_levers.items(), key=lambda kv: -kv[1])[:3]

@@ -22,6 +22,10 @@ CSV_COLUMNS = [
     "company_url",
     "url",
     "score",
+    "customer_type",
+    "quality_score",
+    "quality",
+    "quality_reasons",
     "product_summary",
     "grounding",
     "verification",
@@ -56,7 +60,11 @@ def _oneline(text: str, width: int = 140) -> str:
     return text[: width - 1].rstrip() + "…"
 
 
-def write_csv(leads: list[Lead], out_dir: Path) -> Path:
+def write_csv(leads: list[Lead], out_dir: Path, thesis: Thesis | None = None) -> Path:
+    """`thesis` supplies quality_weights for the deterministic quality_score
+    column; None (legacy callers) leaves the column blank."""
+    from scout.score import quality_score  # local import — score imports models only
+
     out_dir.mkdir(parents=True, exist_ok=True)
     path = out_dir / f"leads_{_stamp()}.csv"
     with open(path, "w", newline="", encoding="utf-8") as f:
@@ -64,6 +72,7 @@ def write_csv(leads: list[Lead], out_dir: Path) -> Path:
         writer.writeheader()
         for lead in leads:
             llm = lead.llm
+            q_score = quality_score(llm, thesis) if thesis is not None else None
             identity = startup_identity(lead)
             writer.writerow(
                 {
@@ -75,6 +84,17 @@ def write_csv(leads: list[Lead], out_dir: Path) -> Path:
                     "company_url": (llm.company_url or "") if llm else "",
                     "url": lead.account.url,
                     "score": lead.score,
+                    "customer_type": (llm.customer_type or "") if llm else "",
+                    "quality_score": f"{q_score:.0f}" if q_score is not None else "",
+                    "quality": (
+                        ";".join(f"{k}={v:.2f}" for k, v in
+                                 sorted(llm.quality.items(), key=lambda kv: -kv[1]))
+                        if llm else ""
+                    ),
+                    "quality_reasons": (
+                        " | ".join(f"{k}: {r}" for k, r in sorted(llm.quality_reasons.items()))
+                        if llm else ""
+                    ),
                     "product_summary": (llm.product_summary or "") if llm else "",
                     "grounding": (llm.grounding or "") if llm else "",
                     "verification": (llm.verification or "") if llm else "",
