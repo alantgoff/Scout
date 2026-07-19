@@ -483,6 +483,15 @@ def _iso_ts(ts: str | None) -> float:
         return 0.0
 
 
+def _as_int(value) -> int | None:
+    """Robust int coercion — SQLite may hand counters back as TEXT when the
+    column was created from a NULL first write."""
+    try:
+        return int(value) if value is not None and value != "" else None
+    except (TypeError, ValueError):
+        return None
+
+
 def _tail_log(path: str, max_lines: int = 30) -> str:
     """Last lines of a scan log without reading the whole file."""
     p = Path(path)
@@ -725,7 +734,7 @@ def _run_panel() -> None:
     _, _, per_est, _ = _estimate_scan(kind)
     cur_idx = phases.index(current) if current in phases else -1
     elapsed = max(time.time() - _iso_ts(scan.get("started_at")), 0.0)
-    done_n, total_n = scan.get("done"), scan.get("total")
+    done_n, total_n = _as_int(scan.get("done")), _as_int(scan.get("total"))
     unit = scan.get("unit") or ""
 
     # ETA: finish the current phase (items → observed rate; seconds → budget

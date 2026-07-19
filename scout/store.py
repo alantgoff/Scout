@@ -559,7 +559,9 @@ class Store:
                 "id": 1, "kind": kind, "pid": pid, "phase": "starting",
                 "detail": "", "status": "running",
                 "started_at": now, "updated_at": now, "finished_at": None,
-                "done": None, "total": None, "unit": "",
+                # 0 (not None) so SQLite types the columns INTEGER on first
+                # write; the UI treats 0-total as "no progress bar yet".
+                "done": 0, "total": 0, "unit": "",
                 "phases_json": json.dumps(phases or []),
                 "phase_log_json": json.dumps([{"phase": "starting", "at": now}]),
                 "log_path": os.environ.get("SCOUT_SCAN_LOG", ""),
