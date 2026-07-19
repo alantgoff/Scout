@@ -22,7 +22,7 @@ _LEGACY_DB_PATH = Path("scout.db")
 
 
 class Store:
-    def __init__(self, db_path: Path = DEFAULT_DB_PATH) -> None:
+    def __init__(self, db_path: Path = DEFAULT_DB_PATH, *, cross_thread: bool = False) -> None:
         db_path = Path(db_path).expanduser()
         # One-time migration: preserve spend history from the old cwd-relative
         # scout.db so moving the ledger home never resets the $25 guard.
@@ -35,7 +35,18 @@ class Store:
             shutil.copy2(_LEGACY_DB_PATH, db_path)
         db_path.parent.mkdir(parents=True, exist_ok=True)
         self.db_path = db_path
-        self.db = sqlite_utils.Database(db_path)
+        if cross_thread:
+            # Streamlit reruns the script (and 4s-polling fragments) on
+            # varying threads; sqlite3's same-thread guard would raise
+            # ProgrammingError mid-render. Safe here: the UI is single-user
+            # and read-mostly, never writing from two threads at once.
+            import sqlite3
+
+            self.db = sqlite_utils.Database(
+                sqlite3.connect(str(db_path), check_same_thread=False)
+            )
+        else:
+            self.db = sqlite_utils.Database(db_path)
 
     # ------------------------------------------------------------------ cache
 

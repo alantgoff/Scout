@@ -1,11 +1,13 @@
 """scout — a deal-flow workspace over the CLI, in Apple design language.
 
-Four surfaces, content first:
+Five surfaces, content first:
 
   LEADS     — the ranked lead feed: information-rich cards, triage inline
   PIPELINE  — work the shortlist to allocation: status, notes, outreach, briefs
   SOURCING  — the AI strategy agent, run controls, and (behind disclosure)
               every manual knob: query bank, watchlist, weights, prompt
+  DATABASE  — the raw store, browsable: any table, auto-generated filters,
+              full-text search, CSV export, read-only SQL
   SETTINGS  — keys, budget, defaults
 
 Edits write back to thesis.yaml / seeds.yaml / .env; deal-flow state lives in
@@ -25,6 +27,7 @@ _ROOT = Path(__file__).resolve().parent.parent
 if str(_ROOT) not in sys.path:
     sys.path.insert(0, str(_ROOT))
 
+import pandas as pd
 import streamlit as st
 
 from scout.agents import (
@@ -155,12 +158,33 @@ def _inject_css() -> None:
         .stButton>button[kind="primary"]:disabled:hover { background:var(--accent);
           border-color:var(--accent); color:#fff; }
 
+        /* Segmented controls → the same pill group as the tabs. The track is
+           the inner radiogroup (the outer testid node also wraps the label). */
+        [data-testid="stButtonGroup"] [role="radiogroup"] { gap:2px;
+          background:var(--track); padding:3px; border-radius:12px; width:fit-content; }
+        [data-testid="stButtonGroup"] button { border:none !important;
+          border-radius:9px !important; min-height:30px;
+          padding:0.18rem 0.9rem !important; background:transparent !important;
+          box-shadow:none !important; }
+        [data-testid="stButtonGroup"] button p { font-size:0.86rem !important;
+          font-weight:500; color:var(--ink-2); }
+        [data-testid="stButtonGroup"] button:hover p { color:var(--ink); }
+        [data-testid="stButtonGroup"] button[aria-checked="true"] {
+          background:var(--surface) !important;
+          box-shadow:0 1px 4px rgba(0,0,0,0.14) !important; }
+        [data-testid="stButtonGroup"] button[aria-checked="true"] p {
+          color:var(--ink); font-weight:600; }
+
         /* Cards & tiles */
         [data-testid="stVerticalBlockBorderWrapper"] {
           background:var(--surface); border:1px solid var(--hair); border-radius:16px;
-          box-shadow:var(--shadow); }
+          box-shadow:var(--shadow);
+          transition:box-shadow .18s ease, border-color .18s ease; }
+        [data-testid="stVerticalBlockBorderWrapper"]:hover {
+          border-color:var(--hair-strong);
+          box-shadow:0 2px 4px rgba(0,0,0,0.05), 0 14px 36px rgba(0,0,0,0.08); }
         [data-testid="stVerticalBlockBorderWrapper"] > div > [data-testid="stVerticalBlock"] {
-          padding:0.35rem 0.45rem; }
+          padding:0.65rem 0.75rem; }
         .tile { background:var(--surface); border:1px solid var(--hair); border-radius:16px;
           padding:16px 18px; box-shadow:var(--shadow); }
         .tile .label { color:var(--muted); font-size:0.72rem; text-transform:uppercase;
@@ -236,11 +260,38 @@ def _inject_css() -> None:
         @keyframes scanpulse { 0%,100% { opacity:1; transform:scale(1); }
           50% { opacity:0.35; transform:scale(0.8); } }
 
-        hr { border-color:var(--hair) !important; }
+        hr { border-color:var(--hair) !important; margin:1.9rem 0 1.5rem !important; }
         [data-testid="stWidgetLabel"] p { font-size:0.83rem; color:var(--ink-2);
           font-weight:500; }
-        .stTextInput input, .stNumberInput input, .stTextArea textarea,
-        .stSelectbox [data-baseweb="select"] { border-radius:10px !important; }
+
+        /* Inputs — hairline borders, soft focus ring, one radius everywhere */
+        .stTextInput [data-baseweb="input"], .stNumberInput [data-baseweb="input"],
+        .stTextArea [data-baseweb="textarea"] {
+          border-radius:10px !important; border-color:var(--hair-strong) !important;
+          background:var(--surface) !important; transition:border-color .12s ease,
+          box-shadow .12s ease; }
+        .stTextInput [data-baseweb="input"]:focus-within,
+        .stNumberInput [data-baseweb="input"]:focus-within,
+        .stTextArea [data-baseweb="textarea"]:focus-within {
+          border-color:var(--accent) !important;
+          box-shadow:0 0 0 3px var(--accent-soft); }
+        .stSelectbox [data-baseweb="select"] > div,
+        .stMultiSelect [data-baseweb="select"] > div {
+          border-radius:10px !important; border-color:var(--hair-strong) !important;
+          background:var(--surface) !important; }
+        .stSelectbox [data-baseweb="select"]:focus-within > div,
+        .stMultiSelect [data-baseweb="select"]:focus-within > div {
+          border-color:var(--accent) !important;
+          box-shadow:0 0 0 3px var(--accent-soft); }
+
+        /* Data tables — framed like cards */
+        [data-testid="stDataFrame"], [data-testid="stDataFrameResizable"] {
+          border-radius:12px; overflow:hidden; }
+        [data-testid="stDataFrame"] > div { border-radius:12px; }
+
+        /* Alerts & toasts — same rounding as everything else */
+        [data-testid="stAlert"] { border-radius:12px; }
+        [data-testid="stPopoverBody"] { border-radius:14px; }
         </style>
         """,
         unsafe_allow_html=True,
@@ -354,7 +405,7 @@ if _pending_toast := st.session_state.pop("toast", None):
 settings = Settings(_env_file=ENV_PATH if ENV_PATH.exists() else None)
 thesis = load_thesis(THESIS_PATH)
 seeds = load_seeds(SEEDS_PATH)
-store = Store(Path(settings.db_path))
+store = Store(Path(settings.db_path), cross_thread=True)
 
 leads = store.load_latest_leads()
 pipeline = store.all_pipeline()
@@ -419,8 +470,8 @@ def _scan_indicator() -> None:
 
 _scan_indicator()
 
-tab_leads, tab_pipeline, tab_sourcing, tab_settings = st.tabs(
-    ["Leads", "Pipeline", "Sourcing", "Settings"]
+tab_leads, tab_pipeline, tab_sourcing, tab_data, tab_settings = st.tabs(
+    ["Leads", "Pipeline", "Sourcing", "Database", "Settings"]
 )
 
 
@@ -1399,6 +1450,213 @@ with tab_sourcing:
             )
             for lever in thesis.firm_value_add:
                 st.markdown(f"**{lever.label}** (`{lever.key}`) — {lever.description}")
+
+
+# ============================================================ DATABASE
+
+
+# Friendly presentation order + one-liners; unknown tables still appear after.
+DB_TABLE_ORDER = [
+    "leads", "accounts", "tweets", "llm_verdicts", "pipeline", "runs",
+    "unlinked_leads", "follow_edges", "follow_meta", "bio_snapshots",
+    "searches", "xapi_usage", "scan",
+]
+DB_TABLE_HELP = {
+    "leads": "Every scored lead — one row per handle per run.",
+    "accounts": "The fetch cache: every X account scout has seen.",
+    "tweets": "Cached tweets per account.",
+    "llm_verdicts": "Claude classification cache, keyed by input fingerprint.",
+    "pipeline": "Deal-flow state: status, notes, outreach, briefs.",
+    "runs": "Run provenance — source, strategy hash, config snapshot.",
+    "unlinked_leads": "GitHub/HN founders with no X handle (manual lookup).",
+    "follow_edges": "Investor follow-graph snapshots (the smart-money signals).",
+    "follow_meta": "Per-watcher snapshot baselines.",
+    "bio_snapshots": "Bio history behind the bio_change signal.",
+    "searches": "Per-query result cache with TTL.",
+    "xapi_usage": "The paid X API budget ledger — every billed call.",
+    "scan": "Live scan status (drives the banner).",
+}
+
+
+def _qi(name: str) -> str:
+    """Quote an SQLite identifier."""
+    return '"' + name.replace('"', '""') + '"'
+
+
+def _db_filter_meta(db, table: str, text_cols: list[str],
+                    num_cols: list[str]) -> tuple[list[tuple[str, list]], list[tuple[str, float, float]]]:
+    """Auto-derive filters: low-cardinality text columns → value pickers,
+    ranged numeric columns → min/max sliders."""
+    value_filters: list[tuple[str, list]] = []
+    for col in text_cols:
+        if col.endswith("_json") or len(value_filters) >= 6:
+            continue
+        n = db.execute(f"SELECT COUNT(DISTINCT {_qi(col)}) FROM {_qi(table)}").fetchone()[0]
+        if 2 <= n <= 30:
+            values = [r[0] for r in db.execute(
+                f"SELECT DISTINCT {_qi(col)} FROM {_qi(table)} "
+                f"WHERE {_qi(col)} IS NOT NULL ORDER BY 1"
+            ).fetchall()]
+            value_filters.append((col, values))
+    range_filters: list[tuple[str, float, float]] = []
+    for col in num_cols:
+        if len(range_filters) >= 3:
+            break
+        lo, hi = db.execute(
+            f"SELECT MIN({_qi(col)}), MAX({_qi(col)}) FROM {_qi(table)}"
+        ).fetchone()
+        if lo is not None and hi is not None and float(lo) < float(hi):
+            range_filters.append((col, float(lo), float(hi)))
+    return value_filters, range_filters
+
+
+with tab_data:
+    db = store.db
+    known_tables = [t for t in DB_TABLE_ORDER if db[t].exists()]
+    extra_tables = sorted(
+        t for t in db.table_names()
+        if t not in known_tables and not t.startswith("sqlite_")
+    )
+    db_tables = known_tables + extra_tables
+    db_file = Path(store.db_path)
+
+    st.markdown(
+        '<div class="section-title">Database</div>'
+        f'<div class="section-sub">Everything scout knows, raw — <code>{_e(str(db_file))}</code>. '
+        'Browse any table, filter, search, export. Read-only.</div>',
+        unsafe_allow_html=True,
+    )
+
+    if not db_tables:
+        st.markdown(
+            '<div class="subtle">The database is empty — run <code>./scout-cli demo</code> '
+            'or a discovery run first.</div>',
+            unsafe_allow_html=True,
+        )
+    else:
+        row_counts = {t: db[t].count for t in db_tables}
+        size_mb = db_file.stat().st_size / 1e6 if db_file.exists() else 0.0
+        d1, d2, d3 = st.columns(3)
+        d1.markdown(_tile("Tables", str(len(db_tables))), unsafe_allow_html=True)
+        d2.markdown(_tile("Rows", f"{sum(row_counts.values()):,}", "across all tables"),
+                    unsafe_allow_html=True)
+        d3.markdown(_tile("On disk", f"{size_mb:.1f} MB", db_file.name), unsafe_allow_html=True)
+        st.write("")
+
+        table = st.selectbox(
+            "Table", db_tables,
+            format_func=lambda t: f"{t}  ·  {row_counts[t]:,} rows",
+            key="db_table",
+        )
+        if DB_TABLE_HELP.get(table):
+            st.markdown(f'<div class="subtle" style="margin:-4px 0 10px">{_e(DB_TABLE_HELP[table])}</div>',
+                        unsafe_allow_html=True)
+
+        cols_meta = db[table].columns
+        col_names = [c.name for c in cols_meta]
+        text_cols = [c.name for c in cols_meta
+                     if "INT" not in (c.type or "").upper()
+                     and "REAL" not in (c.type or "").upper()
+                     and "FLOA" not in (c.type or "").upper()]
+        num_cols = [c.name for c in cols_meta if c.name not in text_cols]
+        value_filters, range_filters = _db_filter_meta(db, table, text_cols, num_cols)
+
+        f1, f2, f3, f4, f5 = st.columns([2.5, 1.35, 0.8, 1.0, 0.95])
+        with f1:
+            db_query = st.text_input("Search", key=f"db_q_{table}",
+                                     placeholder=f"Search {table} — any text column…",
+                                     label_visibility="collapsed")
+        with f2:
+            default_sort = col_names.index("created_at") if "created_at" in col_names else 0
+            sort_col = st.selectbox("Sort by", col_names, index=default_sort,
+                                    key=f"db_sort_{table}", label_visibility="collapsed")
+        with f3:
+            sort_desc = (st.segmented_control("Order", ["↓", "↑"], default="↓",
+                                              key=f"db_dir_{table}",
+                                              label_visibility="collapsed") or "↓") == "↓"
+        with f4:
+            selected_values: dict[str, list] = {}
+            selected_ranges: dict[str, tuple[float, float]] = {}
+            n_active_db = 0
+            with st.popover("Filters"):
+                visible_cols = st.multiselect(
+                    "Columns", col_names,
+                    default=[c for c in col_names if not c.endswith("_json")],
+                    key=f"db_cols_{table}",
+                )
+                for col, values in value_filters:
+                    picked = st.multiselect(col, values, key=f"db_f_{table}_{col}")
+                    if picked:
+                        selected_values[col] = picked
+                        n_active_db += 1
+                for col, lo, hi in range_filters:
+                    picked_lo, picked_hi = st.slider(col, lo, hi, (lo, hi),
+                                                     key=f"db_r_{table}_{col}")
+                    if (picked_lo, picked_hi) != (lo, hi):
+                        selected_ranges[col] = (picked_lo, picked_hi)
+                        n_active_db += 1
+        with f5:
+            db_limit = st.selectbox("Rows", [100, 500, 1000, 5000], index=1,
+                                    key=f"db_limit_{table}", label_visibility="collapsed",
+                                    format_func=lambda n: f"{n:,} rows")
+
+        where: list[str] = []
+        params: list = []
+        if db_query.strip():
+            like_cols = text_cols or col_names
+            where.append("(" + " OR ".join(f"{_qi(c)} LIKE ?" for c in like_cols) + ")")
+            params += [f"%{db_query.strip()}%"] * len(like_cols)
+        for col, picked in selected_values.items():
+            where.append(f"{_qi(col)} IN ({','.join('?' * len(picked))})")
+            params += picked
+        for col, (lo, hi) in selected_ranges.items():
+            where.append(f"{_qi(col)} BETWEEN ? AND ?")
+            params += [lo, hi]
+        where_sql = (" WHERE " + " AND ".join(where)) if where else ""
+
+        total = db.execute(f"SELECT COUNT(*) FROM {_qi(table)}{where_sql}", params).fetchone()[0]
+        select_cols = ", ".join(_qi(c) for c in (visible_cols or col_names))
+        order_sql = f" ORDER BY {_qi(sort_col)} {'DESC' if sort_desc else 'ASC'}"
+        df = pd.read_sql_query(
+            f"SELECT {select_cols} FROM {_qi(table)}{where_sql}{order_sql} LIMIT ?",
+            db.conn, params=params + [int(db_limit)],
+        )
+
+        shown_note = f"{len(df):,} of {total:,} matching rows"
+        if n_active_db or db_query.strip():
+            shown_note += f" · {row_counts[table]:,} in table"
+        st.markdown(f'<div class="subtle" style="margin:2px 0 8px">{shown_note}</div>',
+                    unsafe_allow_html=True)
+        # Height hugs the rows (35px each + header) instead of padding the
+        # grid with empty rows; caps at ~12 rows then scrolls.
+        st.dataframe(df, use_container_width=True, hide_index=True,
+                     height=min(460, 37 * (len(df) + 1) + 5))
+
+        st.download_button(
+            f"Download view as CSV ({len(df):,} row{'s' if len(df) != 1 else ''})",
+            df.to_csv(index=False).encode("utf-8"),
+            file_name=f"{table}_view.csv",
+        )
+
+        with st.expander("SQL — read-only queries against the store"):
+            sql_text = st.text_area(
+                "Query", value=f"SELECT * FROM {table} LIMIT 50",
+                height=90, label_visibility="collapsed", key="db_sql",
+            )
+            if st.button("Run query"):
+                statement = sql_text.strip().rstrip(";")
+                if not statement.lower().startswith(("select", "with")):
+                    st.error("Read-only: only SELECT / WITH queries run here.")
+                else:
+                    try:
+                        # sqlite3 executes a single statement — a piggybacked
+                        # second statement raises rather than running.
+                        sql_df = pd.read_sql_query(statement, db.conn)
+                        st.dataframe(sql_df, use_container_width=True, hide_index=True)
+                        st.markdown(f'<div class="subtle">{len(sql_df):,} rows</div>',
+                                    unsafe_allow_html=True)
+                    except Exception as exc:  # surface SQL errors inline
+                        st.error(f"{type(exc).__name__}: {exc}")
 
 
 # ============================================================ SETTINGS

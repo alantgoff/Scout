@@ -15,7 +15,7 @@ Headline. The discovery unit is an X account; the *product* unit is a startup �
 the classifier extracts `company_name`/`company_url` and `scout/companies.py`
 folds founder + company accounts into one entry (Startups track, report). It's
 a Python 3.12 package with a **Typer CLI** and a **Streamlit UI** (Apple design
-language: Leads · Pipeline · Sourcing · Settings), managed by **uv**. A thesis
+language: Leads · Pipeline · Sourcing · Database · Settings), managed by **uv**. A thesis
 (`thesis.yaml`) drives all targeting; nothing is hardcoded.
 
 The pipeline: **discover** candidate accounts (free) → run cheap deterministic
@@ -93,7 +93,7 @@ scout/
                     accounts sharing a classifier-extracted company_name into
                     one startup entry (primary = highest score).
   demo_data.py      8 synthetic sample founders for `scout demo` (obviously fake handles).
-  ui.py             Streamlit app: Leads / Pipeline / Sourcing / Settings.
+  ui.py             Streamlit app: Leads / Pipeline / Sourcing / Database / Settings.
                     Apple design language; lead cards; agent flows. ~800 lines.
   ingest/
     base.py         SourceAdapter ABC (X sources) + DiscoverySource ABC (github/hn).

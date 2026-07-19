@@ -25,7 +25,7 @@ cp .env.example .env            # fill in TW_COOKIES (and optionally the keys)
 $EDITOR thesis.yaml             # thesis: stages, keywords, orgs, weights
 $EDITOR seeds.yaml              # seeds: query bank, watchlist, github topics
 ./scout-cli demo                # $0 offline end-to-end test on sample founders
-./scout-cli ui                  # the Leads · Pipeline · Sourcing workspace (localhost:8501)
+./scout-cli ui                  # the Leads · Pipeline · Sourcing · Database workspace (localhost:8501)
 ./scout-cli run                 # full pipeline → ./out/leads_*.csv + report_*.md
 ```
 
@@ -42,7 +42,7 @@ the last `--ttl-days` (default 7) are skipped, so re-running while you tune
 the thesis is fast and (in xapi mode) free. A legacy `./scout.db` in the
 working directory is migrated to the home location automatically on first run.
 
-## The workspace: Leads · Pipeline · Sourcing · Settings
+## The workspace: Leads · Pipeline · Sourcing · Database · Settings
 
 The UI (`./scout-cli ui`) is a content-first workspace:
 
@@ -73,7 +73,12 @@ The UI (`./scout-cli ui`) is a content-first workspace:
    disclosure. The Signals & scoring panel opens with **triage insights**
    (how your shortlist/pass decisions cluster) and can ask Claude to
    **suggest weight adjustments**, reviewed before apply.
-4. **Settings** — keys, the budget ledger, and defaults.
+4. **Database** — the raw store, browsable: pick any table (row counts inline),
+   full-text search across text columns, auto-generated filters (low-cardinality
+   columns become value pickers, numeric columns become range sliders), a column
+   chooser, sort controls, CSV export of the filtered view, and a read-only SQL
+   console for anything else.
+5. **Settings** — keys, the budget ledger, and defaults.
 
 Deal-flow state (status, notes, outreach, briefs) persists in `scout.db`.
 
@@ -273,7 +278,7 @@ demo         $0 offline end-to-end test on built-in sample founders
 export       Re-export the last run from the cache DB (--format md|csv|both)
   --pipeline               export the deal flow (status, notes, outreach, briefs) instead
 budget       Cumulative X API spend vs. XAPI_SPEND_CAP_USD
-ui           Launch the Leads · Pipeline · Sourcing · Settings workspace
+ui           Launch the Leads · Pipeline · Sourcing · Database · Settings workspace
 ```
 
 **Efficiency:** free-source tweet fetches run concurrently

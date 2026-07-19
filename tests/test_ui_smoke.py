@@ -52,9 +52,9 @@ def test_ui_renders_without_exceptions(tmp_path, monkeypatch) -> None:
     at.run()
 
     assert not at.exception, at.exception[0].message if at.exception else ""
-    # All four surfaces render
+    # All five surfaces render
     tab_labels = [t.label for t in at.tabs]
-    assert tab_labels == ["Leads", "Pipeline", "Sourcing", "Settings"]
+    assert tab_labels == ["Leads", "Pipeline", "Sourcing", "Database", "Settings"]
     # The seeded lead renders in the default Startups track (stage=launched),
     # titled by its COMPANY — startups-first presentation.
     page_text = " ".join(m.value for m in at.markdown)
@@ -66,3 +66,6 @@ def test_ui_renders_without_exceptions(tmp_path, monkeypatch) -> None:
     # The firm value-add dimension renders (chip + lever bars in Details)
     assert "lift 70%" in page_text
     assert "Local-to-global expansion" in page_text
+    # The Database tab renders the store browser (tiles + row counts)
+    assert "On disk" in page_text
+    assert "matching rows" in page_text
