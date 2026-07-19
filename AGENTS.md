@@ -20,7 +20,9 @@ language: Leads · Pipeline · Sourcing · Settings), managed by **uv**. A thesi
 
 The pipeline: **discover** candidate accounts (free) → run cheap deterministic
 **heuristics** → gate + rank to **Claude** classification (fine-grained:
-stage/sector/subsector/business model/tags + a 0–1 **thesis_fit**; verdicts
+stage/sector/subsector/business model/tags + a 0–1 **thesis_fit** + a 0–1
+**value_add_fit** with per-lever breakdown — would the firm's strategic
+value-add, `thesis.firm_value_add`, accelerate this startup?; verdicts
 cached in the store) → **score** 0–100 → **export** CSV/Markdown → **triage &
 pursue** in the UI. Two agents (`scout/agents.py`): the **strategy agent**
 (plain-language thesis → full thesis.yaml + seeds.yaml proposal) and the
@@ -105,7 +107,8 @@ scout/
     heuristics.py   8 deterministic signals + run_heuristics + intent_appeared.
     llm.py          Claude classification. DEFAULT_PROMPT_TEMPLATE. Batches of 10.
 tests/              pytest — test_heuristics, test_score, test_store, test_sourcing_v2.
-thesis.yaml         Targeting + weights + signal_params + llm_prompt. User-owned.
+thesis.yaml         Targeting + weights + signal_params + firm value-add levers
+                    + llm_prompt. User-owned.
 seeds.yaml          Query bank, bio_searches, watchlist, github_topics. User-owned.
 scout-cli           Bash wrapper → `uv run python -m scout.cli "$@"`.
 conftest.py         sys.path shim for pytest.
@@ -155,6 +158,11 @@ persisted in the `pipeline` table) and **Win** (status/notes/outreach).
 5. `× ((1 − w) + w × llm.thesis_fit)` when the verdict carries `thesis_fit`
    (w = `signal_params.thesis_fit_weight`, default 0.5). Legacy verdicts without
    fit skip this step.
+6. Same shape for `llm.value_add_fit` (w = `signal_params.value_add_weight`) —
+   but the default weight is **0**, so the step only appears when opted into.
+   The value-add dimension (firm levers in `thesis.firm_value_add`, per-lever
+   scores in `llm.value_add_levers`) is otherwise informational: card chip +
+   lever bars, sort option, CSV/report columns, brief context, digest chip.
 
 The 9 signals (heuristics.py). Three read enrichment fields set by the pipeline
 from store history, not by adapters — `recent_followed_by`, `bio_changed`,

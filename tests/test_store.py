@@ -96,6 +96,8 @@ def make_verdict(handle: str = "alice") -> LLMVerdict:
     return LLMVerdict(
         handle=handle, account_type="founder", is_founder=True, stage="launched",
         thesis_fit=0.8, tags=["ai infra"], confidence=0.9,
+        value_add_fit=0.7, value_add_levers={"global_expansion": 0.9},
+        value_add_reason="expanding to the EU next quarter",
     )
 
 
@@ -106,6 +108,8 @@ def test_verdict_cache_hit_on_matching_fingerprint(tmp_path: Path) -> None:
     assert cached is not None
     assert cached.thesis_fit == 0.8
     assert cached.tags == ["ai infra"]
+    assert cached.value_add_fit == 0.7
+    assert cached.value_add_levers == {"global_expansion": 0.9}
 
 
 def test_verdict_cache_misses_on_changed_inputs(tmp_path: Path) -> None:

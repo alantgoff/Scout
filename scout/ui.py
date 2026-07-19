@@ -449,6 +449,8 @@ def _lead_card(
     chips: list[tuple[str, str]] = []
     if verdict and verdict.thesis_fit is not None:
         chips.append((f"Fit {verdict.thesis_fit:.0%}", "accent"))
+    if verdict and verdict.value_add_fit is not None:
+        chips.append((f"{thesis.firm_name or 'Firm'} lift {verdict.value_add_fit:.0%}", "accent"))
     if status != "new":
         chips.append((STATUS_LABELS.get(status, status), "status"))
     if entry and entry.is_new:
@@ -569,6 +571,29 @@ def _lead_card(
             if verdict and verdict.fit_reason:
                 st.markdown(f'<div class="subtle" style="margin-top:6px">Fit — {_e(verdict.fit_reason)}</div>',
                             unsafe_allow_html=True)
+            # The value-add dimension: which of the firm's specific levers
+            # would accelerate this startup, per the classifier.
+            if verdict and verdict.value_add_fit is not None:
+                firm = thesis.firm_name or "Firm"
+                reason = f" — {verdict.value_add_reason}" if verdict.value_add_reason else ""
+                st.markdown(
+                    f'<div class="subtle" style="margin-top:6px">{_e(firm)} lift '
+                    f'{verdict.value_add_fit:.0%}{_e(reason)}</div>',
+                    unsafe_allow_html=True,
+                )
+                lever_labels = {x.key: x.label for x in thesis.firm_value_add}
+                lever_help = {x.key: x.description for x in thesis.firm_value_add}
+                levers = [(k, min(max(v, 0.0), 1.0))
+                          for k, v in verdict.value_add_levers.items() if v > 0]
+                if levers:
+                    rows = "".join(
+                        f'<div class="sigrow"><div class="signame" title="{_e(lever_help.get(k, ""))}">{_e(lever_labels.get(k, k))}</div>'
+                        f'<div class="sigtrack"><div class="sigfill" style="width:{100 * v:.0f}%"></div></div>'
+                        f'<div class="sigpts">{v:.0%}</div>'
+                        f'<div class="sigdetail"></div></div>'
+                        for k, v in sorted(levers, key=lambda kv: -kv[1])
+                    )
+                    st.markdown(f'<div style="margin-top:4px">{rows}</div>', unsafe_allow_html=True)
             if entry and entry.times_seen > 1 and entry.first_seen_at:
                 st.markdown(
                     f'<div class="subtle" style="margin-top:6px">Seen {entry.times_seen}× '
@@ -764,7 +789,9 @@ with tab_leads:
             query = st.text_input("Search", placeholder="Search name, bio, sector, tags…",
                                   label_visibility="collapsed")
         with f2:
-            sort_by = st.selectbox("Sort", ["Score", "Score change", "Thesis fit", "Followers"],
+            lift_sort = f"{thesis.firm_name or 'Value-add'} lift"
+            sort_by = st.selectbox("Sort", ["Score", "Score change", "Thesis fit", lift_sort,
+                                            "Followers"],
                                    label_visibility="collapsed")
         with f3:
             with st.popover(f"Filters · {n_active}" if n_active else "Filters"):
@@ -827,6 +854,9 @@ with tab_leads:
         if sort_by == "Thesis fit":
             shown.sort(key=lambda p: -(p[0].llm.thesis_fit
                                        if p[0].llm and p[0].llm.thesis_fit is not None else -1))
+        elif sort_by == lift_sort:
+            shown.sort(key=lambda p: -(p[0].llm.value_add_fit
+                                       if p[0].llm and p[0].llm.value_add_fit is not None else -1))
         elif sort_by == "Followers":
             shown.sort(key=lambda p: -p[0].account.followers)
         elif sort_by == "Score change":
@@ -1313,7 +1343,8 @@ with tab_sourcing:
         st.markdown("---")
         st.markdown('<div class="subtle">Score = 100 × Σ(value × weight) / Σ(weights), then × Claude '
                     'confidence, × 0.2 if not-a-founder, × stage-fit multiplier, × thesis-fit '
-                    'multiplier. All editable.</div>', unsafe_allow_html=True)
+                    'multiplier, × value-add multiplier (off by default). All editable.</div>',
+                    unsafe_allow_html=True)
         with st.form("signals_form"):
             names = list(SIGNAL_HELP) + [n for n in thesis.weights if n not in SIGNAL_HELP]
             new_weights: dict[str, float] = {}
@@ -1336,8 +1367,15 @@ with tab_sourcing:
                 sm = st.number_input("Off-target stage multiplier", 0.0, 1.0, float(params.stage_mismatch_multiplier), 0.05)
                 fw = st.number_input("Thesis-fit weight", 0.0, 1.0, float(params.thesis_fit_weight), 0.05,
                                      help="0 ignores Claude's thesis_fit; 1 lets it scale the score fully.")
+                vw = st.number_input(f"{thesis.firm_name or 'Firm'} value-add weight", 0.0, 1.0,
+                                     float(params.value_add_weight), 0.05,
+                                     help="How much value_add_fit (would the firm's value-add "
+                                          "accelerate this startup?) sways the score. 0 = "
+                                          "informational only — chips, sort, and exports still "
+                                          "show it.")
             st.divider()
-            st.markdown("**Classifier prompt** — placeholders `{thesis}` `{sectors}` `{stages}`")
+            st.markdown("**Classifier prompt** — placeholders `{thesis}` `{sectors}` `{stages}` "
+                        "`{firm}` `{value_add}`")
             llm_prompt = st.text_area("Prompt", thesis.llm_prompt or DEFAULT_PROMPT_TEMPLATE,
                                       height=260, label_visibility="collapsed")
             if st.form_submit_button("Save signals", type="primary"):
@@ -1347,9 +1385,20 @@ with tab_sourcing:
                     "signal_params": SignalParams(
                         traction_floor=tf, traction_saturation=ts,
                         traction_window_days=int(tw), convergence_full_credit=int(cf),
-                        stage_mismatch_multiplier=sm, thesis_fit_weight=fw),
+                        stage_mismatch_multiplier=sm, thesis_fit_weight=fw,
+                        value_add_weight=vw),
                     "llm_prompt": new_prompt}), THESIS_PATH)
                 st.success("Saved."); st.rerun()
+
+        with st.expander(f"{thesis.firm_name or 'Firm'} value-add levers"):
+            st.markdown(
+                '<div class="subtle">The classifier scores every lead against these levers '
+                '(the per-lever bars in each card\'s Details). Edit them under '
+                '<code>firm_value_add</code> in <code>thesis.yaml</code>.</div>',
+                unsafe_allow_html=True,
+            )
+            for lever in thesis.firm_value_add:
+                st.markdown(f"**{lever.label}** (`{lever.key}`) — {lever.description}")
 
 
 # ============================================================ SETTINGS

@@ -24,6 +24,10 @@ def score_leads(leads: list[Lead], thesis: Thesis) -> list[Lead]:
                           (1 - w) + w × fit, w = signal_params.thesis_fit_weight —
                           a perfect fit keeps the score, an off-thesis lead is
                           scaled down but never to zero on fit alone
+      × value-add multiplier  same shape for value_add_fit (would the firm's
+                          value-add accelerate this startup?), w =
+                          signal_params.value_add_weight — default 0, so the
+                          dimension is informational unless opted into
     """
     for lead in leads:
         steps = score_breakdown(lead, thesis)
@@ -77,5 +81,15 @@ def score_breakdown(lead: Lead, thesis: Thesis) -> list[tuple[str, float]]:
             score *= multiplier
             steps.append(
                 (f"× {multiplier:.2f} (thesis fit {fit:.2f}, weight {w:g})", score)
+            )
+        # Value-add fit only enters the math when opted into (weight > 0) —
+        # at the default 0 it stays a purely informational dimension.
+        if lead.llm.value_add_fit is not None and thesis.signal_params.value_add_weight > 0:
+            w = thesis.signal_params.value_add_weight
+            fit = min(max(lead.llm.value_add_fit, 0.0), 1.0)
+            multiplier = (1.0 - w) + w * fit
+            score *= multiplier
+            steps.append(
+                (f"× {multiplier:.2f} (value-add fit {fit:.2f}, weight {w:g})", score)
             )
     return steps

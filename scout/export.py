@@ -22,6 +22,9 @@ CSV_COLUMNS = [
     "score",
     "thesis_fit",
     "fit_reason",
+    "value_add_fit",
+    "value_add_reason",
+    "value_add_levers",
     "stage",
     "sector",
     "subsector",
@@ -71,6 +74,22 @@ def write_csv(leads: list[Lead], out_dir: Path) -> Path:
                         else ""
                     ),
                     "fit_reason": llm.fit_reason if llm else "",
+                    "value_add_fit": (
+                        f"{llm.value_add_fit:.2f}"
+                        if llm and llm.value_add_fit is not None
+                        else ""
+                    ),
+                    "value_add_reason": llm.value_add_reason if llm else "",
+                    "value_add_levers": (
+                        ";".join(
+                            f"{k}={v:.2f}"
+                            for k, v in sorted(
+                                llm.value_add_levers.items(), key=lambda kv: -kv[1]
+                            )
+                        )
+                        if llm
+                        else ""
+                    ),
                     "stage": (llm.stage or "") if llm else "",
                     "sector": (llm.sector or "") if llm else "",
                     "subsector": (llm.subsector or "") if llm else "",
@@ -88,7 +107,7 @@ def write_csv(leads: list[Lead], out_dir: Path) -> Path:
 
 
 PIPELINE_COLUMNS = [
-    "handle", "name", "url", "status", "score", "thesis_fit",
+    "handle", "name", "url", "status", "score", "thesis_fit", "value_add_fit",
     "notes", "channel", "outreach", "brief", "updated_at",
 ]
 
@@ -116,6 +135,10 @@ def pipeline_rows(store) -> list[dict]:
                 f"{verdict.thesis_fit:.2f}"
                 if verdict and verdict.thesis_fit is not None else ""
             ),
+            "value_add_fit": (
+                f"{verdict.value_add_fit:.2f}"
+                if verdict and verdict.value_add_fit is not None else ""
+            ),
             "notes": entry.get("notes") or "",
             "channel": entry.get("channel") or "",
             "outreach": entry.get("outreach") or "",
@@ -136,7 +159,7 @@ def write_pipeline_csv(rows: list[dict], out_dir: Path) -> Path:
     return path
 
 
-def _lead_card_lines(lead: Lead, index: int) -> list[str]:
+def _lead_card_lines(lead: Lead, index: int, firm: str = "") -> list[str]:
     account = lead.account
     llm = lead.llm
     company = (llm.company_name or "").strip() if llm else ""
@@ -145,6 +168,8 @@ def _lead_card_lines(lead: Lead, index: int) -> list[str]:
     facts = []
     if llm and llm.thesis_fit is not None:
         facts.append(f"fit {llm.thesis_fit:.0%}")
+    if llm and llm.value_add_fit is not None:
+        facts.append(f"{firm or 'firm'} lift {llm.value_add_fit:.0%}")
     if llm and llm.subsector:
         facts.append(llm.subsector)
     if llm and llm.business_model:
@@ -185,13 +210,13 @@ def write_markdown(leads: list[Lead], thesis: Thesis, out_dir: Path) -> Path:
     lines += [f"## Launched startups ({len(launched)})", ""]
     if launched:
         for i, lead in enumerate(launched, start=1):
-            lines += _lead_card_lines(lead, i)
+            lines += _lead_card_lines(lead, i, thesis.firm_name)
     else:
         lines += ["(none in this run)", ""]
     if watch:
         lines += [f"## Pre-launch watch ({len(watch)}) — expected to launch or found soon", ""]
         for i, lead in enumerate(watch, start=1):
-            lines += _lead_card_lines(lead, i)
+            lines += _lead_card_lines(lead, i, thesis.firm_name)
     path.write_text("\n".join(lines), encoding="utf-8")
     return path
 

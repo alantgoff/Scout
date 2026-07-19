@@ -31,7 +31,11 @@ def seed_store(db_path: Path) -> None:
                        subsector="agent evals", business_model="b2b saas",
                        company_name="SmokeCo", company_url="https://smokeco.ai",
                        one_line_summary="Building an eval platform.",
-                       thesis_fit=0.8, confidence=0.9),
+                       thesis_fit=0.8, confidence=0.9,
+                       value_add_fit=0.7,
+                       value_add_levers={"global_expansion": 0.9,
+                                         "data_driven_growth": 0.5},
+                       value_add_reason="EU expansion next; usage-metric heavy"),
         score=62.0, rank=1,
     )
     store.save_leads("run-smoke", [lead])
@@ -59,3 +63,6 @@ def test_ui_renders_without_exceptions(tmp_path, monkeypatch) -> None:
     # Fine-grained fields render on the card face
     assert "Fit 80%" in page_text
     assert "agent evals" in page_text
+    # The firm value-add dimension renders (chip + lever bars in Details)
+    assert "lift 70%" in page_text
+    assert "Local-to-global expansion" in page_text

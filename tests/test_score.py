@@ -172,6 +172,45 @@ def test_thesis_fit_weight_zero_disables_fit() -> None:
     assert score_leads([lead], thesis)[0].score == 100.0
 
 
+def test_value_add_fit_informational_at_default_weight() -> None:
+    """Default value_add_weight is 0 — the dimension never moves the score."""
+    from scout.score import score_breakdown
+
+    thesis = Thesis(weights={"bio_intent": 100.0})
+    lead = make_lead(
+        "a",
+        signals=[Signal(name="bio_intent", value=1.0)],
+        llm=LLMVerdict(handle="a", is_founder=True, confidence=1.0, value_add_fit=0.0),
+    )
+    assert score_leads([lead], thesis)[0].score == 100.0
+    assert not any("value-add" in desc for desc, _ in score_breakdown(lead, thesis))
+
+
+def test_value_add_weight_scales_score() -> None:
+    from scout.config import SignalParams
+
+    thesis = Thesis(
+        weights={"bio_intent": 100.0},
+        signal_params=SignalParams(value_add_weight=0.5),
+    )
+
+    def lead(handle: str, fit: float | None) -> Lead:
+        return make_lead(
+            handle,
+            signals=[Signal(name="bio_intent", value=1.0)],
+            llm=LLMVerdict(handle=handle, is_founder=True, confidence=1.0,
+                           value_add_fit=fit),
+        )
+
+    by = {
+        x.account.handle: x
+        for x in score_leads([lead("a", 1.0), lead("b", 0.0), lead("c", None)], thesis)
+    }
+    assert by["a"].score == 100.0  # firm's value-add fully applies — score kept
+    assert by["b"].score == 50.0   # nothing the firm offers helps — halved at w=0.5
+    assert by["c"].score == 100.0  # legacy verdict without value_add_fit → no step
+
+
 def test_signal_params_drive_traction() -> None:
     from datetime import datetime, timezone
     from scout.config import SignalParams, Thesis

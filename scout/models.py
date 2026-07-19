@@ -110,6 +110,12 @@ class LLMVerdict(BaseModel):
     why_interesting: str = ""
     thesis_fit: float | None = None  # 0..1 — how squarely this matches the thesis
     fit_reason: str = ""  # one line explaining the fit score
+    # v5: would the firm's strategic value-add (thesis.firm_value_add levers)
+    # specifically accelerate this startup? Independent of thesis_fit — a lead
+    # can match the thesis yet need nothing the firm uniquely offers.
+    value_add_fit: float | None = None  # 0..1 aggregate
+    value_add_levers: dict[str, float] = Field(default_factory=dict)  # lever key → 0..1
+    value_add_reason: str = ""  # one line naming the lever(s) that apply
     tags: list[str] = Field(default_factory=list)  # fine-grained descriptors
     confidence: float = 0.0
 

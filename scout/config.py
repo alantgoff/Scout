@@ -35,6 +35,71 @@ DEFAULT_LAUNCH_PHRASES = [
 
 STAGES = ("idea", "stealth", "launched", "scaling")
 
+
+class ValueAddLever(BaseModel):
+    """One lever of the firm's strategic value-add (thesis.yaml → firm_value_add).
+
+    Fed to the classifier so every lead gets a value_add_fit: "which startups
+    would benefit from what THIS firm specifically offers", independent of
+    thesis fit. `key` is the stable id the verdict's per-lever map uses."""
+
+    key: str
+    label: str
+    description: str
+
+
+# Headline's value-add, researched from the firm's own materials (July 2026):
+# regional early-stage funds (US VII $408M / EU VII €320M / Brazil III / Asia V)
+# feeding an $865M Global Growth IV fund, plus the in-house data platforms
+# (EVA sourcing, ATHENA analytics, Searchlight, founder-facing Deepdive).
+# Overridable per-thesis via `firm_value_add` in thesis.yaml.
+DEFAULT_VALUE_ADD_LEVERS = [
+    ValueAddLever(
+        key="global_expansion",
+        label="Local-to-global expansion",
+        description=(
+            "Autonomous local funds in the US, Europe, Latin America, and Asia "
+            "connected into one global platform — startups whose product or "
+            "go-to-market must cross borders early (multi-region customers, "
+            "US↔EU expansion, international marketplaces) get on-the-ground "
+            "help in each market."
+        ),
+    ),
+    ValueAddLever(
+        key="follow_on_capital",
+        label="Multi-stage follow-on capital",
+        description=(
+            "Early-stage checks of $1.5–15M chain into an $865M growth fund "
+            "writing $20–70M from Series B — startups on capital-intensive "
+            "trajectories (infra buildout, GPU spend, market-by-market "
+            "expansion) that will need deep follow-on rounds benefit most."
+        ),
+    ),
+    ValueAddLever(
+        key="data_driven_growth",
+        label="Data-driven growth benchmarking",
+        description=(
+            "Proprietary systems (EVA sourcing, ATHENA analytics, Searchlight, "
+            "the founder-facing Deepdive) benchmark traction, retention, and "
+            "product-market fit against one of the largest startup datasets in "
+            "venture — startups with measurable usage or revenue metrics "
+            "(consumer, marketplaces, usage-based SaaS, PLG devtools) can be "
+            "benchmarked and coached with it."
+        ),
+    ),
+    ValueAddLever(
+        key="sector_playbooks",
+        label="Sector depth & portfolio network",
+        description=(
+            "Operator networks and repeat playbooks in fintech, "
+            "commerce/consumer, B2B SaaS, and AI infrastructure (portfolio "
+            "includes Mistral AI, NGINX, Sonos, Bumble, Gopuff, Acorns, "
+            "Raisin) — startups in these lanes tap portfolio intros, customer "
+            "pipelines, and hiring networks."
+        ),
+    ),
+]
+
 # Which X-search query categories are worth running for each target stage.
 STAGE_SEARCH_CATEGORIES: dict[str, set[str]] = {
     "idea": {"departure", "search"},
@@ -67,6 +132,10 @@ class SignalParams(BaseModel):
     # How much Claude's thesis_fit (0..1) sways the final score:
     # multiplier = (1 - w) + w × fit. 0 = ignore fit, 1 = fit scales fully.
     thesis_fit_weight: float = 0.5
+    # Same shape for value_add_fit (would the firm's value-add accelerate this
+    # startup?). Defaults to 0 — an informational dimension that never moves
+    # the score unless you opt in.
+    value_add_weight: float = 0.0
 
 
 class Thesis(BaseModel):
@@ -84,8 +153,14 @@ class Thesis(BaseModel):
     # Which company stages to hunt (drives search strategy AND scoring fit).
     target_stages: list[str] = Field(default_factory=lambda: list(STAGES))
     signal_params: SignalParams = Field(default_factory=SignalParams)
+    # The firm whose value-add the classifier scores leads against.
+    firm_name: str = "Headline"
+    firm_value_add: list[ValueAddLever] = Field(
+        default_factory=lambda: [x.model_copy() for x in DEFAULT_VALUE_ADD_LEVERS]
+    )
     # Optional override of the Claude classification system prompt.
-    # Placeholders: {thesis} {sectors} {stages}. Empty = built-in default.
+    # Placeholders: {thesis} {sectors} {stages} {firm} {value_add}.
+    # Empty = built-in default.
     llm_prompt: str = ""
 
     @property

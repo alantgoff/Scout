@@ -44,11 +44,14 @@ _CORRECTIVE_NOTE = (
 
 # Default classification prompt. Editable per-thesis via thesis.llm_prompt
 # (UI: Sourcing → Signals & scoring); placeholders {thesis} {sectors} {stages}
-# are substituted.
-DEFAULT_PROMPT_TEMPLATE = """You are a venture analyst screening Twitter/X accounts for startup leads.
+# {firm} {value_add} are substituted.
+DEFAULT_PROMPT_TEMPLATE = """You are a venture analyst at {firm} screening Twitter/X accounts for startup leads.
 Investment thesis: {thesis}
 Sectors of interest: {sectors}
 Target stages: {stages}
+
+{firm}'s strategic value-add — what the firm specifically offers portfolio companies:
+{value_add}
 
 For each account in the user message decide:
 - account_type: "founder" (a person building a company), "startup" (the company's own account), or "other" (corporate account, investor, commentator, hobbyist)
@@ -60,13 +63,16 @@ For each account in the user message decide:
 - business_model: one of "b2b saas", "devtools", "infra", "consumer", "marketplace", "api", "open source", "hardware", "services", "other"
 - thesis_fit: 0.0-1.0 — how squarely this account matches the investment thesis above. 1.0 = textbook match on space, stage, and founder profile; 0.5 = adjacent; 0.0 = unrelated. Judge against the thesis, not general quality.
 - fit_reason: one short sentence justifying thesis_fit
+- value_add_levers: an object mapping EACH lever key listed above to 0.0-1.0 — how much that specific lever would accelerate this startup (0.0 = irrelevant to them, 1.0 = exactly what they need next)
+- value_add_fit: 0.0-1.0 — overall, how much {firm}'s value-add above would accelerate this startup. Judge independently of thesis_fit: a lead can match the thesis yet need nothing the firm uniquely offers, or vice versa.
+- value_add_reason: one short sentence naming the strongest lever(s) and why they apply
 - tags: 2-5 lowercase descriptors a VC would filter on (e.g. "rl environments", "ex-deepmind", "open source", "seed stage")
 - one_line_summary: what they are building, specifically
 - why_interesting: why (or why not) worth a VC conversation
 - confidence: 0-1 confidence in this classification overall
 
 Respond with ONLY a JSON array, one object per account, no other text:
-[{{"handle": str, "account_type": "founder"|"startup"|"other", "is_founder": bool, "stage": "idea"|"stealth"|"launched"|"scaling", "company_name": str|null, "company_url": str|null, "sector": str, "subsector": str, "business_model": str, "thesis_fit": 0-1, "fit_reason": str, "tags": [str], "one_line_summary": str, "why_interesting": str, "confidence": 0-1}}]"""
+[{{"handle": str, "account_type": "founder"|"startup"|"other", "is_founder": bool, "stage": "idea"|"stealth"|"launched"|"scaling", "company_name": str|null, "company_url": str|null, "sector": str, "subsector": str, "business_model": str, "thesis_fit": 0-1, "fit_reason": str, "value_add_levers": {{"lever_key": 0-1}}, "value_add_fit": 0-1, "value_add_reason": str, "tags": [str], "one_line_summary": str, "why_interesting": str, "confidence": 0-1}}]"""
 
 
 def _system_prompt(thesis: Thesis) -> str:
@@ -75,6 +81,12 @@ def _system_prompt(thesis: Thesis) -> str:
         "thesis": thesis.thesis,
         "sectors": ", ".join(thesis.sectors),
         "stages": ", ".join(thesis.target_stages),
+        "firm": thesis.firm_name or "the firm",
+        "value_add": "\n".join(
+            f"- {lever.key} — {lever.label}: {lever.description}"
+            for lever in thesis.firm_value_add
+        )
+        or "(no value-add levers defined)",
     }
     try:
         return template.format(**context)

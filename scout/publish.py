@@ -53,11 +53,14 @@ def _is_prelaunch(lead: Lead) -> bool:
     )
 
 
-def _chips(lead: Lead, entry: LedgerEntry | None, status: str | None) -> str:
+def _chips(lead: Lead, entry: LedgerEntry | None, status: str | None,
+           firm: str = "") -> str:
     verdict = lead.llm
     chips: list[tuple[str, str]] = []
     if verdict and verdict.thesis_fit is not None:
         chips.append((f"Fit {verdict.thesis_fit:.0%}", "accent"))
+    if verdict and verdict.value_add_fit is not None:
+        chips.append((f"{firm or 'Firm'} lift {verdict.value_add_fit:.0%}", "accent"))
     if status:
         chips.append((STATUS_LABELS.get(status, status), "status"))
     if entry and entry.is_new:
@@ -76,7 +79,7 @@ def _chips(lead: Lead, entry: LedgerEntry | None, status: str | None) -> str:
 
 
 def _card(primary: Lead, entry: LedgerEntry | None, secondaries: list[Lead],
-          pipeline_row: dict, startup: bool) -> str:
+          pipeline_row: dict, startup: bool, firm: str = "") -> str:
     account, verdict = primary.account, primary.llm
     if startup and verdict and verdict.company_name:
         title = verdict.company_name
@@ -104,7 +107,7 @@ def _card(primary: Lead, entry: LedgerEntry | None, secondaries: list[Lead],
     <div class="grow">
       <div class="name">{title_html} <span class="sub">{_e(subtitle)}</span></div>
       <div class="summary">{_e(summary)}</div>
-      {_chips(primary, entry, status if status and status != "new" else None)}
+      {_chips(primary, entry, status if status and status != "new" else None, firm)}
       {f'<div class="why">{_e(why)}</div>' if why else ''}
       {also}
       {brief_html}
@@ -131,10 +134,12 @@ def build_digest(store: Store, thesis: Thesis, out_dir: Path) -> Path:
         return pipeline.get(lead.account.handle.lower(), {})
 
     startup_cards = "\n".join(
-        _card(p, e, secs, row_for(p), startup=True) for p, e, secs in startups
+        _card(p, e, secs, row_for(p), startup=True, firm=thesis.firm_name)
+        for p, e, secs in startups
     )
     watch_cards = "\n".join(
-        _card(x, e, [], row_for(x), startup=False) for x, e in watch
+        _card(x, e, [], row_for(x), startup=False, firm=thesis.firm_name)
+        for x, e in watch
     )
     updated = datetime.now(timezone.utc).strftime("%b %d, %H:%M UTC")
 

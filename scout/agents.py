@@ -333,6 +333,17 @@ def _brief_context(lead: Lead, thesis: Thesis) -> str:
         ]
         if verdict.thesis_fit is not None:
             lines.append(f"Thesis fit: {verdict.thesis_fit:.2f} — {verdict.fit_reason}")
+        if verdict.value_add_fit is not None:
+            lever_labels = {x.key: x.label for x in thesis.firm_value_add}
+            top = sorted(verdict.value_add_levers.items(), key=lambda kv: -kv[1])[:3]
+            levers = ", ".join(
+                f"{lever_labels.get(k, k)} {v:.0%}" for k, v in top if v > 0
+            )
+            lines.append(
+                f"{thesis.firm_name or 'Firm'} value-add fit: {verdict.value_add_fit:.2f}"
+                f" — {verdict.value_add_reason}"
+                + (f" (levers: {levers})" if levers else "")
+            )
         if verdict.tags:
             lines.append(f"Tags: {', '.join(verdict.tags)}")
     return "\n".join(lines)

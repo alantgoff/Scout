@@ -169,8 +169,10 @@ All targeting lives here — the code never hardcodes keywords.
 | `sectors` | Sectors you care about; LLM context + HN search terms. |
 | `disqualifiers` | Any of these in a bio → account dropped entirely (no score). |
 | `weights` | Per-signal weights for the 0–100 score (relative). |
-| `signal_params` | Tunable constants: traction floor/saturation/window, convergence full-credit threshold, off-target stage multiplier. |
-| `llm_prompt` | Optional override of the Claude classification prompt (placeholders `{thesis}` `{sectors}` `{stages}`). Empty = built-in default. |
+| `signal_params` | Tunable constants: traction floor/saturation/window, convergence full-credit threshold, off-target stage multiplier, thesis-fit weight, value-add weight. |
+| `firm_name` | The firm whose value-add leads are scored against (default: Headline). |
+| `firm_value_add` | The firm's strategic value-add levers (`key`/`label`/`description`), fed verbatim to the classifier. Ships with Headline's four levers; edit to re-target. |
+| `llm_prompt` | Optional override of the Claude classification prompt (placeholders `{thesis}` `{sectors}` `{stages}` `{firm}` `{value_add}`). Empty = built-in default. |
 
 **How the score works** (see it stepped out live in each lead card):
 `base = 100 × Σ(weight_i × value_i) / Σ(all weights)` — weights are relative, so
@@ -179,7 +181,37 @@ All targeting lives here — the code never hardcodes keywords.
 (default 0.5) when the classified stage is off-target, and
 `× ((1 − w) + w × thesis_fit)` where `w = signal_params.thesis_fit_weight`
 (default 0.5) — a textbook thesis match keeps its score, an off-thesis lead is
-scaled down but never zeroed on fit alone.
+scaled down but never zeroed on fit alone. The same shape applies to
+`value_add_fit` via `signal_params.value_add_weight`, but that weight defaults
+to **0** — the value-add dimension is informational unless you opt it into the
+ranking.
+
+### Headline value-add fit — which startups benefit from what Headline offers
+
+Beyond "does this startup match the thesis?", every classified lead also gets a
+**value-add fit**: would *Headline's* specific strategic value-add accelerate
+this particular startup? The firm's levers live in `thesis.yaml →
+firm_value_add` (edit them there; the classifier receives them verbatim) and
+ship pre-filled from Headline's own materials:
+
+1. **Local-to-global expansion** — autonomous local funds (US, Europe, LatAm,
+   Asia) on one global platform; benefits startups that must cross borders early.
+2. **Multi-stage follow-on capital** — $1.5–15M early checks chaining into the
+   $865M Global Growth IV fund ($20–70M from Series B); benefits
+   capital-intensive trajectories.
+3. **Data-driven growth benchmarking** — Headline's in-house systems (EVA
+   sourcing, ATHENA analytics, Searchlight, the founder-facing Deepdive);
+   benefits metrics-rich models the platform can benchmark and coach.
+4. **Sector depth & portfolio network** — fintech, commerce/consumer, B2B SaaS,
+   AI infra (Mistral AI, NGINX, Sonos, Bumble, Gopuff…); benefits startups in
+   those lanes.
+
+Each verdict returns a 0–1 `value_add_fit`, a per-lever breakdown, and a
+one-line reason. It surfaces as a **"Headline lift" chip** on lead cards (with
+per-lever bars and the reason under Details), a **sort option**, columns in the
+leads/pipeline CSVs and the Markdown report, a line in AI research briefs, and
+a chip on the phone digest. Judged independently of thesis fit: a lead can
+match the thesis yet need nothing Headline uniquely offers — and vice versa.
 
 The nine signals the heuristics emit (names must match in `weights`):
 `bio_intent`, `departure_signal`, `bio_change`, `smart_money_follow`,

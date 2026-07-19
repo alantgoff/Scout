@@ -60,6 +60,13 @@ def _context(lead: Lead, thesis: Thesis) -> str:
             lines.append(f"Stage: {v.stage}")
         if v.why_interesting:
             lines.append(f"Why interesting: {v.why_interesting}")
+        # Give the drafter the firm-specific hook: which of our value-add
+        # levers this startup would actually benefit from.
+        if v.value_add_fit is not None and v.value_add_reason:
+            lines.append(
+                f"How {thesis.firm_name or 'we'} could specifically help them "
+                f"(mention only if it reads naturally): {v.value_add_reason}"
+            )
     if thesis.thesis:
         lines.append(f"Our thesis: {thesis.thesis}")
     return "\n".join(lines)
