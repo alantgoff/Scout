@@ -243,3 +243,99 @@ def test_apply_verification_unverifiable_caps_confidence() -> None:
     )
     assert fixed.confidence <= 0.3
     assert fixed.verification == "unverifiable"
+
+
+# --- v7: quality rubric + customer_type ---------------------------------------
+
+
+def test_parse_verdicts_with_quality_fields() -> None:
+    payload = [{
+        "handle": "acme", "account_type": "founder", "is_founder": True,
+        "stage": "launched", "grounding": "website", "customer_type": "B2B",
+        "quality": {"team": 0.7, "traction": 0.5, "moat_invented": 0.9},
+        "quality_reasons": {"team": "prev sold DevCo to Datadog",
+                            "traction": "website: 12 customer logos"},
+        "sector": "devtools", "thesis_fit": 0.4, "confidence": 0.8,
+    }]
+    verdict = _parse_verdicts(json.dumps(payload))[0]
+    assert verdict.customer_type == "b2b"  # normalized from "B2B"
+    assert verdict.quality["traction"] == 0.5
+    assert "logos" in verdict.quality_reasons["traction"]
+
+
+def test_customer_type_normalization() -> None:
+    for raw, expected in [("B2C", "b2c"), ("consumer", "b2c"),
+                          ("Enterprise", "b2b"), ("b2b/b2c", "mixed"),
+                          ("weird-vertical", None), (None, None), (7, None)]:
+        verdict = LLMVerdict(handle="x", customer_type=raw)
+        assert verdict.customer_type == expected, raw
+
+
+def test_legacy_v6_payload_has_empty_quality() -> None:
+    payload = [{"handle": "old", "account_type": "founder", "is_founder": True,
+                "grounding": "website", "confidence": 0.8}]
+    verdict = _parse_verdicts(json.dumps(payload))[0]
+    assert verdict.quality == {}
+    assert verdict.quality_reasons == {}
+    assert verdict.customer_type is None
+
+
+def test_prompt_carries_quality_rubric_and_lenses() -> None:
+    prompt = _system_prompt(Thesis(thesis="edge ai"))
+    assert "QUALITY RUBRIC" in prompt
+    assert "customer_type" in prompt
+    assert "case studies" in prompt  # b2b lens wording
+    assert "retention" in prompt  # b2c lens wording
+    assert "at most 0.3" in prompt  # watchlist-follow cap for investors dim
+    assert "OMIT the key" in prompt
+
+
+def test_custom_prompt_still_gets_quality_evidence_rules() -> None:
+    thesis = Thesis(llm_prompt="Custom: {thesis}", thesis="agents")
+    prompt = _system_prompt(thesis)
+    assert "QUALITY DIMS" in prompt  # EVIDENCE_RULES addition survives
+
+
+def test_dossier_includes_watchlist_follow_lines() -> None:
+    account = make_account()
+    account.followed_by = ["vc_ann", "vc_bob"]
+    account.recent_followed_by = ["vc_ann"]
+    text = _format_account(account, make_tweets(), None)
+    assert "followed by watchlist investors: vc_ann, vc_bob" in text
+    assert "newly followed this window by: vc_ann" in text
+
+
+def test_apply_verification_replaces_quality_wholesale() -> None:
+    from scout.signals.llm import VerificationResult, apply_verification
+
+    verdict = make_verdict()
+    verdict = verdict.model_copy(update={
+        "customer_type": "b2b",
+        "quality": {"team": 0.9, "traction": 0.8, "market": 0.7},
+        "quality_reasons": {"team": "x", "traction": "y", "market": "z"},
+    })
+    result = VerificationResult(
+        handle="benhylak", verification="corrected",
+        corrections={
+            "quality": {"team": 0.9},  # traction/market had no evidence
+            "quality_reasons": {"team": "prev @apple design lead (concrete)"},
+            "customer_type": "b2c",
+        },
+        note="traction and market scores were uncited",
+    )
+    fixed = apply_verification(verdict, result)
+    assert fixed.quality == {"team": 0.9}  # wholesale replace
+    assert "traction" not in fixed.quality_reasons
+    assert fixed.customer_type == "b2c"
+
+
+def test_verify_user_claim_includes_quality() -> None:
+    from scout.models import Lead
+    from scout.signals.llm import _verify_user
+
+    lead = Lead(account=make_account(),
+                llm=make_verdict().model_copy(update={
+                    "customer_type": "b2b", "quality": {"team": 0.5}}))
+    claim_text = _verify_user(lead, make_tweets(), None, 2000)
+    assert '"quality"' in claim_text
+    assert '"customer_type"' in claim_text

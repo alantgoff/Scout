@@ -75,13 +75,26 @@ For each account in the user message decide:
 - value_add_levers: an object mapping EACH lever key listed above to 0.0-1.0 — how much that specific lever would accelerate this startup (0.0 = irrelevant to them, 1.0 = exactly what they need next)
 - value_add_fit: 0.0-1.0 — overall, how much {firm}'s value-add above would accelerate this startup. Judge independently of thesis_fit: a lead can match the thesis yet need nothing the firm uniquely offers, or vice versa.
 - value_add_reason: one short sentence naming the strongest lever(s) and why they apply
+- customer_type: who the company sells to — "b2b" (businesses), "b2c" (consumers), "b2b2c" (businesses that serve consumers), "mixed", or null when the product itself is not established. This picks the lens for the quality rubric below.
+
+QUALITY RUBRIC — judge the COMPANY itself, dimension by dimension, 0.0-1.0, from evidence only. Put scores in "quality" and a <=15-word evidence citation per scored dimension in "quality_reasons" (e.g. "website: Stripe + Vercel logos, SOC2 page"). Score ONLY dimensions the evidence supports — OMIT the key entirely when there is no evidence (most early startups have 2-4 scorable dimensions; omitting is honest, guessing is wrong):
+- team: strength of the founders AS BUILDERS OF THIS COMPANY — prior founded companies or exits, senior/staff-level experience in the product's exact domain, notable shipped work (papers, OSS with real adoption). This is the ONE dimension where founder background IS the evidence — cite specifics, never vibes. It still says nothing about what the product is.
+- tech_product: evidence the technology is real and working — live product, demos, docs, changelog, technical depth on the site/GitHub, shipping cadence in tweets. A marketing-only site with no product surface scores low.
+- market: size and urgency of the problem the PRODUCT addresses — a clear buyer (b2b: who pays, how big the budget) or audience (b2c: how many, how often). Judge from what the product does, not hype.
+- defensibility: moat evidence — proprietary data or hardware, deep tech, patents; b2b: workflow lock-in, integrations, compliance depth; b2c: network effects, brand, habit. Thin wrappers on commodity APIs with no unique asset score low.
+- traction, through the customer_type lens:
+  b2b: named customers/logos, case studies, paying pilots, "trusted by" walls, integration marketplace listings, SOC2/security pages, revenue or pipeline claims.
+  b2c: user counts, growth/retention claims, app-store rankings, waitlist size, organic virality (engagement, UGC), community size.
+  b2b2c/mixed: whichever side the evidence shows — name which in quality_reasons.
+- investors: NAMED investors or rounds only — investor names/logos on the website, funding announcements, accelerator badges (e.g. YC W25). Watchlist follows in the dossier show investor ATTENTION, not investment — alone they justify at most 0.3. No investor evidence -> omit the key.
+
 - tags: 2-5 lowercase descriptors a VC would filter on (e.g. "rl environments", "ex-deepmind", "open source", "seed stage")
 - one_line_summary: what they are building, specifically
 - why_interesting: why (or why not) worth a VC conversation
 - confidence: 0-1 confidence in this classification overall
 
 Respond with ONLY a JSON array, one object per account, no other text:
-[{{"handle": str, "account_type": "founder"|"startup"|"other", "is_founder": bool, "stage": "idea"|"stealth"|"launched"|"scaling", "company_name": str|null, "company_url": str|null, "product_summary": str|null, "grounding": "website"|"pinned_tweet"|"tweets"|"github"|"bio"|"none", "sector": str|null, "subsector": str|null, "business_model": str|null, "thesis_fit": 0-1, "fit_reason": str, "value_add_levers": {{"lever_key": 0-1}}, "value_add_fit": 0-1, "value_add_reason": str, "tags": [str], "one_line_summary": str, "why_interesting": str, "confidence": 0-1}}]"""
+[{{"handle": str, "account_type": "founder"|"startup"|"other", "is_founder": bool, "stage": "idea"|"stealth"|"launched"|"scaling", "company_name": str|null, "company_url": str|null, "product_summary": str|null, "grounding": "website"|"pinned_tweet"|"tweets"|"github"|"bio"|"none", "customer_type": "b2b"|"b2c"|"b2b2c"|"mixed"|null, "quality": {{"team": 0-1, "tech_product": 0-1, "market": 0-1, "defensibility": 0-1, "traction": 0-1, "investors": 0-1}} (OMIT dims without evidence), "quality_reasons": {{"dim": str}}, "sector": str|null, "subsector": str|null, "business_model": str|null, "thesis_fit": 0-1, "fit_reason": str, "value_add_levers": {{"lever_key": 0-1}}, "value_add_fit": 0-1, "value_add_reason": str, "tags": [str], "one_line_summary": str, "why_interesting": str, "confidence": 0-1}}]"""
 
 
 # Non-negotiable grounding rules, appended to EVERY system prompt — including
@@ -107,6 +120,13 @@ EVIDENCE RULES — these override everything above:
   A wrong guess is worse than an honest unknown.
 - thesis_fit judges the PRODUCT against the thesis. Product unknown ->
   thesis_fit <= 0.3, no matter how impressive the founder.
+- QUALITY DIMS: score a quality dimension only from evidence you can cite in
+  quality_reasons; OMIT the key otherwise. Never award quality for polish,
+  hype, or pedigree-by-association. team is the ONLY dimension where founder
+  background counts — as team evidence, cited concretely — and it never
+  establishes sector, product, market, or any other dimension.
+- Product unknown -> customer_type null and quality limited to team-only at
+  most (concrete founder history); every other dimension omitted.
 - Website text may be in any language, or thin (JS-heavy sites). Thin or
   missing website text is weak evidence — do not stretch it. A website
   marked unreachable is NOT evidence of anything.
@@ -185,6 +205,15 @@ def _format_account(
         f"website: {account.website or '(none listed)'}",
         f"followers: {account.followers}",
     ]
+    # Investor-attention evidence for the quality rubric. Like `followers`,
+    # follow lists are NOT part of _fingerprint — bounded staleness under the
+    # verdict TTL is accepted.
+    if account.followed_by:
+        lines.append("followed by watchlist investors: "
+                     + ", ".join(account.followed_by[:8]))
+    if account.recent_followed_by:
+        lines.append("newly followed this window by: "
+                     + ", ".join(account.recent_followed_by[:8]))
     if account.github_repo:
         lines.append(f"github repo: {account.github_repo}")
     if site is not None and site.usable:
@@ -287,7 +316,7 @@ def _classify_batch(
     prompt = base_prompt
     # Richer dossiers (site text, 10 tweets) need real output headroom per
     # account — a truncated JSON array is a wasted corrective retry.
-    max_tokens = min(8192, max(2048, 1200 * len(batch)))
+    max_tokens = min(8192, max(2048, 1400 * len(batch)))
     last_error: Exception | None = None
     for _ in range(PARSE_ATTEMPTS):
         text = _call_claude(client, model, system_prompt, prompt, max_tokens)
@@ -455,9 +484,10 @@ You get the lead's evidence dossier (bio, website text, tweets, github) and the 
 - Does the website text contradict the verdict? The website wins.
 - Is thesis_fit justified by the PRODUCT?
 - Is product_summary actually supported by the evidence it cites?
+- Is every quality dimension score backed by the evidence its quality_reasons cites? team is the ONLY dimension where founder background counts. When correcting quality, return the COMPLETE corrected "quality" and "quality_reasons" objects (they replace wholesale) and drop any dimension whose evidence does not exist in the dossier. For "unverifiable", quality should be {{}} or team-only.
 
 Respond with ONLY a JSON object, no other text:
-{{"handle": str, "verification": "confirmed"|"corrected"|"unverifiable", "corrections": {{}} or any of {{"sector": str|null, "subsector": str|null, "business_model": str|null, "stage": "idea"|"stealth"|"launched"|"scaling", "thesis_fit": 0-1, "product_summary": str|null, "one_line_summary": str, "grounding": "website"|"pinned_tweet"|"tweets"|"github"|"bio"|"none", "confidence": 0-1}}, "note": str}}
+{{"handle": str, "verification": "confirmed"|"corrected"|"unverifiable", "corrections": {{}} or any of {{"sector": str|null, "subsector": str|null, "business_model": str|null, "stage": "idea"|"stealth"|"launched"|"scaling", "thesis_fit": 0-1, "product_summary": str|null, "one_line_summary": str, "grounding": "website"|"pinned_tweet"|"tweets"|"github"|"bio"|"none", "customer_type": "b2b"|"b2c"|"b2b2c"|"mixed"|null, "quality": {{"dim": 0-1}}, "quality_reasons": {{"dim": str}}, "confidence": 0-1}}, "note": str}}
 
 "confirmed": the evidence supports the verdict — leave corrections empty.
 "corrected": the evidence contradicts part of it — put ONLY the fixed fields in corrections, and say what was wrong in note.
@@ -467,6 +497,7 @@ Respond with ONLY a JSON object, no other text:
 _CORRECTION_FIELDS = {
     "sector", "subsector", "business_model", "stage", "thesis_fit",
     "product_summary", "one_line_summary", "grounding", "confidence",
+    "customer_type", "quality", "quality_reasons",
 }
 
 
@@ -515,9 +546,9 @@ def _verify_user(lead: Lead, tweets: list[Tweet], site: SitePage | None,
     assert verdict is not None
     claim = verdict.model_dump(include={
         "handle", "account_type", "stage", "company_name", "company_url",
-        "product_summary", "grounding", "sector", "subsector",
-        "business_model", "thesis_fit", "fit_reason", "one_line_summary",
-        "confidence",
+        "product_summary", "grounding", "customer_type", "quality",
+        "quality_reasons", "sector", "subsector", "business_model",
+        "thesis_fit", "fit_reason", "one_line_summary", "confidence",
     })
     return (
         "DOSSIER:\n"
@@ -540,7 +571,7 @@ def _verify_one(
     prompt = base
     last_error: Exception | None = None
     for _ in range(PARSE_ATTEMPTS):
-        text = _call_claude(client, model, system, prompt, max_tokens=1000)
+        text = _call_claude(client, model, system, prompt, max_tokens=1500)
         try:
             return parse_verification(text)
         except (json.JSONDecodeError, ValidationError, ValueError) as exc:
