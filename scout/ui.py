@@ -51,6 +51,8 @@ from scout.agents import (
     validate_watchlist,
 )
 from scout.config import (
+    CUSTOMER_TYPES,
+    QUALITY_DIMENSIONS,
     STAGES,
     Seeds,
     Settings,
@@ -66,7 +68,7 @@ from scout.export import pipeline_rows, write_pipeline_csv
 from scout.insights import stats_prompt, triage_stats
 from scout.models import Lead, LedgerEntry, LLMVerdict
 from scout.outreach import CHANNELS, draft_outreach
-from scout.score import score_breakdown
+from scout.score import quality_score, score_breakdown, score_components
 from scout.signals.llm import DEFAULT_PROMPT_TEMPLATE
 from scout.store import Store
 
@@ -1978,9 +1980,11 @@ with tab_thesis:
                     st.session_state.pop("weight_proposal", None)
                     st.rerun()
         st.markdown("---")
-        st.markdown('<div class="subtle">Score = 100 × Σ(value × weight) / Σ(weights), then × Claude '
-                    'confidence, × 0.2 if not-a-founder, × stage-fit multiplier, × thesis-fit '
-                    'multiplier, × value-add multiplier (off by default). All editable.</div>',
+        st.markdown('<div class="subtle">Score = blend of <b>company quality</b> (evidence-backed '
+                    'rubric), <b>thesis fit</b>, and <b>X signals</b> — weighted 45/35/20 by '
+                    'default, renormalized over what each lead evidences — then × Claude '
+                    'confidence, × 0.2 if not-a-founder, × stage multiplier, × value-add '
+                    'multiplier (off by default), × ungrounded multiplier. All editable.</div>',
                     unsafe_allow_html=True)
         with st.form("signals_form"):
             names = list(SIGNAL_HELP) + [n for n in thesis.weights if n not in SIGNAL_HELP]
@@ -1992,7 +1996,34 @@ with tab_thesis:
                         new_weights[name] = float(st.slider(name, 0, 50, int(thesis.weights.get(name, 0)),
                                                              help=SIGNAL_HELP.get(name, "")))
             st.divider()
+            st.markdown("**Final score blend** — quality / fit / signals, renormalized "
+                        "over whatever a lead evidences")
             params = thesis.signal_params
+            b1, b2, b3 = st.columns(3)
+            with b1:
+                wq = st.number_input("Company quality weight", 0.0, 1.0,
+                                     float(params.score_weight_quality), 0.05,
+                                     help="Claude's evidence-backed quality rubric "
+                                          "(team, tech, market, moat, traction, investors).")
+            with b2:
+                wf = st.number_input("Thesis fit weight", 0.0, 1.0,
+                                     float(params.score_weight_fit), 0.05,
+                                     help="How squarely the PRODUCT matches the thesis.")
+            with b3:
+                ws = st.number_input("X-signal weight", 0.0, 1.0,
+                                     float(params.score_weight_signals), 0.05,
+                                     help="Momentum: smart-money follows, launch traction, "
+                                          "departures — the deterministic signal score.")
+            st.markdown("**Quality dimensions** — relative weights inside the quality component")
+            new_quality_weights: dict[str, float] = {}
+            qcols = st.columns(3)
+            for i, (dim_key, dim_help) in enumerate(QUALITY_DIMENSIONS.items()):
+                with qcols[i % 3]:
+                    new_quality_weights[dim_key] = float(st.slider(
+                        dim_key.replace("_", " & ") if dim_key == "tech_product" else dim_key,
+                        0, 50, int(thesis.quality_weights.get(dim_key, 0)),
+                        help=dim_help, key=f"qw_{dim_key}"))
+            st.divider()
             q1, q2, q3 = st.columns(3)
             with q1:
                 tf = st.number_input("Traction floor (eng/followers)", 0.0, 1.0, float(params.traction_floor), 0.01)
@@ -2002,8 +2033,11 @@ with tab_thesis:
                 cf = st.number_input("Convergence full-credit follows", 1, 10, int(params.convergence_full_credit))
             with q3:
                 sm = st.number_input("Off-target stage multiplier", 0.0, 1.0, float(params.stage_mismatch_multiplier), 0.05)
-                fw = st.number_input("Thesis-fit weight", 0.0, 1.0, float(params.thesis_fit_weight), 0.05,
-                                     help="0 ignores Claude's thesis_fit; 1 lets it scale the score fully.")
+                um = st.number_input("Ungrounded multiplier", 0.0, 1.0,
+                                     float(params.ungrounded_multiplier), 0.05,
+                                     help="Score × this when the product claim never traced "
+                                          "to evidence (audit 'unverifiable', or unaudited "
+                                          "with grounding none/bio).")
                 vw = st.number_input(f"{thesis.firm_name or 'Firm'} value-add weight", 0.0, 1.0,
                                      float(params.value_add_weight), 0.05,
                                      help="How much value_add_fit (would the firm's value-add "
@@ -2019,11 +2053,16 @@ with tab_thesis:
                 new_prompt = "" if llm_prompt.strip() == DEFAULT_PROMPT_TEMPLATE.strip() else llm_prompt
                 save_thesis(thesis.model_copy(update={
                     "weights": {k: float(v) for k, v in new_weights.items()},
+                    "quality_weights": new_quality_weights,
+                    # Every param must be listed — a missing one silently
+                    # resets to its default on save.
                     "signal_params": SignalParams(
                         traction_floor=tf, traction_saturation=ts,
                         traction_window_days=int(tw), convergence_full_credit=int(cf),
-                        stage_mismatch_multiplier=sm, thesis_fit_weight=fw,
-                        value_add_weight=vw),
+                        stage_mismatch_multiplier=sm,
+                        score_weight_quality=wq, score_weight_fit=wf,
+                        score_weight_signals=ws,
+                        value_add_weight=vw, ungrounded_multiplier=um),
                     "llm_prompt": new_prompt}), THESIS_PATH)
                 st.success("Saved."); st.rerun()
 

@@ -1,12 +1,12 @@
-"""Unit tests for score.py aggregation (spec §7: encodes the thesis math)."""
+"""Unit tests for score.py — the quality/fit/signals blend + multiplier chain."""
 
 from __future__ import annotations
 
 import pytest
 
-from scout.config import Thesis
+from scout.config import SignalParams, Thesis
 from scout.models import Account, Lead, LLMVerdict, Signal
-from scout.score import score_breakdown, score_leads
+from scout.score import quality_score, score_breakdown, score_leads
 
 # Spec §3 defaults: total weight 100, so contributions read as points.
 DEFAULT_WEIGHTS: dict[str, float] = {
@@ -18,8 +18,8 @@ DEFAULT_WEIGHTS: dict[str, float] = {
 }
 
 
-def make_thesis(weights: dict[str, float] | None = None) -> Thesis:
-    return Thesis(weights=DEFAULT_WEIGHTS if weights is None else weights)
+def make_thesis(weights: dict[str, float] | None = None, **kw) -> Thesis:
+    return Thesis(weights=DEFAULT_WEIGHTS if weights is None else weights, **kw)
 
 
 def make_lead(
@@ -29,6 +29,13 @@ def make_lead(
 ) -> Lead:
     account = Account(id=handle, handle=handle)
     return Lead(account=account, signals=signals or [], llm=llm)
+
+
+def final(lead: Lead, thesis: Thesis) -> float:
+    return score_breakdown(lead, thesis)[-1][1]
+
+
+# --- signals component (unchanged semantics) ----------------------------------
 
 
 def test_bio_intent_plus_departure_scores_45() -> None:
@@ -47,23 +54,6 @@ def test_weights_filled_from_thesis() -> None:
     lead = make_lead("founder", signals=[Signal(name="bio_intent", value=1.0)])
     score_leads([lead], make_thesis())
     assert lead.signals[0].weight == 25.0
-
-
-def test_llm_confidence_multiplies_score() -> None:
-    signals = [
-        Signal(name="bio_intent", value=1.0),
-        Signal(name="departure_signal", value=1.0),
-    ]
-    without = make_lead("plain", signals=[s.model_copy() for s in signals])
-    with_llm = make_lead(
-        "vetted",
-        signals=[s.model_copy() for s in signals],
-        llm=LLMVerdict(handle="vetted", is_founder=True, confidence=0.5,
-                       grounding="website"),
-    )
-    score_leads([without, with_llm], make_thesis())
-    assert without.score == 45.0
-    assert with_llm.score == 22.5
 
 
 def test_fractional_signal_contributes_proportionally() -> None:
@@ -94,7 +84,7 @@ def test_unknown_signal_gets_zero_weight() -> None:
     )
     score_leads([lead], make_thesis())
     assert lead.signals[0].weight == 0.0
-    assert lead.score == 25.0  # only bio_intent counts
+    assert lead.score == 25.0
 
 
 def test_empty_weights_scores_zero_without_zerodivision() -> None:
@@ -104,17 +94,165 @@ def test_empty_weights_scores_zero_without_zerodivision() -> None:
     assert ranked[0].rank == 1
 
 
+def test_no_verdict_is_signals_only() -> None:
+    """Demo / heuristics-only leads: one signals step, nothing else."""
+    lead = make_lead("plain", signals=[Signal(name="bio_intent", value=1.0)])
+    steps = score_breakdown(lead, make_thesis())
+    assert len(steps) == 1
+    assert steps[0][1] == 25.0
+
+
+# --- quality_score -------------------------------------------------------------
+
+
+def make_quality_verdict(**overrides) -> LLMVerdict:
+    base = dict(
+        handle="q", account_type="founder", is_founder=True, stage="launched",
+        grounding="website", confidence=1.0,
+        customer_type="b2b",
+        quality={"team": 0.8, "tech_product": 0.6, "traction": 0.4},
+        quality_reasons={"team": "prior exit", "tech_product": "live product",
+                         "traction": "3 logos on site"},
+    )
+    base.update(overrides)
+    return LLMVerdict(**base)
+
+
+def test_quality_score_renormalizes_present_dims() -> None:
+    thesis = make_thesis()  # default quality_weights: team 20, tech 20, traction 20...
+    verdict = make_quality_verdict()
+    # (0.8×20 + 0.6×20 + 0.4×20) / 60 = 0.6 → 60
+    assert quality_score(verdict, thesis) == pytest.approx(60.0)
+
+
+def test_quality_score_ignores_unknown_keys_and_clamps() -> None:
+    thesis = make_thesis()
+    verdict = make_quality_verdict(quality={"team": 1.7, "moat_madeup": 0.9})
+    # moat_madeup has no weight → ignored; team clamps to 1.0 → 100
+    assert quality_score(verdict, thesis) == pytest.approx(100.0)
+
+
+def test_quality_score_none_when_no_dims_or_no_verdict() -> None:
+    thesis = make_thesis()
+    assert quality_score(None, thesis) is None
+    assert quality_score(make_quality_verdict(quality={}), thesis) is None
+    zero_thesis = make_thesis(quality_weights={"team": 0.0})
+    assert quality_score(make_quality_verdict(), zero_thesis) is None
+
+
+# --- the blend -------------------------------------------------------------------
+
+
+def test_blend_all_components_45_35_20() -> None:
+    thesis = make_thesis(weights={"bio_intent": 100.0})
+    lead = make_lead(
+        "a", signals=[Signal(name="bio_intent", value=1.0)],  # S = 100
+        llm=make_quality_verdict(thesis_fit=0.5),  # Q = 60, F = 50
+    )
+    # (0.45×60 + 0.35×50 + 0.20×100) / 1.0 = 27 + 17.5 + 20 = 64.5
+    assert final(lead, thesis) == pytest.approx(64.5)
+
+
+def test_blend_renormalizes_missing_quality() -> None:
+    thesis = make_thesis(weights={"bio_intent": 100.0})
+    lead = make_lead(
+        "a", signals=[Signal(name="bio_intent", value=1.0)],
+        llm=make_quality_verdict(quality={}, quality_reasons={}, thesis_fit=1.0),
+    )
+    # (0.35×100 + 0.20×100) / 0.55 = 100
+    assert final(lead, thesis) == pytest.approx(100.0)
+    lead2 = make_lead(
+        "b", signals=[Signal(name="bio_intent", value=1.0)],
+        llm=make_quality_verdict(quality={}, quality_reasons={}, thesis_fit=0.0),
+    )
+    # (0.35×0 + 0.20×100) / 0.55 ≈ 36.36
+    assert final(lead2, thesis) == pytest.approx(100 * 0.20 / 0.55)
+
+
+def test_blend_renormalizes_missing_fit() -> None:
+    thesis = make_thesis(weights={"bio_intent": 100.0})
+    lead = make_lead(
+        "a", signals=[Signal(name="bio_intent", value=1.0)],
+        llm=make_quality_verdict(thesis_fit=None),  # Q=60, S=100, no F
+    )
+    # (0.45×60 + 0.20×100) / 0.65 ≈ 72.3
+    assert final(lead, thesis) == pytest.approx((0.45 * 60 + 0.20 * 100) / 0.65)
+
+
+def test_blend_verdict_without_quality_or_fit_stays_signals() -> None:
+    """Legacy cached verdicts (no quality, no fit) keep the signals base."""
+    thesis = make_thesis(weights={"bio_intent": 100.0})
+    lead = make_lead(
+        "a", signals=[Signal(name="bio_intent", value=1.0)],
+        llm=LLMVerdict(handle="a", is_founder=True, confidence=1.0,
+                       grounding="website"),
+    )
+    assert final(lead, thesis) == pytest.approx(100.0)
+    assert not any("blend" in d for d, _ in score_breakdown(lead, thesis))
+
+
+def test_blend_weight_knobs() -> None:
+    thesis = make_thesis(
+        weights={"bio_intent": 100.0},
+        signal_params=SignalParams(score_weight_quality=1.0,
+                                   score_weight_fit=0.0,
+                                   score_weight_signals=0.0),
+    )
+    lead = make_lead(
+        "a", signals=[Signal(name="bio_intent", value=1.0)],
+        llm=make_quality_verdict(thesis_fit=0.1),
+    )
+    assert final(lead, thesis) == pytest.approx(60.0)  # quality only
+
+
+def test_blend_all_weights_zero_falls_back_to_signals() -> None:
+    thesis = make_thesis(
+        weights={"bio_intent": 100.0},
+        signal_params=SignalParams(score_weight_quality=0.0,
+                                   score_weight_fit=0.0,
+                                   score_weight_signals=0.0),
+    )
+    lead = make_lead(
+        "a", signals=[Signal(name="bio_intent", value=1.0)],
+        llm=make_quality_verdict(thesis_fit=0.5),
+    )
+    steps = score_breakdown(lead, thesis)
+    assert any("blend weights all 0" in d for d, _ in steps)
+    assert final(lead, thesis) == pytest.approx(100.0)
+
+
+def test_fit_is_a_component_not_a_multiplier() -> None:
+    thesis = make_thesis(weights={"bio_intent": 100.0})
+    lead = make_lead(
+        "a", signals=[Signal(name="bio_intent", value=1.0)],
+        llm=make_quality_verdict(thesis_fit=0.0),
+    )
+    steps = [d for d, _ in score_breakdown(lead, thesis)]
+    assert any(d.startswith("thesis fit:") for d in steps)
+    assert not any("(thesis fit" in d and d.startswith("×") for d in steps)
+
+
+# --- multiplier chain after the blend -------------------------------------------
+
+
+def test_confidence_multiplies_blended_base() -> None:
+    thesis = make_thesis(weights={"bio_intent": 100.0})
+    lead = make_lead(
+        "a", signals=[Signal(name="bio_intent", value=1.0)],
+        llm=make_quality_verdict(thesis_fit=0.5, confidence=0.5),
+    )
+    assert final(lead, thesis) == pytest.approx(64.5 * 0.5)
+
+
 def test_not_founder_verdict_slashes_score() -> None:
     thesis = make_thesis()
     founder = make_lead(
-        "founder",
-        signals=[Signal(name="bio_intent", value=1.0)],
+        "founder", signals=[Signal(name="bio_intent", value=1.0)],
         llm=LLMVerdict(handle="founder", is_founder=True, confidence=0.8,
                        grounding="website"),
     )
     corp = make_lead(
-        "corp",
-        signals=[Signal(name="bio_intent", value=1.0)],
+        "corp", signals=[Signal(name="bio_intent", value=1.0)],
         llm=LLMVerdict(handle="corp", is_founder=False, confidence=0.8,
                        grounding="website"),
     )
@@ -124,80 +262,31 @@ def test_not_founder_verdict_slashes_score() -> None:
 
 
 def test_stage_mismatch_halves_score() -> None:
-    from scout.config import Thesis
-    from scout.models import Account, Lead, LLMVerdict, Signal
-
     thesis = Thesis(weights={"bio_intent": 100.0}, target_stages=["launched"])
-    on = Lead(account=Account(id="a", handle="a"), signals=[Signal(name="bio_intent", value=1.0)],
-              llm=LLMVerdict(handle="a", is_founder=True, stage="launched", confidence=1.0,
-                             grounding="website"))
-    off = Lead(account=Account(id="b", handle="b"), signals=[Signal(name="bio_intent", value=1.0)],
-               llm=LLMVerdict(handle="b", is_founder=True, stage="idea", confidence=1.0,
-                              grounding="website"))
+    on = make_lead("a", signals=[Signal(name="bio_intent", value=1.0)],
+                   llm=LLMVerdict(handle="a", is_founder=True, stage="launched",
+                                  confidence=1.0, grounding="website"))
+    off = make_lead("b", signals=[Signal(name="bio_intent", value=1.0)],
+                    llm=LLMVerdict(handle="b", is_founder=True, stage="idea",
+                                   confidence=1.0, grounding="website"))
     ranked = score_leads([off, on], thesis)
     by = {x.account.handle: x for x in ranked}
     assert by["a"].score == 100.0
-    assert by["b"].score == 50.0  # off-target stage × 0.5
-
-
-def test_thesis_fit_scales_score() -> None:
-    from scout.config import Thesis
-    from scout.models import Account, Lead, LLMVerdict, Signal
-
-    thesis = Thesis(weights={"bio_intent": 100.0}, target_stages=["launched"])
-
-    def lead(handle: str, fit: float | None) -> Lead:
-        return Lead(
-            account=Account(id=handle, handle=handle),
-            signals=[Signal(name="bio_intent", value=1.0)],
-            llm=LLMVerdict(handle=handle, is_founder=True, stage="launched", grounding="website",
-                           confidence=1.0, thesis_fit=fit),
-        )
-
-    by = {
-        x.account.handle: x
-        for x in score_leads([lead("a", 1.0), lead("b", 0.0), lead("c", None)], thesis)
-    }
-    assert by["a"].score == 100.0  # perfect fit keeps the score
-    assert by["b"].score == 50.0   # fit 0.0 with default weight 0.5 halves it
-    assert by["c"].score == 100.0  # legacy verdict without fit -> no fit step
-
-
-def test_thesis_fit_weight_zero_disables_fit() -> None:
-    from scout.config import SignalParams, Thesis
-    from scout.models import Account, Lead, LLMVerdict, Signal
-
-    thesis = Thesis(
-        weights={"bio_intent": 100.0},
-        signal_params=SignalParams(thesis_fit_weight=0.0),
-    )
-    lead = Lead(
-        account=Account(id="a", handle="a"),
-        signals=[Signal(name="bio_intent", value=1.0)],
-        llm=LLMVerdict(handle="a", is_founder=True, confidence=1.0, thesis_fit=0.0,
-                       grounding="website"),
-    )
-    assert score_leads([lead], thesis)[0].score == 100.0
+    assert by["b"].score == 50.0
 
 
 def test_value_add_fit_informational_at_default_weight() -> None:
-    """Default value_add_weight is 0 — the dimension never moves the score."""
-    from scout.score import score_breakdown
-
     thesis = Thesis(weights={"bio_intent": 100.0})
     lead = make_lead(
-        "a",
-        signals=[Signal(name="bio_intent", value=1.0)],
-        llm=LLMVerdict(handle="a", is_founder=True, confidence=1.0, value_add_fit=0.0,
-                       grounding="website"),
+        "a", signals=[Signal(name="bio_intent", value=1.0)],
+        llm=LLMVerdict(handle="a", is_founder=True, confidence=1.0,
+                       value_add_fit=0.0, grounding="website"),
     )
     assert score_leads([lead], thesis)[0].score == 100.0
-    assert not any("value-add" in desc for desc, _ in score_breakdown(lead, thesis))
+    assert not any("value-add" in d for d, _ in score_breakdown(lead, thesis))
 
 
 def test_value_add_weight_scales_score() -> None:
-    from scout.config import SignalParams
-
     thesis = Thesis(
         weights={"bio_intent": 100.0},
         signal_params=SignalParams(value_add_weight=0.5),
@@ -205,36 +294,18 @@ def test_value_add_weight_scales_score() -> None:
 
     def lead(handle: str, fit: float | None) -> Lead:
         return make_lead(
-            handle,
-            signals=[Signal(name="bio_intent", value=1.0)],
-            llm=LLMVerdict(handle=handle, is_founder=True, confidence=1.0, grounding="website",
-                           value_add_fit=fit),
+            handle, signals=[Signal(name="bio_intent", value=1.0)],
+            llm=LLMVerdict(handle=handle, is_founder=True, confidence=1.0,
+                           grounding="website", value_add_fit=fit),
         )
 
     by = {
         x.account.handle: x
         for x in score_leads([lead("a", 1.0), lead("b", 0.0), lead("c", None)], thesis)
     }
-    assert by["a"].score == 100.0  # firm's value-add fully applies — score kept
-    assert by["b"].score == 50.0   # nothing the firm offers helps — halved at w=0.5
-    assert by["c"].score == 100.0  # legacy verdict without value_add_fit → no step
-
-
-def test_signal_params_drive_traction() -> None:
-    from datetime import datetime, timezone
-    from scout.config import SignalParams, Thesis
-    from scout.models import Account, Tweet
-    from scout.signals.heuristics import run_heuristics
-
-    account = Account(id="a", handle="a", followers=100)
-    tweet = Tweet(id="t", account_id="a", text="launching today", created_at=datetime.now(timezone.utc),
-                  likes=4, retweets=0, replies=0)  # ratio 0.04
-    strict = Thesis(launch_phrases=["launching"], signal_params=SignalParams(traction_floor=0.05))
-    loose = Thesis(launch_phrases=["launching"], signal_params=SignalParams(traction_floor=0.01))
-    strict_sig = next(s for s in run_heuristics(account, [tweet], strict)[0] if s.name == "launch_traction")
-    loose_sig = next(s for s in run_heuristics(account, [tweet], loose)[0] if s.name == "launch_traction")
-    assert strict_sig.value == 0.0  # 0.04 below the 0.05 floor
-    assert loose_sig.value > 0.0    # above the lowered floor
+    assert by["a"].score == 100.0  # perfect value-add fit keeps the score
+    assert by["b"].score == 50.0   # 0.0 with weight 0.5 halves it
+    assert by["c"].score == 100.0  # absent → no step
 
 
 # --- grounding penalty ---------------------------------------------------------
@@ -267,7 +338,6 @@ def test_grounded_and_audited_leads_exempt() -> None:
     thesis = Thesis(weights={"bio_intent": 20.0})
     assert not _has_penalty_step(_grounding_lead(grounding="website"), thesis)
     assert not _has_penalty_step(_grounding_lead(grounding="tweets"), thesis)
-    # Audit outcome outranks grounding in both directions:
     assert not _has_penalty_step(
         _grounding_lead(grounding="bio", verification="confirmed"), thesis)
     assert not _has_penalty_step(
@@ -285,3 +355,25 @@ def test_ungrounded_multiplier_math_and_knob() -> None:
     assert penalized == pytest.approx(base * 0.6)
     thesis.signal_params.ungrounded_multiplier = 1.0  # knob off
     assert score_breakdown(ungrounded, thesis)[-1][1] == pytest.approx(base)
+
+
+# --- the pedigree guard, end to end ---------------------------------------------
+
+
+def test_stealth_pedigree_founder_sinks_despite_team_score() -> None:
+    """The Raindrop guard: a pedigree-only stealth lead (team evidence but no
+    product) must land in single digits even with a strong team dim."""
+    thesis = make_thesis(weights={"bio_intent": 100.0})
+    lead = make_lead(
+        "stealthy", signals=[Signal(name="bio_intent", value=1.0)],
+        llm=LLMVerdict(
+            handle="stealthy", account_type="founder", is_founder=True,
+            stage="stealth", customer_type=None, grounding="none",
+            quality={"team": 0.9}, quality_reasons={"team": "ex-Apple staff eng"},
+            thesis_fit=0.2, confidence=0.3,
+        ),
+    )
+    # blend: (0.45×90 + 0.35×20 + 0.20×100)/1.0 = 67.5 → ×0.3 conf → ×0.6
+    # ungrounded ≈ 12.2 — an order of magnitude below a verified fit lead.
+    assert final(lead, thesis) == pytest.approx(67.5 * 0.3 * 0.6)
+    assert final(lead, thesis) < 15

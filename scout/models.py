@@ -5,7 +5,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 Stage = Literal["idea", "stealth", "launched", "scaling"]
 
@@ -146,6 +146,29 @@ class LLMVerdict(BaseModel):
     # "unverifiable"; None = not audited.
     verification: str | None = None
     verification_note: str = ""
+    # v7 — company-quality rubric. customer_type picks the scoring lens
+    # ("b2b" | "b2c" | "b2b2c" | "mixed"; None when the product itself is
+    # not established). quality holds evidence-backed 0..1 scores per
+    # dimension (config.QUALITY_DIMENSIONS keys); a dimension with no
+    # evidence is OMITTED, never guessed. quality_score is computed OUR
+    # side (score.quality_score) over the present dims only.
+    customer_type: str | None = None
+    quality: dict[str, float] = Field(default_factory=dict)
+    quality_reasons: dict[str, str] = Field(default_factory=dict)  # dim → ≤15-word citation
+
+    @field_validator("customer_type", mode="before")
+    @classmethod
+    def _norm_customer_type(cls, value):  # noqa: ANN001 — pydantic hook
+        """Normalize instead of rejecting: a Literal here would make one
+        off-vocabulary value from Claude throw inside _parse_verdicts and
+        burn the whole batch's corrective retries."""
+        if not isinstance(value, str):
+            return None
+        value = value.strip().lower()
+        aliases = {"consumer": "b2c", "enterprise": "b2b", "smb": "b2b",
+                   "b2b/b2c": "mixed", "b2c2b": "b2b2c"}
+        value = aliases.get(value, value)
+        return value if value in ("b2b", "b2c", "b2b2c", "mixed") else None
 
 
 class Lead(BaseModel):

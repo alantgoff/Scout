@@ -35,6 +35,31 @@ DEFAULT_LAUNCH_PHRASES = [
 
 STAGES = ("idea", "stealth", "launched", "scaling")
 
+# Who the company sells to — picks the quality-rubric lens in classification
+# and backs the UI's customer-type filter.
+CUSTOMER_TYPES = ("b2b", "b2c", "b2b2c", "mixed")
+
+# The fixed quality-rubric dimensions: key → help text (shown on the UI
+# sliders). The keys are the contract between the classifier prompt,
+# LLMVerdict.quality, and thesis.quality_weights.
+QUALITY_DIMENSIONS: dict[str, str] = {
+    "team": "Founder/team strength as builders of THIS company — exits, "
+            "senior domain experience, notable shipped work",
+    "tech_product": "Evidence of real working technology — live product, "
+                    "demos, docs, shipping cadence",
+    "market": "Size and urgency of the problem — clear buyer/user, growing category",
+    "defensibility": "Moat evidence — proprietary data/hardware, deep tech, "
+                     "network effects, lock-in",
+    "traction": "Commercial/user proof — logos, pilots, revenue (B2B) or "
+                "users, growth, retention (B2C)",
+    "investors": "Named investors or rounds — logos on site, funding "
+                 "announcements, accelerator badges",
+}
+DEFAULT_QUALITY_WEIGHTS: dict[str, float] = {
+    "team": 20, "tech_product": 20, "market": 15,
+    "defensibility": 15, "traction": 20, "investors": 10,
+}
+
 
 class ValueAddLever(BaseModel):
     """One lever of the firm's strategic value-add (thesis.yaml → firm_value_add).
@@ -129,12 +154,17 @@ class SignalParams(BaseModel):
     traction_window_days: int = 30  # how recent a launch tweet must be
     convergence_full_credit: int = 2  # recent watcher follows for value 1.0
     stage_mismatch_multiplier: float = 0.5  # score × this when stage off-target
-    # How much Claude's thesis_fit (0..1) sways the final score:
-    # multiplier = (1 - w) + w × fit. 0 = ignore fit, 1 = fit scales fully.
-    thesis_fit_weight: float = 0.5
-    # Same shape for value_add_fit (would the firm's value-add accelerate this
-    # startup?). Defaults to 0 — an informational dimension that never moves
-    # the score unless you opt in.
+    # Final-score blend: base = Σ(weight × component) / Σ(weights of PRESENT
+    # components), then the multiplier chain. Components: company QUALITY
+    # (Claude's evidence-backed rubric), thesis FIT, X-SIGNAL momentum.
+    # Weights are relative and renormalize over what a lead actually has —
+    # a lead is never punished for a component nobody could evidence.
+    score_weight_quality: float = 0.45
+    score_weight_fit: float = 0.35
+    score_weight_signals: float = 0.20
+    # value_add_fit multiplier weight (would the firm's value-add accelerate
+    # this startup?). Defaults to 0 — an informational dimension that never
+    # moves the score unless you opt in.
     value_add_weight: float = 0.0
     # Score × this when the verdict's product claim never traced to real
     # evidence: the audit said "unverifiable", or the lead was never audited
@@ -152,6 +182,12 @@ class Thesis(BaseModel):
     sectors: list[str] = Field(default_factory=list)
     disqualifiers: list[str] = Field(default_factory=list)
     weights: dict[str, float] = Field(default_factory=dict)
+    # Per-dimension weights behind the deterministic quality_score
+    # (score.quality_score) — relative, renormalized over the dims a verdict
+    # actually evidences. UI-editable in Signals & scoring.
+    quality_weights: dict[str, float] = Field(
+        default_factory=lambda: dict(DEFAULT_QUALITY_WEIGHTS)
+    )
     launch_phrases: list[str] = Field(
         default_factory=lambda: list(DEFAULT_LAUNCH_PHRASES)
     )
