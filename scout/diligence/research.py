@@ -26,15 +26,10 @@ from typing import Callable, TypeVar
 
 import anthropic
 from pydantic import ValidationError
-from tenacity import (
-    retry,
-    retry_if_exception_type,
-    retry_if_not_exception_type,
-    stop_after_attempt,
-    wait_random_exponential,
-)
 
 from scout.config import Settings
+from scout.llmcall import client as make_client
+from scout.llmcall import retry_transient
 from scout.store import Store
 
 T = TypeVar("T")
@@ -81,16 +76,6 @@ def web_tools() -> list[dict]:
     ]
 
 
-def _client(settings: Settings) -> anthropic.Anthropic:
-    # max_retries=1: tenacity is the retry layer; stacking the SDK's default
-    # retries on top multiplies worst-case latency (mirrors agents._client).
-    return anthropic.Anthropic(
-        api_key=settings.anthropic_api_key,
-        timeout=RESEARCH_TIMEOUT_S,
-        max_retries=1,
-    )
-
-
 def _rates(settings: Settings, model: str) -> tuple[float, float]:
     """($/MTok in, $/MTok out) for the model — synth vs research rate pair."""
     if model == settings.diligence_synth_model:
@@ -104,20 +89,7 @@ def _rates(settings: Settings, model: str) -> tuple[float, float]:
     )
 
 
-@retry(
-    stop=stop_after_attempt(3),
-    wait=wait_random_exponential(multiplier=1, max=30),
-    # Timeouts excluded: with a 240s client timeout, three attempts would
-    # wedge the caller for 12+ minutes. Fail fast instead (agents.py idiom).
-    retry=(
-        retry_if_exception_type((anthropic.RateLimitError, anthropic.InternalServerError))
-        | (
-            retry_if_exception_type(anthropic.APIConnectionError)
-            & retry_if_not_exception_type(anthropic.APITimeoutError)
-        )
-    ),
-    reraise=True,
-)
+@retry_transient  # scout.llmcall policy: transient errors retried, timeouts fail fast
 def _api_call(
     client: anthropic.Anthropic,
     model: str,
@@ -242,7 +214,7 @@ def research_call(
     """
     if not settings.anthropic_api_key:
         raise ResearchError("ANTHROPIC_API_KEY is not set — deep analysis needs Claude.")
-    client = _client(settings)
+    client = make_client(settings, RESEARCH_TIMEOUT_S)
     chosen_model = model or settings.claude_model
     tools = web_tools() if web else []
     total = 0.0

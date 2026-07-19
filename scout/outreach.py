@@ -7,17 +7,15 @@ fill-in template when no Anthropic key is set.
 from __future__ import annotations
 
 import anthropic
-from tenacity import (
-    retry,
-    retry_if_exception_type,
-    stop_after_attempt,
-    wait_random_exponential,
-)
 
 from scout.config import Settings, Thesis
+from scout.llmcall import call_text, client
 from scout.models import Lead
 
 CHANNELS = ("X DM", "Email", "Warm intro ask")
+
+# Runs inline in the Streamlit process, like the agents — cap the wait.
+OUTREACH_TIMEOUT_S = 60.0
 
 _SYSTEM = (
     "You are an analyst at a top-tier VC firm doing founder outreach. Write a "
@@ -28,22 +26,6 @@ _SYSTEM = (
     "connection asking to be introduced. Output ONLY the message text — no "
     "subject line unless it's Email, no preamble, no quotes."
 )
-
-
-@retry(
-    stop=stop_after_attempt(3),
-    wait=wait_random_exponential(multiplier=1, max=20),
-    retry=retry_if_exception_type(
-        (anthropic.RateLimitError, anthropic.InternalServerError, anthropic.APIConnectionError)
-    ),
-    reraise=True,
-)
-def _call(client: anthropic.Anthropic, model: str, system: str, user: str) -> str:
-    resp = client.messages.create(
-        model=model, max_tokens=500, system=system,
-        messages=[{"role": "user", "content": user}],
-    )
-    return next(b.text for b in resp.content if b.type == "text").strip()
 
 
 def _context(lead: Lead, thesis: Thesis) -> str:
@@ -88,9 +70,10 @@ def draft_outreach(
     if not settings.anthropic_api_key:
         return _template(lead, channel), False
     try:
-        client = anthropic.Anthropic(api_key=settings.anthropic_api_key)
-        system = _SYSTEM.format(channel=channel)
-        message = _call(client, settings.claude_model, system, _context(lead, thesis))
+        message = call_text(
+            client(settings, OUTREACH_TIMEOUT_S), settings.claude_model,
+            _SYSTEM.format(channel=channel), _context(lead, thesis), max_tokens=500,
+        )
         return message, True
     except anthropic.APIError:
         return _template(lead, channel), False

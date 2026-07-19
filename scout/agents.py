@@ -27,24 +27,17 @@ import asyncio
 import json
 
 import anthropic
-from pydantic import BaseModel, Field, ValidationError
-from tenacity import (
-    retry,
-    retry_if_exception_type,
-    retry_if_not_exception_type,
-    stop_after_attempt,
-    wait_random_exponential,
-)
+from pydantic import BaseModel, Field
 
 from scout.config import STAGES, Seeds, Settings, Thesis
-from scout.models import Lead
-
-PARSE_ATTEMPTS = 3
-
-_CORRECTIVE_NOTE = (
-    "\n\nIMPORTANT: your previous reply could not be parsed. Respond with ONLY "
-    "a valid JSON object exactly as specified — no prose, no markdown fences."
+from scout.llmcall import (
+    UnparseableReplyError,
+    call_text,
+    call_with_parse_retry,
+    client,
+    strip_code_fences,
 )
+from scout.models import Lead
 
 
 class StrategyProposal(BaseModel):
@@ -108,55 +101,11 @@ Under 250 words. No preamble, no title. Section labels must be bold text
 (**like this**) exactly as shown — never markdown # headings."""
 
 
-# Explicit ceilings per agent — these run inline in the Streamlit process.
+# Explicit ceilings per agent — these run inline in the Streamlit process
+# (client construction + retry policy live in scout.llmcall).
 STRATEGY_TIMEOUT_S = 120.0
 BRIEF_TIMEOUT_S = 60.0
 WEIGHTS_TIMEOUT_S = 60.0
-
-
-def _client(settings: Settings, timeout: float) -> anthropic.Anthropic:
-    # max_retries=1: tenacity is the retry layer here — stacking the SDK's
-    # default retries on top multiplies worst-case latency.
-    return anthropic.Anthropic(
-        api_key=settings.anthropic_api_key, timeout=timeout, max_retries=1
-    )
-
-
-@retry(
-    stop=stop_after_attempt(3),
-    wait=wait_random_exponential(multiplier=1, max=30),
-    # Timeouts are excluded from retry: with a 60-120s client timeout, three
-    # attempts would wedge the UI for many minutes. Fail fast instead.
-    retry=(
-        retry_if_exception_type((anthropic.RateLimitError, anthropic.InternalServerError))
-        | (
-            retry_if_exception_type(anthropic.APIConnectionError)
-            & retry_if_not_exception_type(anthropic.APITimeoutError)
-        )
-    ),
-    reraise=True,
-)
-def _call(
-    client: anthropic.Anthropic,
-    model: str,
-    system: str,
-    user: str,
-    max_tokens: int = 4096,
-) -> str:
-    response = client.messages.create(
-        model=model, max_tokens=max_tokens, system=system,
-        messages=[{"role": "user", "content": user}],
-    )
-    return next(b.text for b in response.content if b.type == "text").strip()
-
-
-def _strip_code_fences(text: str) -> str:
-    text = text.strip()
-    if text.startswith("```"):
-        text = text.split("\n", 1)[1] if "\n" in text else ""
-        if text.rstrip().endswith("```"):
-            text = text.rstrip()[: -len("```")]
-    return text.strip()
 
 
 def parse_strategy(text: str) -> StrategyProposal:
@@ -165,7 +114,7 @@ def parse_strategy(text: str) -> StrategyProposal:
     Unknown stages are dropped (never let a hallucinated stage into
     thesis.yaml); an empty result falls back to all stages at apply time.
     """
-    data = json.loads(_strip_code_fences(text))
+    data = json.loads(strip_code_fences(text))
     if not isinstance(data, dict):
         raise ValueError("expected a JSON object")
     proposal = StrategyProposal.model_validate(data)
@@ -186,7 +135,6 @@ def generate_strategy(
         raise RuntimeError(
             "ANTHROPIC_API_KEY is not set — the strategy agent needs Claude."
         )
-    client = _client(settings, STRATEGY_TIMEOUT_S)
     context = f"Thesis: {description.strip()}"
     if thesis.thesis and thesis.thesis.strip() != description.strip():
         context += f"\n\n(Current thesis statement, for reference: {thesis.thesis})"
@@ -196,21 +144,17 @@ def generate_strategy(
             "don't, add better ones): " + ", ".join(seeds.watchers)
         )
 
-    prompt = context
-    last_error: Exception | None = None
     try:
-        for _ in range(PARSE_ATTEMPTS):
-            text = _call(client, settings.claude_model, _STRATEGY_SYSTEM, prompt)
-            try:
-                return parse_strategy(text)
-            except (json.JSONDecodeError, ValidationError, ValueError) as exc:
-                last_error = exc
-                prompt = context + _CORRECTIVE_NOTE
+        return call_with_parse_retry(
+            client(settings, STRATEGY_TIMEOUT_S), settings.claude_model,
+            _STRATEGY_SYSTEM, context, parse_strategy,
+        )
     except anthropic.APITimeoutError:
         raise RuntimeError(
             f"The strategy agent timed out after {STRATEGY_TIMEOUT_S:.0f}s — try again."
         ) from None
-    raise RuntimeError(f"strategy agent returned unparseable output: {last_error}")
+    except UnparseableReplyError as exc:
+        raise RuntimeError(f"strategy agent returned unparseable output: {exc}") from None
 
 
 def apply_strategy(
@@ -384,7 +328,7 @@ def parse_weight_proposal(text: str, current: dict[str, float]) -> WeightProposa
     the model forgot keeps its current weight (a proposal must never silently
     delete a signal from thesis.yaml).
     """
-    data = json.loads(_strip_code_fences(text))
+    data = json.loads(strip_code_fences(text))
     if not isinstance(data, dict):
         raise ValueError("expected a JSON object")
     proposal = WeightProposal.model_validate(data)
@@ -412,27 +356,23 @@ def suggest_weights(
         raise RuntimeError(
             "ANTHROPIC_API_KEY is not set — weight suggestions need Claude."
         )
-    client = _client(settings, WEIGHTS_TIMEOUT_S)
     context = (
         f"Current weights: {json.dumps(thesis.weights, sort_keys=True)}\n"
         f"Thesis: {thesis.thesis}\n\nTriage statistics:\n{stats_text}"
     )
-    prompt = context
-    last_error: Exception | None = None
     try:
-        for _ in range(PARSE_ATTEMPTS):
-            text = _call(client, settings.claude_model, _WEIGHTS_SYSTEM, prompt,
-                         max_tokens=1000)
-            try:
-                return parse_weight_proposal(text, thesis.weights)
-            except (json.JSONDecodeError, ValidationError, ValueError) as exc:
-                last_error = exc
-                prompt = context + _CORRECTIVE_NOTE
+        return call_with_parse_retry(
+            client(settings, WEIGHTS_TIMEOUT_S), settings.claude_model,
+            _WEIGHTS_SYSTEM, context,
+            lambda text: parse_weight_proposal(text, thesis.weights),
+            max_tokens=1000,
+        )
     except anthropic.APITimeoutError:
         raise RuntimeError(
             f"The weight agent timed out after {WEIGHTS_TIMEOUT_S:.0f}s — try again."
         ) from None
-    raise RuntimeError(f"weight agent returned unparseable output: {last_error}")
+    except UnparseableReplyError as exc:
+        raise RuntimeError(f"weight agent returned unparseable output: {exc}") from None
 
 
 def research_brief(
@@ -443,9 +383,8 @@ def research_brief(
     if not settings.anthropic_api_key:
         return _brief_template(lead), False
     try:
-        client = _client(settings, BRIEF_TIMEOUT_S)
-        brief = _call(
-            client,
+        brief = call_text(
+            client(settings, BRIEF_TIMEOUT_S),
             settings.claude_model,
             _BRIEF_SYSTEM,
             _brief_context(lead, thesis),

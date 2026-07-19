@@ -14,16 +14,16 @@ import json
 from concurrent.futures import ThreadPoolExecutor
 
 import anthropic
-from pydantic import ValidationError
 from rich.console import Console
-from tenacity import (
-    retry,
-    retry_if_exception_type,
-    stop_after_attempt,
-    wait_random_exponential,
-)
 
 from scout.config import Settings, Thesis
+from scout.llmcall import (
+    PARSE_ATTEMPTS,
+    UnparseableReplyError,
+    call_with_parse_retry,
+    client as make_client,
+    strip_code_fences,
+)
 from scout.models import Account, LLMVerdict, Tweet
 from scout.store import Store
 
@@ -33,8 +33,9 @@ BATCH_SIZE = 10
 MIN_CONFIDENCE = 0.4
 RECENT_TWEETS = 5
 TWEET_MAX_CHARS = 280
-PARSE_ATTEMPTS = 3  # initial call + 2 corrective retries
 
+# The classifier asks for a JSON ARRAY (one object per account), so it needs
+# its own corrective note (llmcall's default asks for an object).
 _CORRECTIVE_NOTE = (
     "\n\nIMPORTANT: your previous reply could not be parsed. Respond with ONLY a "
     "valid JSON array of account objects exactly as specified — no prose, no "
@@ -131,41 +132,8 @@ def _user_prompt(batch: list[tuple[Account, list[Tweet]]]) -> str:
     )
 
 
-@retry(
-    stop=stop_after_attempt(3),
-    wait=wait_random_exponential(multiplier=1, max=30),
-    retry=retry_if_exception_type(
-        (
-            anthropic.RateLimitError,
-            anthropic.InternalServerError,
-            anthropic.APIConnectionError,
-        )
-    ),
-    reraise=True,
-)
-def _call_claude(
-    client: anthropic.Anthropic, model: str, system_prompt: str, user_prompt: str
-) -> str:
-    response = client.messages.create(
-        model=model,
-        max_tokens=4096,
-        system=system_prompt,
-        messages=[{"role": "user", "content": user_prompt}],
-    )
-    return next(b.text for b in response.content if b.type == "text")
-
-
-def _strip_code_fences(text: str) -> str:
-    text = text.strip()
-    if text.startswith("```"):
-        text = text.split("\n", 1)[1] if "\n" in text else ""
-        if text.rstrip().endswith("```"):
-            text = text.rstrip()[: -len("```")]
-    return text.strip()
-
-
 def _parse_verdicts(text: str) -> list[LLMVerdict]:
-    data = json.loads(_strip_code_fences(text))
+    data = json.loads(strip_code_fences(text))
     if not isinstance(data, list):
         raise ValueError("expected a JSON array of account objects")
     verdicts = []
@@ -182,21 +150,17 @@ def _classify_batch(
     system_prompt: str,
     batch: list[tuple[Account, list[Tweet]]],
 ) -> list[LLMVerdict]:
-    base_prompt = _user_prompt(batch)
-    prompt = base_prompt
-    last_error: Exception | None = None
-    for _ in range(PARSE_ATTEMPTS):
-        text = _call_claude(client, model, system_prompt, prompt)
-        try:
-            return _parse_verdicts(text)
-        except (json.JSONDecodeError, ValidationError, ValueError) as exc:
-            last_error = exc
-            prompt = base_prompt + _CORRECTIVE_NOTE
-    console.print(
-        f"[yellow]Skipping batch of {len(batch)} accounts: Claude returned "
-        f"unparseable output after {PARSE_ATTEMPTS} attempts ({last_error})[/yellow]"
-    )
-    return []
+    try:
+        return call_with_parse_retry(
+            client, model, system_prompt, _user_prompt(batch), _parse_verdicts,
+            corrective_note=_CORRECTIVE_NOTE,
+        )
+    except UnparseableReplyError as exc:
+        console.print(
+            f"[yellow]Skipping batch of {len(batch)} accounts: Claude returned "
+            f"unparseable output after {PARSE_ATTEMPTS} attempts ({exc})[/yellow]"
+        )
+        return []
 
 
 def _classify_batch_safe(
@@ -273,7 +237,7 @@ def classify(
     if not fresh:
         return results
 
-    client = anthropic.Anthropic(api_key=settings.anthropic_api_key)
+    client = make_client(settings)
     system_prompt = _system_prompt(thesis)
     batches = [fresh[i : i + BATCH_SIZE] for i in range(0, len(fresh), BATCH_SIZE)]
     workers = max(1, min(settings.llm_concurrency, len(batches)))

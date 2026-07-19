@@ -294,7 +294,7 @@ def _memo_user(
     return "\n".join(
         [
             f"Startup: {pack.company_name} (@{pack.primary_handle})",
-            f"Composite Diligence Score: "
+            "Composite Diligence Score: "
             + (f"{composite:.1f}/100" if composite is not None else "not computable"),
             "Composite steps: " + "; ".join(f"{d} -> {v:.1f}" for d, v in steps),
             "Flags: " + (", ".join(flags) or "none"),

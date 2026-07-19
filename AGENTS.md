@@ -93,6 +93,11 @@ scout/
                     STAGE_* maps: stage → search categories / discovery sources.
   models.py         The ONLY data structures crossing module boundaries:
                     Account, Tweet, Signal, LLMVerdict, Lead, UnlinkedLead.
+  llmcall.py        Shared Claude call plumbing — client factory (max_retries=1),
+                    the transient-retry policy (timeouts fail fast), fence
+                    stripping, call_with_parse_retry (JSON-in-text corrective
+                    loop). agents/classifier/outreach/diligence all go through
+                    here; NEVER hand-roll another client/retry/parse loop.
   store.py          SQLite (sqlite-utils) — cache, dedupe, TTL, budget ledger,
                     follow-edge/bio snapshots, unlinked leads, deal-flow pipeline,
                     llm_verdicts cache.
@@ -350,7 +355,9 @@ silently widen its input set to all-time).
   `github_repo`) are set by `cli._enrich_accounts` from store history, never by
   adapters directly.
 - **All network calls wrapped in tenacity** (3 attempts, jittered backoff),
-  with the retry-safety rule above for paid calls.
+  with the retry-safety rule above for paid calls. For Claude calls the
+  policy is centralized in `scout/llmcall.py` (transient errors retried,
+  timeouts excluded, SDK retries capped at 1) — use it, don't copy it.
 - **Nothing hardcoded that belongs in thesis.yaml/seeds.yaml.** Signal *mechanics*
   (regexes for launch language, github detection) live in code; *targeting*
   (keywords, orgs, stages, weights, params, prompt) lives in the yaml.

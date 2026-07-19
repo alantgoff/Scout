@@ -36,10 +36,8 @@ from scout.agents import (
 )
 from scout.config import (
     STAGES,
-    Seeds,
     Settings,
     SignalParams,
-    Thesis,
     load_seeds,
     load_thesis,
     save_seeds,
@@ -346,6 +344,17 @@ def _stream_command(args: list[str]) -> None:
 # ------------------------------------------------------------------- diligence
 
 
+# Full memos parse lazily (findings + markdown are the heavy part); the dict
+# is rebuilt each Streamlit rerun, so this is a per-rerun cache.
+_memo_cache: dict[str, Memo | None] = {}
+
+
+def _full_memo(company_key: str) -> Memo | None:
+    if company_key not in _memo_cache:
+        _memo_cache[company_key] = store.load_memo(company_key)
+    return _memo_cache[company_key]
+
+
 def _analyze_gate(handle: str, key_suffix: str, refresh: bool = False) -> None:
     """Cost-confirm gate for a deep analysis (xapi-gate pattern): estimate
     line + explicit checkbox before anything spends. Streams `scout analyze`
@@ -471,9 +480,12 @@ store = Store(Path(settings.db_path))
 leads = store.load_latest_leads()
 pipeline = store.all_pipeline()
 counts = store.pipeline_counts()
-# Deep-analysis memos by company key (Diligence Score — distinct from the
-# screening score that ranks the feed).
-memos: dict[str, Memo] = {m.company_key: m for m in store.list_memos()}
+# Deep-analysis memo SUMMARIES by company key (Diligence Score — distinct
+# from the screening score). Scalar columns only: full memos (findings +
+# markdown) parse lazily per visible card via _full_memo.
+memo_summaries: dict[str, dict] = {
+    m["company_key"]: m for m in store.list_memo_summaries()
+}
 # The ledger is the person-centric view: best-known state per handle across
 # ALL runs. It backs the "All leads" scope and — always — the Pipeline tab,
 # so a shortlisted lead never degrades just because it missed the latest run.
@@ -487,23 +499,24 @@ latest_handles = {x.account.handle.lower() for x in leads}
 # grouping. Cards render a filtered view — deriving memo identity or memo
 # staleness from that view gives wrong answers (a hidden secondary account
 # would fake an "inputs changed" fingerprint mismatch).
-memo_by_handle: dict[str, Memo] = {}  # every member handle -> the group's memo
-fresh_memo_company_keys: set[str] = set()  # memo.company_key, fingerprint fresh
+memo_by_handle: dict[str, dict] = {}  # every member handle -> the group's memo summary
+fresh_memo_company_keys: set[str] = set()  # memo company_key, fingerprint fresh
 _fresh_group_keys: set[str] = set()  # startup_key(primary), for shelf exclusion
 for _primary, _entry, _secondaries in group_by_company([(e.lead, e) for e in ledger]):
     _members = [_primary, *_secondaries]
     # A memo may be stored under any member's key (the analysis-time primary
     # can differ from today's after a re-score) — try them all.
     _memo = next(
-        (m for m in (memos.get(startup_key(x)) for x in _members) if m is not None),
+        (m for m in (memo_summaries.get(startup_key(x)) for x in _members)
+         if m is not None),
         None,
     )
     if _memo is None:
         continue
     for _m in _members:
         memo_by_handle[_m.account.handle.lower()] = _memo
-    if members_fingerprint(_members, thesis, settings) == _memo.fingerprint:
-        fresh_memo_company_keys.add(_memo.company_key)
+    if members_fingerprint(_members, thesis, settings) == _memo["fingerprint"]:
+        fresh_memo_company_keys.add(_memo["company_key"])
         _fresh_group_keys.add(startup_key(_primary))
 suggestions = analysis_priority(ledger, memoed=_fresh_group_keys, pipeline=pipeline)[:3]
 suggested_keys = {s.company_key for s in suggestions}
@@ -511,7 +524,7 @@ scan_running_at_load = (store.current_scan() or {}).get("status") == "running"
 known_company_names = sorted(
     {(e.lead.llm.company_name or "").strip() for e in ledger
      if e.lead.llm and e.lead.llm.company_name}
-    | {m.company_name for m in memos.values() if m.company_name}
+    | {m["company_name"] for m in memo_summaries.values() if m["company_name"]}
 )
 
 
@@ -594,12 +607,12 @@ def _lead_card(
     handle_key = account.handle.lower()
     status = _status_of(lead)
     secondary = secondary or []
-    memo = memo_by_handle.get(handle_key) if diligence else None
+    memo_sum = memo_by_handle.get(handle_key) if diligence else None
 
     chips: list[tuple[str, str]] = []
-    if memo is not None and memo.composite is not None:
-        chips.append((f"Diligence {memo.composite:.0f}", "accent"))
-    if diligence and memo is None and startup_key(lead) in suggested_keys:
+    if memo_sum is not None and memo_sum["composite"] is not None:
+        chips.append((f"Diligence {memo_sum['composite']:.0f}", "accent"))
+    if diligence and memo_sum is None and startup_key(lead) in suggested_keys:
         chips.append(("Suggested", ""))
     if verdict and verdict.thesis_fit is not None:
         chips.append((f"Fit {verdict.thesis_fit:.0%}", "accent"))
@@ -791,6 +804,9 @@ def _lead_card(
             # analyzed; the cost-gated Analyze action when not.
             if diligence:
                 st.markdown("---")
+                memo = (
+                    _full_memo(memo_sum["company_key"]) if memo_sum is not None else None
+                )
                 if memo is not None:
                     # Staleness comes from the page-top FULL-ledger grouping —
                     # never from this card's (possibly filtered) member view.
@@ -1216,19 +1232,20 @@ with tab_pipeline:
             # The deep-analysis memo sits beside the brief when one exists —
             # resolved through the page-top handle map (memo keys are company
             # keys, not handles).
-            picked_memo = memo_by_handle.get(pick)
-            if picked_memo is not None:
+            picked_sum = memo_by_handle.get(pick)
+            if picked_sum is not None:
                 st.write("")
                 st.markdown("**Investment memo**")
-                comp = (f"{picked_memo.composite:.0f}/100"
-                        if picked_memo.composite is not None else "n/a")
+                comp = (f"{picked_sum['composite']:.0f}/100"
+                        if picked_sum["composite"] is not None else "n/a")
                 st.markdown(
                     f'<div class="subtle">Diligence Score {comp} · generated '
-                    f'{_ago(picked_memo.created_at)} · est. ${picked_memo.cost_usd:.2f}</div>',
+                    f'{_ago(picked_sum["created_at"])} · est. ${picked_sum["cost_usd"]:.2f}</div>',
                     unsafe_allow_html=True,
                 )
                 with st.expander("Read memo"):
-                    st.markdown(picked_memo.memo_md)
+                    picked_memo = _full_memo(picked_sum["company_key"])
+                    st.markdown(picked_memo.memo_md if picked_memo else "_Memo unavailable._")
 
         st.write("")
         export_rows = pipeline_rows(store)
@@ -1580,7 +1597,7 @@ with tab_settings:
     s1, s2, s3, s4 = st.columns(4)
     s1.markdown(_tile("X API spend", f"${spent:.2f}", f"of ${cap:.0f} cap"), unsafe_allow_html=True)
     s2.markdown(_tile("Diligence spend", f"${store.diligence_spend_usd():.2f}",
-                      f"{len(memos)} memos · cap ${settings.diligence_cost_cap_usd:.0f}/memo"),
+                      f"{len(memo_summaries)} memos · cap ${settings.diligence_cost_cap_usd:.0f}/memo"),
                 unsafe_allow_html=True)
     s3.markdown(_tile("Latest leads", str(len(leads)), "most recent run"), unsafe_allow_html=True)
     s4.markdown(_tile("Verdict cache TTL", f"{settings.verdict_ttl_days}d",

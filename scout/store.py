@@ -81,6 +81,18 @@ class Store:
                 [t.model_dump(mode="json") for t in tweets], pk="id"
             )
 
+    @staticmethod
+    def _account_from_row(raw: dict) -> Account:
+        """Deserialize one accounts row: JSON columns parsed, stale enrichment
+        columns dropped (recent_followed_by/bio_changed are recomputed from
+        history every run — see cli._enrich_accounts)."""
+        row = dict(raw)
+        row["followed_by"] = json.loads(row.get("followed_by") or "[]")
+        row["sources"] = json.loads(row.get("sources") or "[]")
+        row.pop("recent_followed_by", None)
+        row.pop("bio_changed", None)
+        return Account.model_validate(row)
+
     def get_account(self, handle: str) -> Account | None:
         rows = list(
             self.db["accounts"].rows_where(
@@ -89,15 +101,7 @@ class Store:
             if self.db["accounts"].exists()
             else []
         )
-        if not rows:
-            return None
-        row = dict(rows[0])
-        row["followed_by"] = json.loads(row.get("followed_by") or "[]")
-        row["sources"] = json.loads(row.get("sources") or "[]")
-        # Drop stale enrichment columns from pre-v2 rows; recomputed per run.
-        row.pop("recent_followed_by", None)
-        row.pop("bio_changed", None)
-        return Account.model_validate(row)
+        return self._account_from_row(rows[0]) if rows else None
 
     def recent_discovered_accounts(self, days: int = 7) -> list[Account]:
         """Accounts discovered recently by any real strategy (demo/manual excluded).
@@ -113,15 +117,7 @@ class Store:
             [cutoff],
             order_by="fetched_at desc",
         )
-        accounts = []
-        for r in rows:
-            row = dict(r)
-            row["followed_by"] = json.loads(row.get("followed_by") or "[]")
-            row["sources"] = json.loads(row.get("sources") or "[]")
-            row.pop("recent_followed_by", None)
-            row.pop("bio_changed", None)
-            accounts.append(Account.model_validate(row))
-        return accounts
+        return [self._account_from_row(r) for r in rows]
 
     def get_tweets(self, account_id: str, limit: int = 20) -> list[Tweet]:
         if not self.db["tweets"].exists():
@@ -688,13 +684,27 @@ class Store:
         return Memo.model_validate_json(rows[0]["memo_json"]) if rows else None
 
     def list_memos(self) -> list[Memo]:
-        """All stored memos, newest first."""
+        """All stored memos, fully parsed, newest first."""
         if not self.db["memos"].exists():
             return []
         return [
             Memo.model_validate_json(r["memo_json"])
             for r in self.db["memos"].rows_where(order_by="created_at desc")
         ]
+
+    def list_memo_summaries(self) -> list[dict]:
+        """Scalar memo columns only — no memo_json blob read, no pydantic
+        parse. The UI's page-top derivations run on EVERY Streamlit rerun and
+        need just these; full memos load lazily per visible card."""
+        if not self.db["memos"].exists():
+            return []
+        rows = self.db.execute(
+            "select company_key, company_name, fingerprint, composite, "
+            "cost_usd, created_at from memos order by created_at desc"
+        ).fetchall()
+        keys = ("company_key", "company_name", "fingerprint", "composite",
+                "cost_usd", "created_at")
+        return [dict(zip(keys, r)) for r in rows]
 
     # ------------------------------------------------- diligence budget ledger
 

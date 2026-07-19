@@ -16,6 +16,10 @@ import json
 
 from pydantic import BaseModel, Field
 
+from scout.llmcall import strip_code_fences  # noqa: F401 — re-exported: the
+# diligence parse helpers and their tests treat this module as the one-stop
+# parsing surface.
+
 # The 8 diligence dimensions, in display order.
 DIMENSION_KEYS: tuple[str, ...] = (
     "founder_pedigree",
@@ -205,15 +209,6 @@ PAYLOAD_MODELS: dict[str, type[BaseModel]] = {
 
 
 # -------------------------------------------------------------- parse helpers
-
-
-def strip_code_fences(text: str) -> str:
-    text = text.strip()
-    if text.startswith("```"):
-        text = text.split("\n", 1)[1] if "\n" in text else ""
-        if text.rstrip().endswith("```"):
-            text = text.rstrip()[: -len("```")]
-    return text.strip()
 
 
 def extract_json(text: str):
