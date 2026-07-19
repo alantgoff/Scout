@@ -140,6 +140,22 @@ async def _fetch_tweets(
     the $ guard governs them) so the spend pre-check cannot be raced.
     """
     tweets_by_handle: dict[str, list[Tweet]] = {}
+    fetched_n = 0
+    last_scan_tick = 0.0
+
+    def _scan_tick() -> None:
+        # Store heartbeat for the UI progress bar — throttled to ~1 write/s.
+        nonlocal fetched_n, last_scan_tick
+        fetched_n += 1
+        if store is None:
+            return
+        now = time.monotonic()
+        if now - last_scan_tick >= 1.0 or fetched_n == len(accounts):
+            last_scan_tick = now
+            store.scan_update("fetching timelines",
+                              f"{fetched_n}/{len(accounts)} timelines fetched",
+                              done=fetched_n, total=len(accounts), unit="items")
+
     with Progress(console=console, transient=True) as progress:
         task = progress.add_task("Fetching tweets...", total=len(accounts))
 
@@ -171,6 +187,7 @@ async def _fetch_tweets(
                         announce_budget()
                         tweets_by_handle[account.handle] = cached(account)
                         progress.advance(task)
+                        _scan_tick()
                         return
                     try:
                         coro = adapter.fetch_tweets(account, limit=limit)
@@ -189,6 +206,7 @@ async def _fetch_tweets(
                         )
                         tweets_by_handle[account.handle] = cached(account)
                     progress.advance(task)
+                    _scan_tick()
 
             await asyncio.gather(*(fetch_one(a) for a in accounts))
             return tweets_by_handle
@@ -211,6 +229,7 @@ async def _fetch_tweets(
                 )
                 tweets_by_handle[account.handle] = []
             progress.advance(task)
+            _scan_tick()
     return tweets_by_handle
 
 
@@ -335,7 +354,8 @@ def _run_pipeline(
     # One wall-clock budget spans the whole network phase (discovery legs
     # first, then tweet fetching gets whatever remains).
     network_deadline = time.monotonic() + settings.sourcing_time_budget_s
-    store.scan_update("discovering", f"X {source.value} + github/hn legs")
+    store.scan_update("discovering", f"X {source.value} + github/hn legs",
+                      total=settings.sourcing_time_budget_s, unit="s")
     with console.status(f"Fetching accounts via {source.value}..."):
         if source is Source.twscrape:
             strategies = {"lists", "searches"} | (
@@ -416,7 +436,8 @@ def _run_pipeline(
         to_fetch.sort(key=_bio_pre_score, reverse=True)
         remaining_budget = max(network_deadline - time.monotonic(), 0.0)
         store.scan_update("fetching timelines",
-                          f"{len(to_fetch)} accounts · {remaining_budget:.0f}s budget left")
+                          f"{len(to_fetch)} accounts · {remaining_budget:.0f}s budget left",
+                          done=0, total=len(to_fetch), unit="items")
         if source is Source.twscrape:
             # Belt AND suspenders: the per-call budget inside _fetch_tweets is
             # the mechanism; this outer cap is the guarantee. If anything in
@@ -477,8 +498,14 @@ def _run_pipeline(
     ]
     if candidates:
         console.print(f"Classifying [bold]{len(candidates)}[/bold] candidates with Claude...")
-        store.scan_update("classifying", f"{len(candidates)} candidates")
-        verdicts = classify(candidates, thesis, settings, store=store)
+        store.scan_update("classifying", f"{len(candidates)} candidates",
+                          done=0, total=len(candidates), unit="items")
+        verdicts = classify(
+            candidates, thesis, settings, store=store,
+            progress=lambda done, total: store.scan_update(
+                "classifying", f"{done}/{total} classified by Claude",
+                done=done, total=total, unit="items"),
+        )
         for lead in leads:
             lead.llm = verdicts.get(lead.account.handle.lower())
 
@@ -551,7 +578,9 @@ def run(
     effective_max = max_accounts if max_accounts is not None else settings.max_accounts
     effective_ttl = ttl_days if ttl_days is not None else settings.ttl_days
 
-    store.scan_start("run", os.getpid())
+    store.scan_start("run", os.getpid(),
+                     phases=["discovering", "fetching timelines",
+                             "classifying", "scoring & saving"])
     ok = False
     try:
         adapter = _build_adapter(source, settings, store)
@@ -803,7 +832,7 @@ def source_preview(
         console.print(f"[red]Unknown strategies:[/red] {', '.join(sorted(unknown))}")
         raise typer.Exit(1)
 
-    store.scan_start("source preview", os.getpid())
+    store.scan_start("source preview", os.getpid(), phases=["discovering"])
     store.scan_update("discovering", ", ".join(sorted(chosen)))
     x_accounts: list[Account] = []
     x_chosen = chosen & _X_STRATEGIES
@@ -952,18 +981,22 @@ def verify(
         f"(worst case ≈ [bold]${est:.2f}[/bold], cap ${settings.xapi_spend_cap_usd:.2f})."
     )
 
-    store.scan_start("verify", os.getpid())
+    store.scan_start("verify", os.getpid(),
+                     phases=["hydrating", "classifying", "scoring & saving"])
     ok = False
     try:
         from scout.ingest.xapi_src import XApiSource
 
         adapter = XApiSource(settings, store)
-        store.scan_update("hydrating", f"{len(leads)} leads via paid X API")
+        store.scan_update("hydrating", f"{len(leads)} leads via paid X API",
+                          done=0, total=len(leads), unit="items")
 
         async def hydrate() -> list[tuple[Account, list[Tweet]]]:
             out: list[tuple[Account, list[Tweet]]] = []
-            for lead in leads:
+            for i, lead in enumerate(leads, start=1):
                 stale = lead.account
+                store.scan_update("hydrating", f"{i}/{len(leads)} leads hydrated",
+                                  done=i, total=len(leads), unit="items")
                 try:
                     account = await adapter.fetch_account(stale.handle, fresh=True)
                     if account is None:
@@ -1016,11 +1049,18 @@ def verify(
             console.print(
                 f"Classifying [bold]{len(candidates)}[/bold] candidates with Claude..."
             )
-            store.scan_update("classifying", f"{len(candidates)} candidates")
-            verdicts = classify(candidates, thesis, settings, store=store)
+            store.scan_update("classifying", f"{len(candidates)} candidates",
+                              done=0, total=len(candidates), unit="items")
+            verdicts = classify(
+                candidates, thesis, settings, store=store,
+                progress=lambda done, total: store.scan_update(
+                    "classifying", f"{done}/{total} classified by Claude",
+                    done=done, total=total, unit="items"),
+            )
             for lead in fresh_leads:
                 lead.llm = verdicts.get(lead.account.handle.lower())
 
+        store.scan_update("scoring & saving")
         fresh_leads = score_leads(fresh_leads, thesis)
         run_id = datetime.now(timezone.utc).strftime("verify-%Y%m%d-%H%M%S-%f")
         store.save_leads(run_id, fresh_leads)

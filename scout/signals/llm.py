@@ -11,7 +11,8 @@ from __future__ import annotations
 
 import hashlib
 import json
-from concurrent.futures import ThreadPoolExecutor
+from collections.abc import Callable
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import anthropic
 from pydantic import ValidationError
@@ -244,6 +245,7 @@ def classify(
     thesis: Thesis,
     settings: Settings,
     store: Store | None = None,
+    progress: Callable[[int, int], None] | None = None,
 ) -> dict[str, LLMVerdict]:
     """Classify candidates with Claude; returns verdicts keyed by lowercased handle.
 
@@ -253,6 +255,10 @@ def classify(
     (settings.llm_concurrency). Verdicts with confidence < 0.4 are dropped.
     Returns {} (with a warning) when no API key is configured — the pipeline
     runs heuristics-only.
+
+    `progress(done, total)` (optional) fires from the caller's thread as
+    accounts finish — cache hits count immediately, then once per completed
+    batch — so the UI can draw a live progress bar.
     """
     if not settings.anthropic_api_key:
         console.print(
@@ -282,6 +288,10 @@ def classify(
             fresh.append((account, tweets))
     if cache_hits:
         console.print(f"[dim]{cache_hits} verdicts served from cache.[/dim]")
+    n_total = len(candidates)
+    n_done = cache_hits
+    if progress is not None:
+        progress(n_done, n_total)
     if not fresh:
         return results
 
@@ -289,21 +299,31 @@ def classify(
     system_prompt = _system_prompt(thesis)
     batches = [fresh[i : i + BATCH_SIZE] for i in range(0, len(fresh), BATCH_SIZE)]
     workers = max(1, min(settings.llm_concurrency, len(batches)))
+    batch_results: list[list[LLMVerdict]] = []
     if workers > 1:
+        # submit + as_completed (not pool.map) so progress can fire from THIS
+        # thread as each batch lands — the store below is not thread-safe.
         with ThreadPoolExecutor(max_workers=workers) as pool:
-            batch_results = list(
-                pool.map(
-                    lambda b: _classify_batch_safe(
-                        client, settings.claude_model, system_prompt, b
-                    ),
-                    batches,
-                )
-            )
+            futures = {
+                pool.submit(
+                    _classify_batch_safe,
+                    client, settings.claude_model, system_prompt, b,
+                ): len(b)
+                for b in batches
+            }
+            for future in as_completed(futures):
+                batch_results.append(future.result())
+                n_done += futures[future]
+                if progress is not None:
+                    progress(n_done, n_total)
     else:
-        batch_results = [
-            _classify_batch_safe(client, settings.claude_model, system_prompt, b)
-            for b in batches
-        ]
+        for b in batches:
+            batch_results.append(
+                _classify_batch_safe(client, settings.claude_model, system_prompt, b)
+            )
+            n_done += len(b)
+            if progress is not None:
+                progress(n_done, n_total)
 
     for verdicts in batch_results:
         for verdict in verdicts:

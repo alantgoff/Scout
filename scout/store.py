@@ -545,27 +545,53 @@ class Store:
 
     # ------------------------------------------------------------- scan status
 
-    def scan_start(self, kind: str, pid: int) -> None:
+    def scan_start(self, kind: str, pid: int, phases: list[str] | None = None) -> None:
         """Mark a scan (run / verify / source preview) as running. Single-row
-        table: scout is single-user and runs are serialized by design."""
+        table: scout is single-user and runs are serialized by design.
+
+        `phases` declares the expected phase sequence up front so the UI can
+        render a stepper (pending → running → done). `SCOUT_SCAN_LOG` (set by
+        the UI when it launches the process detached) is recorded so any
+        session can tail the live console output."""
         now = datetime.now(timezone.utc).isoformat()
         self.db["scan"].upsert(
             {
                 "id": 1, "kind": kind, "pid": pid, "phase": "starting",
                 "detail": "", "status": "running",
                 "started_at": now, "updated_at": now, "finished_at": None,
+                "done": None, "total": None, "unit": "",
+                "phases_json": json.dumps(phases or []),
+                "phase_log_json": json.dumps([{"phase": "starting", "at": now}]),
+                "log_path": os.environ.get("SCOUT_SCAN_LOG", ""),
             },
             pk="id",
             alter=True,
         )
 
-    def scan_update(self, phase: str, detail: str = "") -> None:
-        """Advance the running scan's phase (no-op when nothing is running)."""
+    def scan_update(
+        self,
+        phase: str,
+        detail: str = "",
+        done: int | None = None,
+        total: int | None = None,
+        unit: str = "",
+    ) -> None:
+        """Advance the running scan's phase (no-op when nothing is running).
+
+        `done`/`total` drive a progress bar when known (`unit` "items" or
+        "s" — seconds means the phase is wall-clock-budgeted and the UI
+        derives `done` from elapsed time). Counters reset on phase change
+        unless explicitly passed."""
         row = self._scan_row()
         if not row or row.get("status") != "running":
             return
-        row.update(phase=phase, detail=detail,
-                   updated_at=datetime.now(timezone.utc).isoformat())
+        now = datetime.now(timezone.utc).isoformat()
+        if phase != row.get("phase"):
+            log = json.loads(row.get("phase_log_json") or "[]")
+            log.append({"phase": phase, "at": now})
+            row["phase_log_json"] = json.dumps(log)
+        row.update(phase=phase, detail=detail, updated_at=now,
+                   done=done, total=total, unit=unit)
         self.db["scan"].upsert(row, pk="id", alter=True)
 
     def scan_finish(self, status: str = "done", detail: str = "") -> None:
@@ -576,6 +602,17 @@ class Store:
         row.update(status=status, detail=detail or row.get("detail") or "",
                    updated_at=now, finished_at=now)
         self.db["scan"].upsert(row, pk="id", alter=True)
+        # Completed-scan history — powers empirical time estimates in the UI.
+        if row.get("started_at"):
+            self.db["scan_history"].insert(
+                {
+                    "kind": row.get("kind"), "status": status,
+                    "started_at": row.get("started_at"), "finished_at": now,
+                    "phase_log_json": row.get("phase_log_json") or "[]",
+                    "detail": row.get("detail") or "",
+                },
+                alter=True,
+            )
 
     def _scan_row(self) -> dict | None:
         if not self.db["scan"].exists():

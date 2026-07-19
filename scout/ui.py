@@ -24,9 +24,13 @@ scout.db. The UI never stores secrets. Launch with `./scout-cli ui`.
 from __future__ import annotations
 
 import html
+import json
+import math
 import os
+import signal
 import subprocess
 import sys
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -61,7 +65,7 @@ from scout.insights import stats_prompt, triage_stats
 from scout.models import Lead, LedgerEntry
 from scout.outreach import CHANNELS, draft_outreach
 from scout.score import score_breakdown
-from scout.signals.llm import DEFAULT_PROMPT_TEMPLATE
+from scout.signals.llm import BATCH_SIZE, DEFAULT_PROMPT_TEMPLATE
 from scout.store import Store
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
@@ -296,6 +300,43 @@ def _inject_css() -> None:
         @keyframes scanpulse { 0%,100% { opacity:1; transform:scale(1); }
           50% { opacity:0.35; transform:scale(0.8); } }
 
+        /* Run progress panel — the pipeline stepper (Thesis page) */
+        .runpanel { background:var(--surface); border:1px solid var(--hair);
+          border-radius:16px; padding:16px 20px 14px; box-shadow:var(--shadow);
+          margin:14px 0 4px; }
+        .rp-head { display:flex; align-items:baseline; gap:12px; flex-wrap:wrap; }
+        .rp-title { font-family:var(--serif); font-size:1.12rem; font-weight:600;
+          color:var(--ink); }
+        .rp-title .scandot { display:inline-block; margin-right:7px;
+          vertical-align:1px; }
+        .rp-meta { margin-left:auto; color:var(--muted); font-size:0.82rem;
+          font-variant-numeric:tabular-nums; }
+        .rp-meta b { color:var(--ink); font-weight:600; }
+        .rp-steps { margin-top:10px; }
+        .rp-step { display:flex; align-items:center; gap:12px; padding:8px 0;
+          border-top:1px solid var(--hair); }
+        .rp-dot { width:10px; height:10px; border-radius:50%; flex:0 0 10px; }
+        .rp-dot.done { background:var(--good); }
+        .rp-dot.current { background:var(--ink);
+          animation:scanpulse 1.6s ease-in-out infinite; }
+        .rp-dot.pending { background:transparent; border:1.5px solid var(--hair-strong); }
+        .rp-name { flex:0 0 190px; font-size:0.88rem; color:var(--ink);
+          font-weight:550; }
+        .rp-name.pending { color:var(--muted); font-weight:400; }
+        .rp-track { flex:1; height:5px; border-radius:2.5px; background:var(--track);
+          overflow:hidden; position:relative; }
+        .rp-fill { height:5px; border-radius:2.5px; background:#d9b83f; }
+        .rp-fill.done { background:var(--good); opacity:0.45; }
+        .rp-fill.indet { width:32%; position:absolute; left:0; top:0;
+          animation:rp-slide 1.9s ease-in-out infinite; }
+        @keyframes rp-slide { 0% { left:-32%; } 100% { left:100%; } }
+        .rp-right { flex:0 0 175px; text-align:right; font-size:0.79rem;
+          color:var(--muted); font-variant-numeric:tabular-nums;
+          overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+        .rp-detail { margin-top:9px; color:var(--ink-2); font-size:0.85rem; }
+        .rp-est { color:var(--muted); font-size:0.84rem; margin:6px 0 10px; }
+        .rp-est b { color:var(--ink); }
+
         hr { border-color:var(--hair) !important; margin:1.9rem 0 1.5rem !important; }
         [data-testid="stWidgetLabel"] p { font-size:0.83rem; color:var(--ink-2);
           font-weight:500; }
@@ -407,24 +448,140 @@ def _set_env_var(key: str, value: str) -> None:
     ENV_PATH.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
-def _stream_command(args: list[str]) -> None:
+# --------------------------------------------------- run launching & progress
+
+PHASE_LABELS = {
+    "starting": "Starting",
+    "discovering": "Discover accounts",
+    "fetching timelines": "Fetch timelines",
+    "classifying": "Claude classification",
+    "scoring & saving": "Score & save",
+    "hydrating": "Hydrate via X API",
+}
+PHASE_BLURB = {
+    "discovering": "X searches, watchlist follow-diff, GitHub & Hacker News legs",
+    "fetching timelines": "recent tweets per candidate (wall-clock budgeted)",
+    "classifying": "Claude reads each candidate: stage, sector, thesis fit",
+    "scoring & saving": "weighted signals × fit multipliers → ranked leads",
+    "hydrating": "fresh official X API reads for the shortlist",
+}
+
+
+def _fmt_dur(seconds: float) -> str:
+    seconds = max(0, int(seconds))
+    if seconds < 60:
+        return f"{seconds}s"
+    if seconds < 3600:
+        return f"{seconds // 60}m {seconds % 60:02d}s" if seconds % 60 else f"{seconds // 60}m"
+    return f"{seconds // 3600}h {(seconds % 3600) // 60}m"
+
+
+def _iso_ts(ts: str | None) -> float:
+    try:
+        return datetime.fromisoformat(ts).timestamp() if ts else 0.0
+    except ValueError:
+        return 0.0
+
+
+def _tail_log(path: str, max_lines: int = 30) -> str:
+    """Last lines of a scan log without reading the whole file."""
+    p = Path(path)
+    if not path or not p.exists():
+        return ""
+    try:
+        with open(p, "rb") as fh:
+            fh.seek(max(p.stat().st_size - 16_000, 0))
+            text = fh.read().decode("utf-8", errors="replace")
+    except OSError:
+        return ""
+    lines = [ln.rstrip() for ln in text.splitlines() if ln.strip()]
+    return "\n".join(lines[-max_lines:])
+
+
+def _launch_scan(args: list[str], kind_hint: str) -> None:
+    """Start a CLI command as a DETACHED background process, logging to
+    ~/.scout/logs/. The UI never blocks on it — the progress panel and the
+    scan banner poll the store, and the log file is tailed on demand.
+    (The child records the log path in the scan row via SCOUT_SCAN_LOG.)"""
     # Click-time guard: the page may have rendered before another scan
     # started (buttons enabled), so re-check right before launching.
     if (store.current_scan() or {}).get("status") == "running":
-        st.warning("A scan is already running — wait for the banner to clear.")
+        st.warning("A scan is already running — wait for it to finish.")
         return
-    box = st.empty()
-    lines: list[str] = []
-    env = {**os.environ, "TERM": "dumb", "NO_COLOR": "1", "COLUMNS": "120"}
-    proc = subprocess.Popen([sys.executable, "-m", "scout.cli", *args], cwd=PROJECT_ROOT,
-                            stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, env=env)
-    assert proc.stdout is not None
-    for line in proc.stdout:
-        lines.append(line.rstrip())
-        box.code("\n".join(lines[-40:]) or "…", language=None)
-    proc.wait()
-    (st.success if proc.returncode == 0 else st.error)(
-        "Done." if proc.returncode == 0 else f"Exited {proc.returncode} — see output.")
+    log_dir = Path(settings.db_path).parent / "logs"
+    log_dir.mkdir(parents=True, exist_ok=True)
+    log_path = log_dir / f"{kind_hint}-{datetime.now():%Y%m%d-%H%M%S}.log"
+    env = {**os.environ, "TERM": "dumb", "NO_COLOR": "1", "COLUMNS": "120",
+           "PYTHONUNBUFFERED": "1", "SCOUT_SCAN_LOG": str(log_path)}
+    with open(log_path, "wb") as fh:
+        fh.write(f"$ scout {' '.join(args)}\n".encode())
+        subprocess.Popen([sys.executable, "-u", "-m", "scout.cli", *args],
+                         cwd=PROJECT_ROOT, stdout=fh, stderr=subprocess.STDOUT,
+                         env=env, start_new_session=True)
+    st.session_state["launch_pending"] = time.time()
+    st.session_state["last_log_path"] = str(log_path)
+    st.session_state["toast"] = "Pipeline started — live progress below."
+    st.rerun()
+
+
+def _last_scan_durations(kind: str) -> dict[str, float] | None:
+    """Per-phase seconds from the most recent successful scan of this kind."""
+    if not store.db["scan_history"].exists():
+        return None
+    rows = list(store.db["scan_history"].rows_where(
+        "kind = ? AND status = 'done'", [kind],
+        order_by="finished_at DESC", limit=1))
+    if not rows:
+        return None
+    log = json.loads(rows[0].get("phase_log_json") or "[]")
+    if not log:
+        return None
+    out: dict[str, float] = {}
+    for entry, nxt in zip(log, log[1:] + [{"at": rows[0].get("finished_at")}]):
+        if entry["phase"] == "starting":
+            continue
+        dur = _iso_ts(nxt.get("at")) - _iso_ts(entry.get("at"))
+        out[entry["phase"]] = out.get(entry["phase"], 0.0) + max(dur, 0.0)
+    return out or None
+
+
+def _estimate_scan(kind: str, max_accounts: int | None = None,
+                   n_verify: int | None = None) -> tuple[float, float, dict[str, tuple[float, float]], str]:
+    """(lo_s, hi_s, per-phase (lo, hi), caption). Empirical when a completed
+    scan of this kind exists; otherwise a settings-based first-run estimate."""
+    hist = _last_scan_durations(kind)
+    if hist:
+        per = {ph: (d * 0.6, d * 1.5) for ph, d in hist.items()}
+        label = f"based on your last completed {kind}"
+    elif kind == "run":
+        budget = float(settings.sourcing_time_budget_s)
+        n = float(max_accounts or settings.max_accounts)
+        n_class = min(max(n * 0.5, 10.0), float(settings.llm_max_candidates))
+        batch_waves = math.ceil(n_class / BATCH_SIZE) / max(settings.llm_concurrency, 1)
+        per = {
+            # discovery + timelines share one wall-clock budget — the pair
+            # can't exceed it, which caps the whole network phase.
+            "discovering": (min(60.0, budget * 0.15), budget * 0.45),
+            "fetching timelines": (budget * 0.10, budget * 0.55),
+            "classifying": (batch_waves * 8.0, batch_waves * 18.0),
+            "scoring & saving": (5.0, 20.0),
+        }
+        label = ("first-run estimate — the network phase is hard-capped at "
+                 f"{_fmt_dur(budget)}; real timings are learned after one run")
+    elif kind == "verify":
+        n = float(n_verify or 20)
+        waves = math.ceil(min(n, settings.llm_max_candidates) / BATCH_SIZE) / max(settings.llm_concurrency, 1)
+        per = {"hydrating": (n * 0.6, n * 1.5),
+               "classifying": (waves * 8.0, waves * 18.0),
+               "scoring & saving": (5.0, 15.0)}
+        label = "first-run estimate"
+    else:  # source preview
+        budget = float(settings.sourcing_time_budget_s)
+        per = {"discovering": (min(60.0, budget * 0.2), budget)}
+        label = "first-run estimate"
+    lo = sum(v[0] for v in per.values())
+    hi = sum(v[1] for v in per.values())
+    return lo, hi, per, label
 
 
 # ----------------------------------------------------------------------- page
@@ -488,7 +645,8 @@ def _scan_indicator() -> None:
         st.markdown(
             f'<div class="scanbar"><span class="scandot"></span>'
             f'<b>{_e(kind.capitalize())} running</b> — {_e(scan.get("phase") or "…")}'
-            f'{_e(detail)} · started {_ago(scan.get("started_at"))}</div>',
+            f'{_e(detail)} · started {_ago(scan.get("started_at"))} · '
+            f'live progress on the <b>Thesis</b> page</div>',
             unsafe_allow_html=True,
         )
     elif (scan.get("finished_at") or "") > st.session_state["page_loaded_at"]:
@@ -506,6 +664,172 @@ def _scan_indicator() -> None:
 
 
 _scan_indicator()
+
+
+def _phase_durations(plog: list[dict], finished_at: str | None) -> dict[str, float]:
+    """Seconds spent per phase, from the scan's phase log. The open phase
+    (no successor) runs until finished_at, or until now while live."""
+    end_default = _iso_ts(finished_at) if finished_at else time.time()
+    durs: dict[str, float] = {}
+    for entry, nxt in zip(plog, plog[1:] + [{"at": None}]):
+        end = _iso_ts(nxt["at"]) if nxt.get("at") else end_default
+        durs[entry["phase"]] = durs.get(entry["phase"], 0.0) + max(end - _iso_ts(entry.get("at")), 0.0)
+    return durs
+
+
+@st.fragment(run_every="2s")
+def _run_panel() -> None:
+    """The run cockpit (Thesis page): a phase stepper with live progress bars,
+    per-phase timings, an ETA, the current detail line, a Stop button, and a
+    tail of the console log. Polls the store every 2s."""
+    scan = store.current_scan()
+    running = bool(scan) and scan.get("status") == "running"
+
+    # Smooth the launch gap: the child takes a few seconds to import and
+    # write its first scan row — show a starting state instead of nothing.
+    pending = st.session_state.get("launch_pending")
+    if pending:
+        if running and _iso_ts(scan.get("started_at")) >= pending - 5:
+            st.session_state.pop("launch_pending", None)
+        elif time.time() - pending < 45:
+            st.markdown(
+                '<div class="runpanel"><div class="rp-head">'
+                '<span class="rp-title"><span class="scandot"></span>Starting the pipeline…</span>'
+                '</div><div class="rp-detail">Booting the scout process — the first phase '
+                'reports in a few seconds.</div></div>',
+                unsafe_allow_html=True,
+            )
+            return
+        else:
+            st.session_state.pop("launch_pending", None)
+            st.error("The run never reported back — the log below has the reason.")
+            tail = _tail_log(st.session_state.get("last_log_path", ""))
+            if tail:
+                st.code(tail, language=None)
+            return
+
+    just_finished = (
+        bool(scan) and not running
+        and (scan.get("finished_at") or "") > st.session_state["page_loaded_at"]
+    )
+    if not scan or (not running and not just_finished):
+        return
+
+    kind = scan.get("kind") or "scan"
+    phases: list[str] = json.loads(scan.get("phases_json") or "[]")
+    current = scan.get("phase") or ""
+    if not phases:  # legacy row (run started under old code)
+        phases = [current] if current else []
+    plog = json.loads(scan.get("phase_log_json") or "[]")
+    durs = _phase_durations(plog, scan.get("finished_at"))
+    _, _, per_est, _ = _estimate_scan(kind)
+    cur_idx = phases.index(current) if current in phases else -1
+    elapsed = max(time.time() - _iso_ts(scan.get("started_at")), 0.0)
+    done_n, total_n = scan.get("done"), scan.get("total")
+    unit = scan.get("unit") or ""
+
+    # ETA: finish the current phase (items → observed rate; seconds → budget
+    # remainder; else estimate midpoint), then estimate midpoints for the rest.
+    remaining = 0.0
+    if running:
+        phase_elapsed = durs.get(current, 0.0)
+        if unit == "items" and done_n and total_n:
+            rate = done_n / max(phase_elapsed, 1e-6)
+            remaining += (total_n - done_n) / max(rate, 1e-6)
+        elif unit == "s" and total_n:
+            remaining += max(float(total_n) - phase_elapsed, 0.0)
+        else:
+            lo, hi = per_est.get(current, (30.0, 120.0))
+            remaining += max((lo + hi) / 2 - phase_elapsed, (lo + hi) * 0.08)
+        for ph in phases[cur_idx + 1:]:
+            lo, hi = per_est.get(ph, (10.0, 30.0))
+            remaining += (lo + hi) / 2
+
+    rows_html = []
+    for i, ph in enumerate(phases):
+        if not running and scan.get("status") == "done":
+            state = "done"
+        elif i < cur_idx or (i == cur_idx and not running):
+            state = "done" if i < cur_idx or scan.get("status") == "done" else "failed"
+        elif i == cur_idx:
+            state = "current"
+        else:
+            state = "pending"
+        label = PHASE_LABELS.get(ph, ph.capitalize())
+        blurb = PHASE_BLURB.get(ph, "")
+
+        if state == "done":
+            bar = '<div class="rp-fill done" style="width:100%"></div>'
+            right = _fmt_dur(durs[ph]) if ph in durs else "—"
+        elif state == "current":
+            if unit == "items" and done_n is not None and total_n:
+                frac = min(done_n / total_n, 1.0)
+                bar = f'<div class="rp-fill" style="width:{frac * 100:.0f}%"></div>'
+                right = f"{done_n}/{total_n} · {_fmt_dur(durs.get(ph, 0))}"
+            elif unit == "s" and total_n:
+                frac = min(durs.get(ph, 0.0) / float(total_n), 1.0)
+                bar = f'<div class="rp-fill" style="width:{frac * 100:.0f}%"></div>'
+                right = f"{_fmt_dur(durs.get(ph, 0))} of ≤{_fmt_dur(float(total_n))}"
+            else:
+                bar = '<div class="rp-fill indet"></div>'
+                right = _fmt_dur(durs.get(ph, 0))
+        elif state == "failed":
+            bar = ""
+            right = "failed here"
+        else:
+            lo, hi = per_est.get(ph, (0.0, 0.0))
+            bar = ""
+            right = f"~{_fmt_dur((lo + hi) / 2)}" if hi else ""
+        dot_cls = {"done": "done", "current": "current",
+                   "failed": "pending", "pending": "pending"}[state]
+        name_cls = " pending" if state == "pending" else ""
+        rows_html.append(
+            f'<div class="rp-step"><div class="rp-dot {dot_cls}"></div>'
+            f'<div class="rp-name{name_cls}" title="{_e(blurb)}">{_e(label)}</div>'
+            f'<div class="rp-track">{bar}</div>'
+            f'<div class="rp-right">{_e(right)}</div></div>'
+        )
+
+    if running:
+        title = f'<span class="scandot"></span>{_e(kind.capitalize())} in progress'
+        meta = (f'elapsed <b>{_fmt_dur(elapsed)}</b> · '
+                f'≈ <b>{_fmt_dur(remaining)}</b> left')
+    elif scan.get("status") == "done":
+        title = f'{_e(kind.capitalize())} finished'
+        meta = f'took <b>{_fmt_dur(_iso_ts(scan.get("finished_at")) - _iso_ts(scan.get("started_at")))}</b>'
+    else:
+        title = f'{_e(kind.capitalize())} failed'
+        meta = f'after {_fmt_dur(_iso_ts(scan.get("finished_at")) - _iso_ts(scan.get("started_at")))}'
+    detail = scan.get("detail") or ""
+    st.markdown(
+        f'<div class="runpanel"><div class="rp-head">'
+        f'<span class="rp-title">{title}</span>'
+        f'<span class="rp-meta">{meta}</span></div>'
+        f'<div class="rp-steps">{"".join(rows_html)}</div>'
+        + (f'<div class="rp-detail">{_e(detail)}</div>' if detail else "")
+        + '</div>',
+        unsafe_allow_html=True,
+    )
+
+    b1, b2, _sp = st.columns([1, 1.3, 3.7])
+    if running:
+        if b1.button("Stop run", key="rp_stop"):
+            try:
+                os.kill(int(scan.get("pid") or 0), signal.SIGTERM)
+            except (ProcessLookupError, ValueError):
+                pass
+            store.scan_finish("failed", "stopped from the UI")
+            st.session_state["toast"] = "Run stopped."
+            st.rerun(scope="app")
+    elif scan.get("status") == "done":
+        if b1.button("View results", key="rp_refresh", type="primary"):
+            st.session_state["page_loaded_at"] = datetime.now(timezone.utc).isoformat()
+            st.rerun(scope="app")
+    log_path = scan.get("log_path") or st.session_state.get("last_log_path", "")
+    tail = _tail_log(log_path)
+    if tail:
+        with st.expander("Console log"):
+            st.code(tail, language=None)
 
 tab_thesis, tab_startups, tab_long, tab_short, tab_memo, tab_settings = st.tabs(
     ["Thesis", "Startups", "Longlist", "Shortlist", "Memo", "Settings"]
@@ -1393,10 +1717,17 @@ with tab_thesis:
         ttl = st.number_input("Skip if scored < N days", 0, 90, settings.ttl_days)
     paid_run = "xapi" in (source or "")
     scan_active = ((store.current_scan() or {}).get("status") == "running")
-    if scan_active:
-        st.markdown('<div class="subtle">A scan is already running (see the banner above) — '
-                    'the buttons unlock when it finishes.</div>', unsafe_allow_html=True)
     run_ready = not scan_active
+
+    # Time estimate up front — empirical after the first completed run,
+    # settings-derived before that.
+    est_lo, est_hi, _per, est_label = _estimate_scan("run", max_accounts=int(max_accounts))
+    st.markdown(
+        f'<div class="rp-est">Estimated <b>{_fmt_dur(est_lo)}–{_fmt_dur(est_hi)}</b> '
+        f'for this run · {_e(est_label)}. Runs happen in the background — you can '
+        'keep browsing while the pipeline reports progress below.</div>',
+        unsafe_allow_html=True,
+    )
     if paid_run:
         spent_now = store.xapi_spend_usd()
         remaining = max(settings.xapi_spend_cap_usd - spent_now, 0.0)
@@ -1417,11 +1748,16 @@ with tab_thesis:
         )
     run_col, preview_col, _sp = st.columns([1, 1.6, 3])
     if run_col.button("Run scout", type="primary", disabled=not run_ready):
-        _stream_command(["run", "--source", "xapi" if paid_run else "twscrape",
-                         "--max-accounts", str(int(max_accounts)),
-                         "--min-score", str(int(min_score_run)), "--ttl-days", str(int(ttl))])
+        _launch_scan(["run", "--source", "xapi" if paid_run else "twscrape",
+                      "--max-accounts", str(int(max_accounts)),
+                      "--min-score", str(int(min_score_run)), "--ttl-days", str(int(ttl))],
+                     "run")
     if preview_col.button("Preview discovery (free, no scoring)", disabled=scan_active):
-        _stream_command(["source", "--max-accounts", str(int(max_accounts))])
+        _launch_scan(["source", "--max-accounts", str(int(max_accounts))], "source")
+
+    # The run cockpit — phase stepper, progress bars, ETA, log tail. Renders
+    # only while a scan runs (or just finished) and polls on its own.
+    _run_panel()
 
     st.write("")
     st.markdown("---")
@@ -1440,16 +1776,19 @@ with tab_thesis:
     v_est = int(n_verify) * (settings.xapi_cost_per_user_read
                              + int(v_tweets) * settings.xapi_cost_per_post_read)
     v_remaining = max(settings.xapi_spend_cap_usd - store.xapi_spend_usd(), 0.0)
+    v_lo, v_hi, _vper, _vlabel = _estimate_scan("verify", n_verify=int(n_verify))
     st.markdown(
         f'<div class="subtle">Worst case ≈ <b>${v_est:.2f}</b> · '
-        f'<b>${v_remaining:.2f}</b> left of the cap. Results land as a verify run '
+        f'<b>${v_remaining:.2f}</b> left of the cap · estimated '
+        f'<b>{_fmt_dur(v_lo)}–{_fmt_dur(v_hi)}</b>. Results land as a verify run '
         f'in the ledger.</div>',
         unsafe_allow_html=True,
     )
     v_ready = st.checkbox(f"Spend up to ${v_est:.2f} of the X API budget",
                           key="confirm_verify_spend")
     if st.button("Run precision pass", disabled=not v_ready or scan_active):
-        _stream_command(["verify", "--max", str(int(n_verify)), "--tweets", str(int(v_tweets))])
+        _launch_scan(["verify", "--max", str(int(n_verify)), "--tweets", str(int(v_tweets))],
+                     "verify")
 
     st.write("")
     st.markdown("---")
@@ -1633,7 +1972,7 @@ with tab_thesis:
 DB_TABLE_ORDER = [
     "leads", "accounts", "tweets", "llm_verdicts", "pipeline", "runs",
     "unlinked_leads", "follow_edges", "follow_meta", "bio_snapshots",
-    "searches", "xapi_usage", "scan",
+    "searches", "xapi_usage", "scan", "scan_history",
 ]
 DB_TABLE_HELP = {
     "leads": "Every scored lead — one row per handle per run.",
@@ -1648,7 +1987,8 @@ DB_TABLE_HELP = {
     "bio_snapshots": "Bio history behind the bio_change signal.",
     "searches": "Per-query result cache with TTL.",
     "xapi_usage": "The paid X API budget ledger — every billed call.",
-    "scan": "Live scan status (drives the banner).",
+    "scan": "Live scan status (drives the banner + run cockpit).",
+    "scan_history": "Completed scans with per-phase timings (powers time estimates).",
 }
 
 

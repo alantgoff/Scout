@@ -1,90 +1,52 @@
-# Managed by `scout ui` — edit there or here, both work.
-# All targeting lives in this file; the code never hardcodes it.
-# keywords -> bio_intent | target_bios -> departure_signal (literal bio substrings,
-# include the marker: 'ex-OpenAI') | disqualifiers drop the account entirely |
-# launch_phrases -> launch_traction | weights are relative (normalized at score time).
-thesis: Technical founders leaving top AI labs/FAANG to build vertical agents on unique and differentiated
-  datasets — agents must create their own training data in production at customers
+# Managed by scout (UI / `scout strategy`). target_stages steers search + scoring;
+# signal_params and llm_prompt are editable in the UI.
+thesis: Identify technical founders building hardware or software infrastructure that enables AI model
+  deployment at the edge — inference, orchestration, networking, and silicon — outside centralized cloud
+  data centers.
 keywords:
-- stealth
-- building something new
-- day 1
-- founding engineer
-- working on something
-- Leaving
+- edge inference
+- on-device AI
+- edge deployment
+- embedded ML
+- TinyML
+- edge computing
+- neuromorphic
+- edge orchestration
+- inference at the edge
+- building edge
 target_bios:
-- ex-OpenAI
-- ex-Anthropic
-- ex-DeepMind
-- ex-Google Brain
-- ex-Meta AI
-- prev @
+- ex-Qualcomm
+- ex-NVIDIA
+- prev @nvidia
+- ex-Apple Silicon
+- prev @apple
+- ex-Arm
+- ex-Intel
+- prev @intel
+- ex-Google Edge
+- ex-Graphcore
+- prev @graphcore
+- ex-Cerebras
 sectors:
-- ai infra
-- devtools
-- agents
-- evals
-- RL environments
+- edge AI hardware
+- edge AI software
+- on-device inference
+- embedded machine learning
+- edge orchestration
+- AI silicon / custom chips
+- edge networking and connectivity
+- TinyML
+- edge MLOps
 disqualifiers:
-- crypto airdrop
+- crypto
 - NFT
-- follow back
-- growth hacker
-# Which company stages to target. Drives WHICH searches run (launch queries vs
-# departure queries vs stealth intent) and scoring: leads whose classified stage
-# is off-target get score × signal_params.stage_mismatch_multiplier.
-target_stages:
-- launched
-
-# Tunable constants behind the deterministic signals (editable in the UI).
-signal_params:
-  traction_floor: 0.05
-  traction_saturation: 0.25
-  traction_window_days: 30
-  convergence_full_credit: 2
-  stage_mismatch_multiplier: 0.5
-  # How much Claude's thesis_fit (0..1) sways the final score:
-  # multiplier = (1 - w) + w * fit.
-  thesis_fit_weight: 0.5
-  # Same shape for value_add_fit (would the firm's value-add accelerate this
-  # startup?). 0 = informational only (chips/sort/exports still show it).
-  value_add_weight: 0.0
-
-# The firm whose strategic value-add every lead is scored against. The levers
-# are fed to the classifier verbatim; each verdict returns a 0-1 value_add_fit
-# plus a per-lever breakdown ("which startups would benefit from what WE
-# specifically offer"). Researched from Headline's own materials, July 2026:
-# regional early-stage funds (US VII $408M / EU VII EUR 320M / Brazil III /
-# Asia V $145M) feeding the $865M Global Growth IV fund ($20-70M checks from
-# Series B), plus in-house data platforms (EVA sourcing, ATHENA analytics,
-# Searchlight, founder-facing Deepdive).
-firm_name: Headline
-firm_value_add:
-- key: global_expansion
-  label: Local-to-global expansion
-  description: Autonomous local funds in the US, Europe, Latin America, and Asia connected
-    into one global platform — startups whose product or go-to-market must cross borders early
-    (multi-region customers, US↔EU expansion, international marketplaces) get on-the-ground
-    help in each market.
-- key: follow_on_capital
-  label: Multi-stage follow-on capital
-  description: Early-stage checks of $1.5–15M chain into an $865M growth fund writing $20–70M
-    from Series B — startups on capital-intensive trajectories (infra buildout, GPU spend,
-    market-by-market expansion) that will need deep follow-on rounds benefit most.
-- key: data_driven_growth
-  label: Data-driven growth benchmarking
-  description: Proprietary systems (EVA sourcing, ATHENA analytics, Searchlight, the
-    founder-facing Deepdive) benchmark traction, retention, and product-market fit against one
-    of the largest startup datasets in venture — startups with measurable usage or revenue
-    metrics (consumer, marketplaces, usage-based SaaS, PLG devtools) can be benchmarked and
-    coached with it.
-- key: sector_playbooks
-  label: Sector depth & portfolio network
-  description: Operator networks and repeat playbooks in fintech, commerce/consumer, B2B SaaS,
-    and AI infrastructure (portfolio includes Mistral AI, NGINX, Sonos, Bumble, Gopuff, Acorns,
-    Raisin) — startups in these lanes tap portfolio intros, customer pipelines, and hiring
-    networks.
-
+- blockchain
+- web3
+- recruiter
+- marketing
+- consultant
+- analyst
+- student
 weights:
   bio_intent: 20.0
   smart_money_convergence: 20.0
@@ -96,12 +58,46 @@ weights:
   github_evidence: 5.0
   source_corroboration: 5.0
 launch_phrases:
-- launch
-- launching
+- just launched
+- we're live
+- announcing our
+- introducing our edge
+- shipping today
+- open sourcing our
+- now available on-device
+target_stages:
+- idea
+- stealth
 - launched
-- introducing
-- shipped
-- we built
-- day 1
-- beta
-- waitlist
+signal_params:
+  traction_floor: 0.05
+  traction_saturation: 0.25
+  traction_window_days: 30
+  convergence_full_credit: 2
+  stage_mismatch_multiplier: 0.5
+  thesis_fit_weight: 0.5
+  value_add_weight: 0.0
+firm_name: Headline
+firm_value_add:
+- key: global_expansion
+  label: Local-to-global expansion
+  description: Autonomous local funds in the US, Europe, Latin America, and Asia connected into one global
+    platform — startups whose product or go-to-market must cross borders early (multi-region customers,
+    US↔EU expansion, international marketplaces) get on-the-ground help in each market.
+- key: follow_on_capital
+  label: Multi-stage follow-on capital
+  description: Early-stage checks of $1.5–15M chain into an $865M growth fund writing $20–70M from Series
+    B — startups on capital-intensive trajectories (infra buildout, GPU spend, market-by-market expansion)
+    that will need deep follow-on rounds benefit most.
+- key: data_driven_growth
+  label: Data-driven growth benchmarking
+  description: Proprietary systems (EVA sourcing, ATHENA analytics, Searchlight, the founder-facing Deepdive)
+    benchmark traction, retention, and product-market fit against one of the largest startup datasets
+    in venture — startups with measurable usage or revenue metrics (consumer, marketplaces, usage-based
+    SaaS, PLG devtools) can be benchmarked and coached with it.
+- key: sector_playbooks
+  label: Sector depth & portfolio network
+  description: Operator networks and repeat playbooks in fintech, commerce/consumer, B2B SaaS, and AI
+    infrastructure (portfolio includes Mistral AI, NGINX, Sonos, Bumble, Gopuff, Acorns, Raisin) — startups
+    in these lanes tap portfolio intros, customer pipelines, and hiring networks.
+llm_prompt: ''

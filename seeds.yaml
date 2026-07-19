@@ -1,81 +1,61 @@
-# Seed strategies (v2 — research-backed query bank). Editable here or in `scout ui`.
-#
-# Syntax notes:
-#   - Engagement filters (min_faves:) and bio: operators work in twscrape mode only;
-#     the paid X API silently drops or rejects them (scout strips them in xapi mode).
-#   - Quote exact phrases; OR must be uppercase; () group.
-
-# --- Departure announcements (earliest, highest-recall signal) --------------
-searches_departure:
-  - '"some personal news" (openai OR anthropic OR deepmind OR "google brain" OR xai) min_faves:30'
-  - '("my last day at" OR "last day at" OR "leaving") (@OpenAI OR @AnthropicAI OR @GoogleDeepMind OR @xai) min_faves:20'
-  - '("after" ("years at" OR "years working at")) (openai OR anthropic OR deepmind) min_faves:20'
-
-# --- Stealth / new-venture intent -------------------------------------------
-searches_stealth_intent:
-  - '"building something new" (ai OR agents OR infra OR devtools) min_faves:10'
-  - '("in stealth" OR "going stealth") (ai OR agents OR infra OR evals)'
-  - '"working on something" (ai OR llm OR agents) min_faves:10'
-
-# --- Founding-team hiring (a founder hiring reveals themselves) --------------
-searches_hiring:
-  - '("founding engineer" OR "founding team" OR "employee #1") (hiring OR "we''re hiring" OR join) (ai OR llm OR agents OR infra)'
-
-# --- Just-launched announcements (target_stages: launched) --------------------
-searches_launch:
-  - '("we just launched" OR "today we''re launching" OR "we''re live") (ai OR agents OR llm OR infra OR devtools) min_faves:20'
-  - '"coming out of stealth" (ai OR agents OR infra)'
-  - '("launch day" OR "launching today") (ai OR agents OR devtools) min_faves:10'
-  - '"Show HN" (agents OR llm OR ai) min_faves:10'
-
-# --- Legacy catch-all (still run, uncategorized) -----------------------------
-searches: []
-
-# --- Bio / people search (twscrape search_user; finds accounts by BIO text) --
-bio_searches:
-  - "ex-openai"
-  - "ex-anthropic"
-  - "ex-deepmind"
-  - "stealth ai"
-  - "building ai infra"
-
-# --- Follow-graph watchlist ---------------------------------------------------
-# Investors/operators whose NEW follows are signal. Their following lists are
-# snapshotted each run and diffed; 2+ of them newly following the same account
-# fires smart_money_convergence (the strongest X-native signal).
-# ⚠️ SUGGESTED DEFAULTS — well-known AI-infra/devtools figures. Replace with
-# Headline's own tastemaker roster; quality of this list drives signal quality.
-watchlist:
-  - "eladgil"          # Elad Gil — prolific AI investor
-  - "saranormous"      # Sarah Guo — Conviction
-  - "natfriedman"      # Nat Friedman — AI investor, ex-GitHub CEO
-  - "danielgross"      # Daniel Gross — AI investor
-  - "martin_casado"    # Martin Casado — a16z infra
-  - "garrytan"         # Garry Tan — YC
-  - "swyx"             # swyx — AI eng / latent.space
-  - "karpathy"         # Andrej Karpathy
-  - "gdb"              # Greg Brockman — OpenAI
-  - "rauchg"           # Guillermo Rauch — Vercel
-  - "amasad"           # Amjad Masad — Replit
-  - "mitchellh"        # Mitchell Hashimoto — HashiCorp/Ghostty
-  - "ClementDelangue"  # Clem Delangue — Hugging Face
-  - "DrJimFan"         # Jim Fan — NVIDIA
-  - "soumithchintala"  # Soumith Chintala — PyTorch
-  - "alexandr_wang"    # Alexandr Wang — Scale/Meta
-  - "dylan522p"        # Dylan Patel — SemiAnalysis
-
-# Legacy alias — merged into watchlist
-tastemakers: []
-
-# --- Public X List IDs (numeric; members pulled via twscrape) -----------------
+# Managed by scout (UI / `scout strategy`). Query bank + bio search + watchlist + github topics.
 lists: []
-  # - "1234567890123456789"
-  # Find lists via Google x-ray: site:x.com inurl:/i/lists "AI founders"
-
-# --- GitHub discovery topics (free; needs no token, faster with GITHUB_TOKEN) -
+searches: []
+searches_departure:
+- ("leaving NVIDIA" OR "left NVIDIA" OR "ex-NVIDIA") ("building" OR "startup" OR "stealth")
+- ("leaving Qualcomm" OR "left Qualcomm" OR "ex-Qualcomm") ("building" OR "startup" OR "stealth")
+- ("leaving Arm" OR "left Arm" OR "ex-Arm") ("inference" OR "edge" OR "building")
+- ("leaving Apple" OR "left Apple") ("edge" OR "on-device" OR "silicon" OR "startup")
+- ("leaving Intel" OR "left Intel") ("AI" OR "edge" OR "inference") ("building" OR "startup")
+- ("leaving Graphcore" OR "leaving Cerebras" OR "leaving Groq") ("building" OR "startup" OR "new chapter")
+searches_stealth_intent:
+- ("edge inference" OR "on-device inference") ("building" OR "stealth" OR "working on") min_faves:5
+- ("TinyML" OR "embedded ML") ("building" OR "startup" OR "excited to share") min_faves:5
+- ("edge AI" OR "edge deployment") "stealth" min_faves:5
+- '"on-device" ("LLM" OR "model" OR "inference") ("building" OR "working on something") min_faves:10'
+- ("edge orchestration" OR "edge runtime") ("building" OR "startup" OR "open source") min_faves:5
+- ("power budget" OR "latency at the edge" OR "memory-constrained") ("inference" OR "model") min_faves:5
+searches_hiring:
+- ("hiring" OR "looking for") ("embedded ML" OR "edge AI" OR "TinyML") ("engineer" OR "founding engineer")
+- ("hiring" OR "join us") ("firmware engineer" OR "embedded systems") ("AI" OR "inference") min_faves:5
+- ("founding engineer" OR "first engineer") ("edge" OR "on-device" OR "inference") min_faves:5
+- ("we're hiring" OR "join our team") ("edge inference" OR "edge AI" OR "on-device") min_faves:5
+- ("hiring" OR "looking for") ("ML compiler" OR "inference runtime" OR "kernel engineer") ("edge" OR "embedded")
+  min_faves:5
+searches_launch:
+- ("just launched" OR "announcing" OR "we're live") ("edge inference" OR "on-device AI" OR "edge AI")
+  min_faves:10
+- ("open sourcing" OR "open source") ("edge" OR "on-device") ("inference" OR "runtime" OR "model") min_faves:20
+- ("TinyML" OR "embedded ML") ("launch" OR "shipped" OR "now available") min_faves:10
+- ("edge deployment" OR "edge runtime") ("launch" OR "introducing" OR "shipping") min_faves:10
+bio_searches:
+- edge AI founder
+- on-device inference
+- embedded ML
+- TinyML founder
+- edge infrastructure
+- stealth edge AI
+- ex-nvidia building
+- ex-qualcomm founder
+- edge computing startup
+- AI silicon founder
+watchlist:
+- eladgil
+- natfriedman
+- danielgross
+- martin_casado
+- garrytan
+- karpathy
+- DrJimFan
+- dylan522p
+- soumithchintala
+- benedictevans
+- chipstrat
+tastemakers: []
 github_topics:
-  - "ai-agents"
-  - "llm-inference"
-  - "llm-evaluation"
-  - "developer-tools"
-  - "llmops"
+- edge-ai
+- tinyml
+- on-device-ml
+- embedded-ml
+- edge-inference
+- llm-inference
