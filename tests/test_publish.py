@@ -46,6 +46,7 @@ def test_build_digest_renders_tracks_and_no_secrets(tmp_path: Path) -> None:
     assert "EvalHQ" in page  # startup titled by company
     assert "@ada_infra" in page
     assert "stealth_sam" in page  # pre-launch watch section
+    assert "stealth startup" in page  # unnamed founder → synthesized identity
     assert "To reach out" in page  # pipeline status chip
     assert "What they&#x27;re building" in page or "Research brief" in page
     assert 'name="robots" content="noindex"' in page

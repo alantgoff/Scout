@@ -48,7 +48,7 @@ from scout.config import (
     save_seeds,
     save_thesis,
 )
-from scout.companies import group_by_company
+from scout.companies import group_by_company, startup_identity
 from scout.export import pipeline_rows, write_pipeline_csv
 from scout.insights import stats_prompt, triage_stats
 from scout.models import Lead, LedgerEntry
@@ -532,18 +532,29 @@ def _lead_card(
 
     summary = (verdict.one_line_summary if verdict else "") or account.bio or "—"
 
-    # Startup-first identity: when the classifier named the company, the card
-    # is titled by the STARTUP; the account becomes the byline.
-    company = (verdict.company_name or "").strip() if verdict else ""
+    # STARTUP-FIRST identity: every founder-like lead is titled by its startup
+    # — the classifier's company when named, otherwise a synthesized stealth
+    # identity tied to the founder ("Ada Lin's stealth startup"). Only
+    # corporate/commentator accounts keep a person/account title.
     company_url = (verdict.company_url or "").strip() if verdict else ""
-    if company:
+    identity = startup_identity(lead)
+    if identity:
+        startup_title, synthesized = identity
+        # A synthesized title already carries the founder's name — the byline
+        # drops it rather than repeat it.
+        byline = (
+            f'@{_e(account.handle)} · {account.followers:,} followers'
+            if synthesized else
+            f'{_e(account.name or account.handle)} · @{_e(account.handle)} · '
+            f'{account.followers:,} followers'
+        )
         title_href = _e(company_url or account.url)
         title_html = (
-            f'<a href="{title_href}" target="_blank">{_e(company)}</a> '
-            f'<span class="lead-handle">{_e(account.name or account.handle)} · '
-            f'@{_e(account.handle)} · {account.followers:,} followers</span>'
+            f'<a href="{title_href}" target="_blank">{_e(startup_title)}</a> '
+            f'<span class="lead-handle">{byline}</span>'
         )
-        avatar_text = _initials(company, account.handle)
+        avatar_text = _initials(account.name if synthesized else startup_title,
+                                account.handle)
     else:
         title_html = (
             f'<a href="{account.url}" target="_blank">{_e(account.name or account.handle)}</a> '
@@ -810,7 +821,7 @@ with tab_leads:
             n_companies = len(group_by_company(pairs))
             t1.markdown(_tile("Launched startups", str(n_companies), sub), unsafe_allow_html=True)
         elif track == "Pre-launch watch":
-            t1.markdown(_tile("Pre-launch people", str(len(base_leads)), sub), unsafe_allow_html=True)
+            t1.markdown(_tile("Pre-launch startups", str(len(base_leads)), sub), unsafe_allow_html=True)
         else:
             t1.markdown(_tile("Tracked leads", str(len(base_leads)), sub), unsafe_allow_html=True)
         t2.markdown(_tile("Strong fit", str(strong_fit), "thesis fit ≥ 70%"), unsafe_allow_html=True)
@@ -915,19 +926,17 @@ with tab_leads:
                                       if p[1] and p[1].score_delta is not None
                                       else float("-inf")), reverse=True)
 
-        # In the Startups track the unit is the company: fold founder +
-        # company accounts attributed to the same startup into one card.
-        if track == "Startups":
-            display = group_by_company(shown)
-        else:
-            display = [(lead, entry, []) for lead, entry in shown]
+        # Startup-first in EVERY track: fold accounts attributed to the same
+        # startup into one card; unnamed founders are singleton stealth
+        # startups (companies.startup_identity).
+        display = group_by_company(shown)
 
         hidden_note = ""
         if hidden_counts:
             parts = [f"{count} by {HIDE_LABELS[reason]}"
                      for reason, count in sorted(hidden_counts.items(), key=lambda kv: -kv[1])]
             hidden_note = " · hidden: " + ", ".join(parts)
-        if track == "Startups" and len(display) != len(shown):
+        if len(display) != len(shown):
             count_text = f"{len(display)} startups · {len(shown)} accounts of {len(pairs)}"
         elif track == "Startups":
             count_text = f"{len(display)} startups of {len(pairs)} accounts"
@@ -1011,8 +1020,10 @@ with tab_pipeline:
             row = pipeline[handle_key]
             lead = lead_by_handle.get(handle_key)
             verdict = lead.llm if lead else None
+            identity = startup_identity(lead) if lead else None
             editor_rows.append({
                 "handle": handle_key,
+                "Startup": identity[0] if identity else "—",
                 "Lead": lead.account.url if lead else f"https://x.com/{handle_key}",
                 "Fit": (f"{verdict.thesis_fit:.0%}" if verdict and verdict.thesis_fit is not None else "—"),
                 "Score": lead.score if lead else 0,
@@ -1021,9 +1032,11 @@ with tab_pipeline:
             })
         edited = st.data_editor(
             editor_rows, hide_index=True, use_container_width=True, key="pipeline_editor",
-            column_order=["Lead", "Fit", "Score", "Status", "Notes"],
+            column_order=["Startup", "Lead", "Fit", "Score", "Status", "Notes"],
             column_config={
                 "handle": None,
+                "Startup": st.column_config.TextColumn("Startup", disabled=True,
+                                                       width="medium"),
                 "Lead": st.column_config.LinkColumn("Lead", display_text=r"x\.com/(.+)",
                                                     disabled=True, width="small"),
                 "Fit": st.column_config.TextColumn("Fit", disabled=True, width="small"),
@@ -1047,7 +1060,12 @@ with tab_pipeline:
         st.markdown('<div class="section-title">Work a lead</div>'
                     '<div class="section-sub">AI-drafted outreach and the research brief, side by side.</div>',
                     unsafe_allow_html=True)
-        pick = st.selectbox("Lead", sorted(shortlist), format_func=lambda h: f"@{h}",
+        def _pick_label(h: str) -> str:
+            picked = lead_by_handle.get(h)
+            ident = startup_identity(picked) if picked else None
+            return f"{ident[0]} — @{h}" if ident else f"@{h}"
+
+        pick = st.selectbox("Lead", sorted(shortlist), format_func=_pick_label,
                             label_visibility="collapsed")
         picked_lead = lead_by_handle.get(pick)
         picked_row = pipeline.get(pick, {})

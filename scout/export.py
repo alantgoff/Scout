@@ -9,11 +9,13 @@ from pathlib import Path
 from rich.console import Console
 from rich.table import Table
 
+from scout.companies import startup_identity
 from scout.config import Thesis
 from scout.models import Lead
 
 CSV_COLUMNS = [
     "rank",
+    "startup",
     "handle",
     "name",
     "company_name",
@@ -59,9 +61,11 @@ def write_csv(leads: list[Lead], out_dir: Path) -> Path:
         writer.writeheader()
         for lead in leads:
             llm = lead.llm
+            identity = startup_identity(lead)
             writer.writerow(
                 {
                     "rank": lead.rank if lead.rank is not None else "",
+                    "startup": identity[0] if identity else "",
                     "handle": lead.account.handle,
                     "name": lead.account.name,
                     "company_name": (llm.company_name or "") if llm else "",
@@ -107,8 +111,8 @@ def write_csv(leads: list[Lead], out_dir: Path) -> Path:
 
 
 PIPELINE_COLUMNS = [
-    "handle", "name", "url", "status", "score", "thesis_fit", "value_add_fit",
-    "notes", "channel", "outreach", "brief", "updated_at",
+    "startup", "handle", "name", "url", "status", "score", "thesis_fit",
+    "value_add_fit", "notes", "channel", "outreach", "brief", "updated_at",
 ]
 
 
@@ -125,7 +129,9 @@ def pipeline_rows(store) -> list[dict]:
             continue
         lead = ledger.get(handle)
         verdict = lead.llm if lead else None
+        identity = startup_identity(lead) if lead else None
         rows.append({
+            "startup": identity[0] if identity else "",
             "handle": handle,
             "name": lead.account.name if lead else "",
             "url": lead.account.url if lead else f"https://x.com/{handle}",
@@ -162,8 +168,10 @@ def write_pipeline_csv(rows: list[dict], out_dir: Path) -> Path:
 def _lead_card_lines(lead: Lead, index: int, firm: str = "") -> list[str]:
     account = lead.account
     llm = lead.llm
-    company = (llm.company_name or "").strip() if llm else ""
-    title = company or (account.name or account.handle)
+    # Startup-first: real company name, or the synthesized stealth identity
+    # ("Ada Lin's stealth startup"); account title only for non-founders.
+    identity = startup_identity(lead)
+    title = identity[0] if identity else (account.name or account.handle)
     who = (llm.one_line_summary if llm else "") or _oneline(account.bio) or "(no bio)"
     facts = []
     if llm and llm.thesis_fit is not None:

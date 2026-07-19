@@ -38,7 +38,17 @@ def seed_store(db_path: Path) -> None:
                        value_add_reason="EU expansion next; usage-metric heavy"),
         score=62.0, rank=1,
     )
-    store.save_leads("run-smoke", [lead])
+    # A launched founder the classifier couldn't name a company for — must
+    # render startup-first with a synthesized identity, not as a person.
+    unnamed = Lead(
+        account=Account(id="2", handle="nora_builds", name="Nora Vale",
+                        bio="building something new", followers=800, source="search"),
+        signals=[Signal(name="bio_intent", value=1.0, weight=20.0)],
+        llm=LLMVerdict(handle="nora_builds", account_type="founder",
+                       is_founder=True, stage="launched", confidence=0.8),
+        score=31.0, rank=2,
+    )
+    store.save_leads("run-smoke", [lead, unnamed])
     store.record_run("run-smoke", source="twscrape", strategy_hash="smoke-hash",
                      thesis_statement="smoke thesis")
 
@@ -60,6 +70,8 @@ def test_ui_renders_without_exceptions(tmp_path, monkeypatch) -> None:
     page_text = " ".join(m.value for m in at.markdown)
     assert "SmokeCo" in page_text
     assert "smoke_founder" in page_text
+    # Startup-first: the unnamed launched founder gets a synthesized identity
+    assert "Nora Vale&#x27;s unnamed startup" in page_text
     # Fine-grained fields render on the card face
     assert "Fit 80%" in page_text
     assert "agent evals" in page_text

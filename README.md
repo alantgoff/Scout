@@ -46,10 +46,15 @@ working directory is migrated to the home location automatically on first run.
 
 The UI (`./scout-cli ui`) is a content-first workspace:
 
-1. **Leads** — three tracks, startups first: **Startups** (default — launched
-   companies, titled by company name, founder + company accounts folded into
-   one card), **Pre-launch watch** (people expected to launch or found soon —
-   departures, stealth language, bio changes), and **Everything**. Two time
+1. **Leads** — the STARTUP is the first-class object in every view: cards are
+   titled by the company (founder + company accounts folded into one entry,
+   founders as the byline). A founder whose company isn't named yet still
+   renders as a startup with a synthesized identity tied to the person —
+   "Ada Lin's stealth startup" (pre-launch) or "…'s unnamed startup" (launched,
+   name unknown); only non-founder accounts keep a plain account card. Three
+   tracks: **Startups** (default — launched companies), **Pre-launch watch**
+   (expected to launch or found soon — departures, stealth language, bio
+   changes), and **Everything**. Two time
    scopes: **All runs** (the ledger — every handle ever scored, best-known
    state, with **score-change arrows**, **New** chips, and a "seen N× since"
    history line) and **Latest run**. Runs made with identical settings group

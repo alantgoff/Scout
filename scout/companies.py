@@ -1,11 +1,19 @@
-"""Company grouping — fold X accounts that belong to the same startup.
+"""Startup identity + grouping — the STARTUP is the first-class object.
 
 The unit scout discovers is an X account; the unit a VC sources is a STARTUP.
-A launched startup typically surfaces twice — the founder's account and the
-company's own account. `group_by_company` folds leads that the classifier
-attributed to the same company into one entry (primary = highest score,
-the rest attached as secondary accounts), so the Startups view and the report
-count companies, not accounts.
+Every founder-like lead resolves to one via `startup_identity`:
+
+  - the classifier named a company        → that company ("EvalHQ")
+  - founder, no company name yet          → a synthesized identity tied to the
+    person: "Ada Lin's stealth startup" (pre-launch) or "Ada Lin's unnamed
+    startup" (launched, name unknown)
+  - corporate account / commentator / no founder evidence → None (stays an
+    account, never dressed up as a startup)
+
+`group_by_company` then folds leads attributed to the same company into one
+entry (primary = highest score, the rest secondary accounts); unnamed founders
+pass through as singleton startups. Views and the report count startups, with
+founders as members.
 
 Pure functions, no I/O — unit-tested.
 """
@@ -18,6 +26,48 @@ from scout.models import Lead, LedgerEntry
 
 Pair = tuple[Lead, LedgerEntry | None]
 Grouped = tuple[Lead, LedgerEntry | None, list[Lead]]  # primary, entry, secondaries
+
+# Heuristic founder evidence — used only when no classifier verdict exists
+# (heuristics-only mode): any of these firing marks the account founder-like.
+FOUNDER_EVIDENCE_SIGNALS = {
+    "bio_intent", "departure_signal", "bio_change", "launch_traction",
+    "builder_evidence", "github_evidence",
+}
+
+
+def founder_like(lead: Lead) -> bool:
+    """Is this lead someone building a company (or the company itself)?
+
+    Classifier verdict when present (founder/startup account types); founder-
+    evidence signals otherwise, so heuristics-only runs still resolve startups.
+    """
+    if lead.llm is not None:
+        if lead.llm.account_type is not None:
+            return lead.llm.account_type in ("founder", "startup")
+        return lead.llm.is_founder
+    return any(
+        s.name in FOUNDER_EVIDENCE_SIGNALS and s.value > 0 for s in lead.signals
+    )
+
+
+def startup_identity(lead: Lead) -> tuple[str, bool] | None:
+    """(display_name, synthesized) for the startup behind a lead; None when
+    the lead isn't founder-like (keep it an account, not a fake startup).
+
+    Named companies keep their real name. A founder without one gets a stable
+    placeholder derived from their name: possessive + stage-aware descriptor —
+    "stealth startup" pre-launch, "unnamed startup" once launched.
+    """
+    verdict = lead.llm
+    if verdict is not None and verdict.company_name and company_key(lead):
+        return verdict.company_name.strip(), False
+    if not founder_like(lead):
+        return None
+    who = (lead.account.name or f"@{lead.account.handle}").strip()
+    possessive = who + ("'" if who.lower().endswith("s") else "'s")
+    stage = verdict.stage if verdict else None
+    descriptor = "unnamed startup" if stage in ("launched", "scaling") else "stealth startup"
+    return f"{possessive} {descriptor}", True
 
 
 def company_key(lead: Lead) -> str | None:

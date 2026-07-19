@@ -18,7 +18,7 @@ import zlib
 from datetime import datetime, timezone
 from pathlib import Path
 
-from scout.companies import group_by_company
+from scout.companies import group_by_company, startup_identity
 from scout.config import Thesis
 from scout.models import Lead, LedgerEntry
 from scout.store import Store
@@ -81,9 +81,13 @@ def _chips(lead: Lead, entry: LedgerEntry | None, status: str | None,
 def _card(primary: Lead, entry: LedgerEntry | None, secondaries: list[Lead],
           pipeline_row: dict, startup: bool, firm: str = "") -> str:
     account, verdict = primary.account, primary.llm
-    if startup and verdict and verdict.company_name:
-        title = verdict.company_name
-        subtitle = f"{account.name or account.handle} · @{account.handle}"
+    # Startup-first titling, same system as the app: real company name, or the
+    # synthesized stealth identity tied to the founder.
+    identity = startup_identity(primary)
+    if identity:
+        title, synthesized = identity
+        subtitle = (f"@{account.handle}" if synthesized
+                    else f"{account.name or account.handle} · @{account.handle}")
     else:
         title = account.name or f"@{account.handle}"
         subtitle = f"@{account.handle}"

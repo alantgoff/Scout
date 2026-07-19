@@ -11,9 +11,11 @@ user-facing version; this file is denser and aimed at contributors.)
 
 `scout` sources **launched startups** (primary) and pre-launch founders-to-be
 (secondary "watch" track) from Twitter/X, GitHub, and HN for a VC analyst at
-Headline. The discovery unit is an X account; the *product* unit is a startup —
+Headline. The discovery unit is an X account; the *product* unit is a STARTUP —
 the classifier extracts `company_name`/`company_url` and `scout/companies.py`
-folds founder + company accounts into one entry (Startups track, report). It's
+resolves every founder-like lead to a startup identity (real company name, or
+a synthesized "Ada Lin's stealth startup" placeholder when unnamed) and folds
+founder + company accounts into one entry, in every view and the report. It's
 a Python 3.12 package with a **Typer CLI** and a **Streamlit UI** (Apple design
 language: Leads · Pipeline · Sourcing · Database · Settings), managed by **uv**. A thesis
 (`thesis.yaml`) drives all targeting; nothing is hardcoded.
@@ -89,9 +91,12 @@ scout/
   insights.py       Pure triage analytics: triage_stats/stats_prompt contrast
                     shortlisted-vs-passed leads per signal/sector/stage/fit;
                     feeds the UI insights panel and the weight-tuning agent.
-  companies.py      Pure company grouping: company_key/group_by_company fold
-                    accounts sharing a classifier-extracted company_name into
-                    one startup entry (primary = highest score).
+  companies.py      Pure startup identity + grouping: startup_identity resolves
+                    every founder-like lead to (name, synthesized) — real
+                    company, or "Ada Lin's stealth startup" when unnamed;
+                    founder_like gates it (verdict, else founder-evidence
+                    signals); company_key/group_by_company fold accounts
+                    sharing a company into one entry (primary = highest score).
   demo_data.py      8 synthetic sample founders for `scout demo` (obviously fake handles).
   ui.py             Streamlit app: Leads / Pipeline / Sourcing / Database / Settings.
                     Apple design language; lead cards; agent flows. ~800 lines.
