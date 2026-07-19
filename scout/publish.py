@@ -1,7 +1,7 @@
 """Static mobile digest — renders the lead ledger to docs/ for GitHub Pages.
 
 `scout publish` turns the current deal flow into one self-contained,
-phone-first HTML page (Apple design language, same track semantics as the
+phone-first HTML page (Headline design language, same track semantics as the
 UI: launched startups grouped by company first, pre-launch watch second).
 Push docs/ and GitHub Pages serves it; on a phone, "Add to Home Screen"
 makes it a read-only Scout app that refreshes with every published scan.
@@ -155,45 +155,55 @@ def build_digest(store: Store, thesis: Thesis, out_dir: Path) -> Path:
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-status-bar-style" content="default">
 <meta name="apple-mobile-web-app-title" content="Scout">
-<meta name="theme-color" content="#fbfbfd">
+<meta name="theme-color" content="#f4ebe0">
 <link rel="apple-touch-icon" href="icon.png">
 <title>Scout — deal flow</title>
 <style>
-:root {{ --bg:#fbfbfd; --surface:#fff; --ink:#1d1d1f; --ink2:#494949; --muted:#6e6e73;
-  --hair:rgba(0,0,0,0.08); --accent:#0071e3; --soft:rgba(0,113,227,0.10); }}
+@import url('https://fonts.googleapis.com/css2?family=Fraunces:ital,opsz,wght@0,9..144,300..700;1,9..144,300..700&family=Figtree:wght@300..700&display=swap');
+:root {{ --bg:#f4ebe0; --surface:#fbf5ec; --ink:#20180f; --ink2:#4a4034; --muted:#6b6052;
+  --hair:rgba(32,24,15,0.14); --accent:#20180f; --butter:#f2dc6c;
+  --soft:rgba(226,196,90,0.28);
+  --serif:"Fraunces","Iowan Old Style",Georgia,serif;
+  --sans:"Figtree",-apple-system,system-ui,sans-serif; }}
 * {{ margin:0; padding:0; box-sizing:border-box; }}
-body {{ font-family:-apple-system,BlinkMacSystemFont,"SF Pro Text",system-ui,sans-serif;
+body {{ font-family:var(--sans);
   background:var(--bg); color:var(--ink); -webkit-font-smoothing:antialiased;
   padding:max(env(safe-area-inset-top),12px) 14px 40px; max-width:640px; margin:0 auto; }}
-h1 {{ font-size:1.9rem; letter-spacing:-0.03em; margin:10px 0 2px; }}
-.thesis {{ color:var(--muted); font-size:0.85rem; line-height:1.4; }}
-.meta {{ color:var(--muted); font-size:0.75rem; margin:6px 0 14px; }}
+h1 {{ font-family:var(--serif); font-size:2rem; font-weight:600;
+  letter-spacing:-0.015em; margin:10px 0 2px; text-align:center; }}
+.thesis {{ font-family:var(--serif); font-style:italic; color:var(--ink2);
+  font-size:0.92rem; line-height:1.45; text-align:center; }}
+.meta {{ color:var(--muted); font-size:0.75rem; margin:6px 0 14px; text-align:center; }}
 .stats {{ display:flex; gap:8px; margin-bottom:14px; }}
 .stat {{ flex:1; background:var(--surface); border:1px solid var(--hair); border-radius:12px;
   padding:8px 10px; }}
-.stat b {{ font-size:1.25rem; display:block; }}
-.stat span {{ font-size:0.65rem; color:var(--muted); text-transform:uppercase; letter-spacing:0.05em; }}
-input {{ width:100%; padding:10px 14px; border-radius:12px; border:1px solid var(--hair);
-  font-size:1rem; background:var(--surface); margin-bottom:14px; -webkit-appearance:none; }}
-h2 {{ font-size:1.05rem; margin:18px 0 8px; letter-spacing:-0.01em; }}
+.stat b {{ font-family:var(--serif); font-size:1.3rem; font-weight:600; display:block; }}
+.stat span {{ font-size:0.6rem; color:var(--muted); text-transform:uppercase; letter-spacing:0.09em; }}
+input {{ width:100%; padding:10px 14px; border-radius:999px; border:1px solid var(--hair);
+  font-size:1rem; font-family:var(--sans); color:var(--ink);
+  background:var(--surface); margin-bottom:14px; -webkit-appearance:none; }}
+h2 {{ font-family:var(--serif); font-size:1.2rem; font-weight:600;
+  margin:18px 0 8px; letter-spacing:-0.005em; }}
 .card {{ background:var(--surface); border:1px solid var(--hair); border-radius:14px;
   padding:12px 14px; margin-bottom:10px; }}
 .row {{ display:flex; gap:10px; }}
 .grow {{ flex:1; min-width:0; }}
-.name {{ font-weight:650; font-size:0.98rem; }}
+.name {{ font-family:var(--serif); font-weight:600; font-size:1.05rem; }}
 .name a {{ color:var(--ink); text-decoration:none; border-bottom:1px solid var(--hair); }}
-.sub {{ color:var(--muted); font-weight:400; font-size:0.78rem; }}
+.sub {{ font-family:var(--sans); color:var(--muted); font-weight:400; font-size:0.78rem; }}
 .summary {{ color:var(--ink2); font-size:0.86rem; line-height:1.4; margin-top:3px; }}
 .why {{ color:var(--muted); font-size:0.78rem; line-height:1.4; margin-top:6px; }}
 .chips {{ display:flex; flex-wrap:wrap; gap:5px; margin-top:7px; }}
-.chip {{ padding:2px 9px; border-radius:999px; font-size:0.68rem; font-weight:500;
-  background:rgba(0,0,0,0.05); color:var(--ink2); }}
-.chip.accent {{ background:var(--soft); color:var(--accent); font-weight:600; }}
+.chip {{ padding:2.5px 9px; border-radius:999px; font-size:0.6rem; font-weight:600;
+  text-transform:uppercase; letter-spacing:0.07em;
+  background:rgba(32,24,15,0.07); color:var(--ink2); }}
+.chip.accent {{ background:var(--butter); color:var(--ink); font-weight:600; }}
 .chip.status {{ background:var(--ink); color:var(--bg); }}
 .scorecol {{ text-align:right; flex:0 0 56px; }}
-.score {{ font-size:1.3rem; font-weight:650; }}
-.xlink {{ font-size:0.72rem; color:var(--accent); text-decoration:none; }}
-details {{ margin-top:8px; }} summary {{ font-size:0.78rem; color:var(--accent); }}
+.score {{ font-family:var(--serif); font-size:1.35rem; font-weight:600; }}
+.xlink {{ font-size:0.72rem; color:var(--ink); text-decoration:underline;
+  text-underline-offset:2px; }}
+details {{ margin-top:8px; }} summary {{ font-size:0.78rem; color:var(--muted); }}
 .brief {{ font-size:0.8rem; color:var(--ink2); white-space:pre-wrap; margin-top:6px; }}
 footer {{ color:var(--muted); font-size:0.72rem; margin-top:24px; text-align:center; }}
 </style></head><body>
@@ -230,9 +240,9 @@ document.getElementById('q').addEventListener('input', function () {{
 
 
 def _icon_png(size: int = 180) -> bytes:
-    """Solid Apple-blue apple-touch-icon, generated without image deps
-    (iOS rounds the corners itself)."""
-    r, g, b = 0x00, 0x71, 0xE3
+    """Solid butter-yellow apple-touch-icon (Headline's brand accent),
+    generated without image deps (iOS rounds the corners itself)."""
+    r, g, b = 0xF2, 0xDC, 0x6C
     row = b"\x00" + bytes((r, g, b)) * size  # filter byte + RGB pixels
     raw = row * size
 

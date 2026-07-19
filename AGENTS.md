@@ -16,7 +16,7 @@ the classifier extracts `company_name`/`company_url` and `scout/companies.py`
 resolves every founder-like lead to a startup identity (real company name, or
 a synthesized "Ada Lin's stealth startup" placeholder when unnamed) and folds
 founder + company accounts into one entry, in every view and the report. It's
-a Python 3.12 package with a **Typer CLI** and a **Streamlit UI** (Apple design
+a Python 3.12 package with a **Typer CLI** and a **Streamlit UI** (Headline design
 language: Leads · Pipeline · Sourcing · Database · Settings), managed by **uv**. A thesis
 (`thesis.yaml`) drives all targeting; nothing is hardcoded.
 
@@ -100,7 +100,7 @@ scout/
                     sharing a company into one entry (primary = highest score).
   demo_data.py      8 synthetic sample founders for `scout demo` (obviously fake handles).
   ui.py             Streamlit app: Leads / Pipeline / Sourcing / Database / Settings.
-                    Apple design language; lead cards; agent flows. ~800 lines.
+                    Headline design language; lead cards; agent flows. ~800 lines.
   ingest/
     base.py         SourceAdapter ABC (X sources) + DiscoverySource ABC (github/hn).
     twscrape_src.py Primary free X adapter: query bank, bio search, list members,
@@ -297,7 +297,7 @@ silently widen its input set to all-time).
 ## 10. Current state / open threads
 
 - Fully working: demo, source (all strategies), the whole scored pipeline, the
-  Leads/Pipeline/Sourcing/Settings UI (Apple design language, lead cards),
+  Leads/Pipeline/Sourcing/Settings UI (Headline design language, lead cards),
   strategy agent (`scout strategy` + Sourcing tab, validated live), research
   briefs, verdict cache, paid probe + verify (validated live, ~$0.83 spent).
 - v4 additions (all validated live): person-centric lead ledger with score

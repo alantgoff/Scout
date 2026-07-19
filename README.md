@@ -10,8 +10,8 @@ The secondary, completeness track is a **pre-launch watch**: people the
 signals say are about to leave a lab, go stealth, or launch. Two built-in
 agents do the heavy lifting — a **strategy agent** turns a plain-language
 thesis into the full sourcing configuration, and a **research-brief agent**
-writes a pre-call memo per lead. CLI + a Streamlit UI in Apple design
-language. Internal tool — scrappy on purpose.
+writes a pre-call memo per lead. CLI + a Streamlit UI in Headline design
+language (headline.com). Internal tool — scrappy on purpose.
 
 > **Agents:** read [`AGENTS.md`](AGENTS.md) first — it's the fast map of the
 > codebase, data flow, invariants, and gotchas.

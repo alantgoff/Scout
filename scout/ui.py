@@ -1,4 +1,6 @@
-"""scout — a deal-flow workspace over the CLI, in Apple design language.
+"""scout — a deal-flow workspace over the CLI, in Headline's editorial design
+language (headline.com): warm cream paper, ink serif display, butter-yellow
+accents, uppercase tracked labels.
 
 Five surfaces, content first:
 
@@ -98,18 +100,25 @@ def _inject_css() -> None:
         """
         <style>
         /* Committed light appearance — matches .streamlit/config.toml [theme],
-           which pins Streamlit's native widgets to the same look. */
+           which pins Streamlit's native widgets to the same look.
+           Headline (headline.com) design language: warm cream paper, warm-black
+           ink, butter-yellow brand accent, high-contrast serif display type
+           (Fraunces ≈ Headline's serif), geometric sans for UI text (Figtree),
+           uppercase letter-spaced micro-labels, hairline rules, pill buttons. */
+        @import url('https://fonts.googleapis.com/css2?family=Fraunces:ital,opsz,wght@0,9..144,300..700;1,9..144,300..700&family=Figtree:ital,wght@0,300..700;1,300..700&display=swap');
         :root {
-          --bg:#fbfbfd; --surface:#ffffff; --ink:#1d1d1f; --ink-2:#494949;
-          /* #6e6e73 = Apple's secondary label; ~4.9:1 on --bg, passes AA for text */
-          --muted:#6e6e73; --hair:rgba(0,0,0,0.08); --hair-strong:rgba(0,0,0,0.14);
-          --accent:#0071e3; --accent-soft:rgba(0,113,227,0.10);
-          --good:#1d7a3a; --track:rgba(0,0,0,0.06);
-          --shadow:0 1px 2px rgba(0,0,0,0.04), 0 8px 24px rgba(0,0,0,0.05);
+          --bg:#f4ebe0; --surface:#fbf5ec; --ink:#20180f; --ink-2:#4a4034;
+          /* warm taupe secondary label; ≥4.5:1 on --bg, passes AA for text */
+          --muted:#6b6052; --hair:rgba(32,24,15,0.14); --hair-strong:rgba(32,24,15,0.26);
+          --accent:#20180f; --butter:#f2dc6c; --accent-soft:rgba(226,196,90,0.28);
+          --good:#2e6b34; --track:rgba(32,24,15,0.08);
+          --shadow:0 1px 2px rgba(32,24,15,0.04), 0 8px 24px rgba(32,24,15,0.05);
+          --serif:"Fraunces","Iowan Old Style",Georgia,"Times New Roman",serif;
+          --sans:"Figtree",-apple-system,BlinkMacSystemFont,"Helvetica Neue",
+            system-ui,sans-serif;
         }
         html, body, [class*="css"], .stMarkdown, button, input, textarea {
-          font-family:-apple-system,BlinkMacSystemFont,"SF Pro Text","SF Pro Display",
-            "Helvetica Neue",system-ui,sans-serif !important;
+          font-family:var(--sans) !important;
           -webkit-font-smoothing:antialiased;
         }
         .stApp { background:var(--bg); }
@@ -117,117 +126,135 @@ def _inject_css() -> None:
         #MainMenu, footer, header[data-testid="stHeader"], [data-testid="stToolbar"],
         [data-testid="stDecoration"] { visibility:hidden; height:0; }
 
-        /* Typography */
-        h1,h2,h3,h4 { letter-spacing:-0.022em; color:var(--ink); }
-        .hero-title { font-size:2.35rem; font-weight:700; letter-spacing:-0.03em;
-          color:var(--ink); line-height:1.05; margin:0; }
-        .hero-sub { color:var(--muted); font-size:1.02rem; margin-top:6px;
-          font-weight:400; max-width:44rem; }
-        .section-title { font-size:1.35rem; font-weight:650; letter-spacing:-0.02em;
-          color:var(--ink); margin:0 0 2px; }
+        /* Typography — serif display over sans body, like the Headline site */
+        h1,h2,h3,h4 { font-family:var(--serif) !important; font-weight:600;
+          letter-spacing:-0.01em; color:var(--ink); }
+        /* Centered serif masthead — echoes the headline.com wordmark */
+        .hero-title { font-family:var(--serif); font-size:2.7rem; font-weight:600;
+          letter-spacing:-0.015em; color:var(--ink); line-height:1.05; margin:0;
+          text-align:center; }
+        .hero-sub { font-family:var(--serif); font-style:italic; color:var(--ink-2);
+          font-size:1.08rem; margin:8px auto 0; font-weight:400; max-width:44rem;
+          text-align:center; line-height:1.45; }
+        .section-title { font-family:var(--serif); font-size:1.45rem; font-weight:600;
+          letter-spacing:-0.01em; color:var(--ink); margin:0 0 2px; }
         .section-sub { color:var(--muted); font-size:0.92rem; margin:0 0 14px; }
         .subtle { color:var(--muted); font-size:0.88rem; }
 
-        /* Tabs → centered pill control (Streamlit ≥1.59 react-aria markup) */
+        /* Tabs → centered pill control (Streamlit ≥1.59 react-aria markup);
+           uppercase tracked labels, selected pill inverts to ink */
         .stTabs [role="tablist"] { gap:2px; background:var(--track); padding:3px;
-          border-radius:12px; width:fit-content; margin:1.4rem auto 1.6rem;
+          border-radius:980px; width:fit-content; margin:1.4rem auto 1.6rem;
           border-bottom:none !important; }
-        .stTabs [data-testid="stTab"] { height:34px; border-radius:9px; padding:0 22px;
+        .stTabs [data-testid="stTab"] { height:34px; border-radius:980px; padding:0 20px;
           background:transparent; border:none; display:flex; align-items:center; }
-        .stTabs [data-testid="stTab"] p { font-size:0.9rem !important; font-weight:500;
-          color:var(--ink-2); }
-        .stTabs [data-testid="stTab"][aria-selected="true"] { background:var(--surface);
-          box-shadow:0 1px 4px rgba(0,0,0,0.14); }
-        .stTabs [data-testid="stTab"][aria-selected="true"] p { color:var(--ink);
+        .stTabs [data-testid="stTab"] p { font-size:0.74rem !important; font-weight:600;
+          text-transform:uppercase; letter-spacing:0.08em; color:var(--ink-2); }
+        .stTabs [data-testid="stTab"][aria-selected="true"] { background:var(--ink);
+          box-shadow:none; }
+        .stTabs [data-testid="stTab"][aria-selected="true"] p { color:var(--bg);
           font-weight:600; }
         .stTabs .react-aria-SelectionIndicator { display:none !important; }
 
-        /* Buttons */
-        .stButton>button, .stDownloadButton>button, .stFormSubmitButton>button {
-          border-radius:980px; font-weight:500; font-size:0.88rem;
-          border:1px solid var(--hair-strong); background:var(--surface); color:var(--ink);
-          padding:0.32rem 1rem; transition:all .12s ease; box-shadow:none; }
-        .stButton>button:hover, .stDownloadButton>button:hover { border-color:var(--accent);
-          color:var(--accent); background:var(--surface); }
+        /* Buttons — thin-outline pills with uppercase tracked labels ("MORE") */
+        .stButton>button, .stDownloadButton>button, .stFormSubmitButton>button,
+        [data-testid="stPopoverButton"] {
+          border-radius:980px; font-weight:600; font-size:0.74rem;
+          text-transform:uppercase; letter-spacing:0.08em;
+          border:1px solid var(--hair-strong); background:transparent; color:var(--ink);
+          padding:0.38rem 1.05rem; transition:all .12s ease; box-shadow:none; }
+        .stButton>button:hover, .stDownloadButton>button:hover,
+        [data-testid="stPopoverButton"]:hover { border-color:var(--ink);
+          color:var(--bg); background:var(--ink); }
+        [data-testid="stPopoverButton"] p { font-size:0.74rem !important; }
         .stButton>button[kind="primary"], .stFormSubmitButton>button[kind="primary"] {
-          background:var(--accent); border-color:var(--accent); color:#fff; }
-        .stButton>button[kind="primary"]:hover { background:#0077ed; color:#fff; }
+          background:var(--ink); border-color:var(--ink); color:var(--bg); }
+        .stButton>button[kind="primary"]:hover { background:#3a2e1f;
+          border-color:#3a2e1f; color:var(--bg); }
         .stButton>button:active { transform:scale(0.97); }
         .stButton>button:disabled { opacity:0.4; cursor:not-allowed; }
-        .stButton>button:disabled:hover { border-color:var(--hair-strong); color:var(--ink); }
-        .stButton>button[kind="primary"]:disabled:hover { background:var(--accent);
-          border-color:var(--accent); color:#fff; }
+        .stButton>button:disabled:hover { border-color:var(--hair-strong);
+          color:var(--ink); background:transparent; }
+        .stButton>button[kind="primary"]:disabled:hover { background:var(--ink);
+          border-color:var(--ink); color:var(--bg); }
 
         /* Segmented controls → the same pill group as the tabs. The track is
            the inner radiogroup (the outer testid node also wraps the label). */
         [data-testid="stButtonGroup"] [role="radiogroup"] { gap:2px;
-          background:var(--track); padding:3px; border-radius:12px; width:fit-content; }
+          background:var(--track); padding:3px; border-radius:980px; width:fit-content; }
         [data-testid="stButtonGroup"] button { border:none !important;
-          border-radius:9px !important; min-height:30px;
+          border-radius:980px !important; min-height:30px;
           padding:0.18rem 0.9rem !important; background:transparent !important;
           box-shadow:none !important; }
-        [data-testid="stButtonGroup"] button p { font-size:0.86rem !important;
-          font-weight:500; color:var(--ink-2); }
+        [data-testid="stButtonGroup"] button p { font-size:0.72rem !important;
+          font-weight:600; text-transform:uppercase; letter-spacing:0.07em;
+          color:var(--ink-2); }
         [data-testid="stButtonGroup"] button:hover p { color:var(--ink); }
         [data-testid="stButtonGroup"] button[aria-checked="true"] {
-          background:var(--surface) !important;
-          box-shadow:0 1px 4px rgba(0,0,0,0.14) !important; }
+          background:var(--ink) !important; box-shadow:none !important; }
         [data-testid="stButtonGroup"] button[aria-checked="true"] p {
-          color:var(--ink); font-weight:600; }
+          color:var(--bg); font-weight:600; }
 
-        /* Cards & tiles */
+        /* Cards & tiles — cream paper panels with hairline rules */
         [data-testid="stVerticalBlockBorderWrapper"] {
           background:var(--surface); border:1px solid var(--hair); border-radius:16px;
           box-shadow:var(--shadow);
           transition:box-shadow .18s ease, border-color .18s ease; }
         [data-testid="stVerticalBlockBorderWrapper"]:hover {
           border-color:var(--hair-strong);
-          box-shadow:0 2px 4px rgba(0,0,0,0.05), 0 14px 36px rgba(0,0,0,0.08); }
+          box-shadow:0 2px 4px rgba(32,24,15,0.05), 0 14px 36px rgba(32,24,15,0.08); }
         [data-testid="stVerticalBlockBorderWrapper"] > div > [data-testid="stVerticalBlock"] {
           padding:0.65rem 0.75rem; }
         .tile { background:var(--surface); border:1px solid var(--hair); border-radius:16px;
           padding:16px 18px; box-shadow:var(--shadow); }
-        .tile .label { color:var(--muted); font-size:0.72rem; text-transform:uppercase;
-          letter-spacing:0.06em; font-weight:600; }
-        .tile .value { color:var(--ink); font-size:1.75rem; font-weight:650;
-          letter-spacing:-0.02em; line-height:1.15; margin-top:4px; }
+        .tile .label { color:var(--muted); font-size:0.68rem; text-transform:uppercase;
+          letter-spacing:0.1em; font-weight:600; }
+        .tile .value { font-family:var(--serif); color:var(--ink); font-size:1.8rem;
+          font-weight:600; letter-spacing:-0.01em; line-height:1.15; margin-top:4px; }
         .tile .sub { color:var(--muted); font-size:0.8rem; margin-top:2px; }
 
-        /* Lead card internals */
-        .lead-name { font-size:1.04rem; font-weight:600; color:var(--ink);
-          letter-spacing:-0.01em; }
+        /* Lead card internals — startup names in serif, like the portfolio page */
+        .lead-name { font-family:var(--serif); font-size:1.16rem; font-weight:600;
+          color:var(--ink); letter-spacing:-0.005em; }
         .lead-name a { color:var(--ink); text-decoration:none; }
-        .lead-name a:hover { color:var(--accent); }
-        .lead-handle { color:var(--muted); font-weight:400; font-size:0.9rem; }
+        .lead-name a:hover { text-decoration:underline;
+          text-underline-offset:3px; text-decoration-thickness:1px; }
+        .lead-handle { font-family:var(--sans); color:var(--muted); font-weight:400;
+          font-size:0.85rem; letter-spacing:0; }
         .lead-summary { color:var(--ink-2); font-size:0.92rem; line-height:1.45;
           margin-top:3px; }
-        .avatar { width:40px; height:40px; border-radius:50%; background:var(--accent-soft);
-          color:var(--accent); display:flex; align-items:center; justify-content:center;
-          font-weight:600; font-size:0.95rem; letter-spacing:0; flex:0 0 40px; }
+        .avatar { width:40px; height:40px; border-radius:50%; background:var(--butter);
+          color:var(--ink); display:flex; align-items:center; justify-content:center;
+          font-family:var(--serif); font-weight:600; font-size:0.95rem;
+          letter-spacing:0; flex:0 0 40px; }
         .lead-row { display:flex; gap:13px; align-items:flex-start; }
 
+        /* Chips — uppercase tracked micro-labels in tonal pills
+           ("INFRASTRUCTURE" / "FINTECH" on the Headline portfolio page) */
         .chiprow { display:flex; flex-wrap:wrap; gap:6px; margin-top:9px; }
-        .chip { display:inline-block; padding:3px 10px; border-radius:980px;
-          font-size:0.74rem; font-weight:500; background:var(--track); color:var(--ink-2);
+        .chip { display:inline-block; padding:3.5px 11px; border-radius:980px;
+          font-size:0.66rem; font-weight:600; text-transform:uppercase;
+          letter-spacing:0.07em; background:var(--track); color:var(--ink-2);
           white-space:nowrap; }
-        .chip.accent { background:var(--accent-soft); color:var(--accent); font-weight:600; }
+        .chip.accent { background:var(--butter); color:var(--ink); font-weight:600; }
         .chip.status { background:var(--ink); color:var(--bg); }
         .chip.invalid { text-decoration:line-through; opacity:0.55; }
 
         .scoreblock { text-align:right; }
-        .scorenum { font-size:1.6rem; font-weight:650; letter-spacing:-0.02em;
-          color:var(--ink); line-height:1; }
-        .scorecap { color:var(--muted); font-size:0.7rem; text-transform:uppercase;
-          letter-spacing:0.06em; font-weight:600; margin-top:2px; }
+        .scorenum { font-family:var(--serif); font-size:1.7rem; font-weight:600;
+          letter-spacing:-0.01em; color:var(--ink); line-height:1; }
+        .scorecap { color:var(--muted); font-size:0.66rem; text-transform:uppercase;
+          letter-spacing:0.1em; font-weight:600; margin-top:2px; }
         .scoretrack { width:92px; height:4px; border-radius:2px; background:var(--track);
-          margin-top:8px; margin-left:auto; }
-        .scorefill { height:4px; border-radius:2px; background:var(--accent); }
+          margin:8px 0 10px auto; }
+        /* deep mustard — the butter accent, dark enough to read on the track */
+        .scorefill { height:4px; border-radius:2px; background:#d9b83f; }
 
         /* Signal bars (single hue — magnitude) */
         .sigrow { display:flex; align-items:center; gap:10px; margin:5px 0; }
         .signame { flex:0 0 190px; font-size:0.82rem; color:var(--ink-2); }
         .sigtrack { flex:1; height:5px; border-radius:2.5px; background:var(--track); }
-        .sigfill { height:5px; border-radius:2.5px; background:var(--accent); }
+        .sigfill { height:5px; border-radius:2.5px; background:var(--ink); }
         .sigpts { flex:0 0 46px; text-align:right; font-size:0.82rem; color:var(--ink);
           font-variant-numeric:tabular-nums; font-weight:550; }
         .sigdetail { flex:0 0 34%; font-size:0.76rem; color:var(--muted);
@@ -243,19 +270,20 @@ def _inject_css() -> None:
         [data-testid="stExpander"] details { border:none !important; background:transparent; }
         [data-testid="stExpander"] summary { font-size:0.84rem; color:var(--muted);
           font-weight:500; }
-        [data-testid="stExpander"] summary:hover { color:var(--accent); }
+        [data-testid="stExpander"] summary:hover { color:var(--ink);
+          text-decoration:underline; text-underline-offset:3px; }
 
         .nudge { background:var(--accent-soft); border-radius:12px; padding:10px 16px;
           font-size:0.88rem; color:var(--ink-2); margin:0 0 16px; }
         .nudge b { color:var(--ink); }
 
-        /* Live scan banner (auto-refreshing fragment) */
+        /* Live scan banner (auto-refreshing fragment) — butter-yellow wash */
         .scanbar { background:var(--accent-soft); border-radius:12px; padding:10px 16px;
           font-size:0.88rem; color:var(--ink-2); margin:14px 0 0;
           display:flex; align-items:center; gap:9px; }
         .scanbar b { color:var(--ink); }
-        .scanbar.failed { background:rgba(196,66,66,0.08); }
-        .scandot { width:8px; height:8px; border-radius:50%; background:var(--accent);
+        .scanbar.failed { background:rgba(178,58,44,0.10); }
+        .scandot { width:8px; height:8px; border-radius:50%; background:var(--ink);
           flex:0 0 8px; animation:scanpulse 1.6s ease-in-out infinite; }
         @keyframes scanpulse { 0%,100% { opacity:1; transform:scale(1); }
           50% { opacity:0.35; transform:scale(0.8); } }
@@ -264,7 +292,7 @@ def _inject_css() -> None:
         [data-testid="stWidgetLabel"] p { font-size:0.83rem; color:var(--ink-2);
           font-weight:500; }
 
-        /* Inputs — hairline borders, soft focus ring, one radius everywhere */
+        /* Inputs — hairline borders, butter focus ring, one radius everywhere */
         .stTextInput [data-baseweb="input"], .stNumberInput [data-baseweb="input"],
         .stTextArea [data-baseweb="textarea"] {
           border-radius:10px !important; border-color:var(--hair-strong) !important;
@@ -273,7 +301,7 @@ def _inject_css() -> None:
         .stTextInput [data-baseweb="input"]:focus-within,
         .stNumberInput [data-baseweb="input"]:focus-within,
         .stTextArea [data-baseweb="textarea"]:focus-within {
-          border-color:var(--accent) !important;
+          border-color:var(--ink) !important;
           box-shadow:0 0 0 3px var(--accent-soft); }
         .stSelectbox [data-baseweb="select"] > div,
         .stMultiSelect [data-baseweb="select"] > div {
@@ -281,7 +309,7 @@ def _inject_css() -> None:
           background:var(--surface) !important; }
         .stSelectbox [data-baseweb="select"]:focus-within > div,
         .stMultiSelect [data-baseweb="select"]:focus-within > div {
-          border-color:var(--accent) !important;
+          border-color:var(--ink) !important;
           box-shadow:0 0 0 3px var(--accent-soft); }
 
         /* Data tables — framed like cards */

@@ -7,10 +7,11 @@ address = "localhost"
 gatherUsageStats = false
 
 [theme]
-# Committed light appearance (Apple design language) — one deterministic look
-# on every machine; native widgets share the same accent as the custom CSS.
+# Committed light appearance (Headline design language, headline.com) — one
+# deterministic look on every machine; native widgets share the same warm
+# cream/ink palette as the custom CSS.
 base = "light"
-primaryColor = "#0071e3"
-backgroundColor = "#fbfbfd"
-secondaryBackgroundColor = "#ffffff"
-textColor = "#1d1d1f"
+primaryColor = "#20180f"
+backgroundColor = "#f4ebe0"
+secondaryBackgroundColor = "#fbf5ec"
+textColor = "#20180f"
