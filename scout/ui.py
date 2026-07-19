@@ -106,6 +106,11 @@ FUNNEL_STAGES = ["longlisted", *WIN_STAGES]
 
 STAGE_LABEL = {"idea": "Idea", "stealth": "Stealth", "launched": "Launched", "scaling": "Scaling"}
 TYPE_LABEL = {"founder": "Founder", "startup": "Startup", "other": "Other"}
+CUSTOMER_TYPE_LABEL = {"b2b": "B2B", "b2c": "B2C", "b2b2c": "B2B2C", "mixed": "B2B+B2C"}
+QUALITY_DIM_LABEL = {
+    "team": "Team", "tech_product": "Tech & product", "market": "Market",
+    "defensibility": "Defensibility", "traction": "Traction", "investors": "Investors",
+}
 
 GROUNDED_SOURCES = {"website", "pinned_tweet", "tweets", "github"}
 
@@ -927,6 +932,9 @@ def _lead_card(
         chips.append((f"Fit {verdict.thesis_fit:.0%}", "accent"))
     if verdict is not None and (g_chip := _grounding_chip(verdict)) is not None:
         chips.append(g_chip)
+    if verdict and verdict.customer_type:
+        chips.append((CUSTOMER_TYPE_LABEL.get(verdict.customer_type,
+                                              verdict.customer_type), ""))
     if verdict and verdict.value_add_fit is not None:
         chips.append((f"{thesis.firm_name or 'Firm'} lift {verdict.value_add_fit:.0%}", "accent"))
     if status != "new":
@@ -1021,12 +1029,26 @@ def _lead_card(
             bar_pct = min(max(lead.score / (view_max or 1.0) * 100, 0), 100)
             pct_html = (f'<div class="scorecap" style="margin-top:5px">{_e(pct_label)}</div>'
                         if pct_label else "")
+            # Component caption: which of quality / fit / signals this score
+            # is made of (present components only).
+            comp_html = ""
+            if verdict is not None:
+                comps = score_components(lead, thesis)
+                bits = [f"{tag} {value:.0f}"
+                        for tag, value in (("Q", comps["quality"]),
+                                           ("F", comps["fit"]),
+                                           ("S", comps["signals"]))
+                        if value is not None]
+                if bits:
+                    comp_html = (f'<div class="scorecap" style="margin-top:5px">'
+                                 f'{_e(" · ".join(bits))}</div>')
             st.markdown(
                 f"""
                 <div class="scoreblock">
                   <div class="scorenum">{lead.score:.0f}</div>
                   <div class="scorecap">score</div>
                   <div class="scoretrack"><div class="scorefill" style="width:{bar_pct:.0f}%"></div></div>
+                  {comp_html}
                   {pct_html}
                 </div>
                 """,
@@ -1086,6 +1108,29 @@ def _lead_card(
             if verdict and verdict.verification_note:
                 st.markdown(f'<div class="subtle" style="margin-top:6px">Audit — {_e(verdict.verification_note)}</div>',
                             unsafe_allow_html=True)
+            # Company quality — per-dimension bars with the evidence citation
+            # each score rests on. Only evidence-backed dims render.
+            if verdict is not None and (q := quality_score(verdict, thesis)) is not None:
+                known = [(k, min(max(v, 0.0), 1.0))
+                         for k, v in verdict.quality.items()
+                         if thesis.quality_weights.get(k, 0) > 0]
+                n_total = sum(1 for w in thesis.quality_weights.values() if w > 0)
+                lens = CUSTOMER_TYPE_LABEL.get(verdict.customer_type or "", "")
+                lens_note = f" · {lens} lens" if lens else ""
+                st.markdown(
+                    f'<div class="subtle" style="margin-top:8px">Quality '
+                    f'<b>{q:.0f}</b> — {len(known)} of {n_total} dims '
+                    f'evidence-backed{_e(lens_note)}</div>',
+                    unsafe_allow_html=True,
+                )
+                rows = "".join(
+                    f'<div class="sigrow"><div class="signame" title="{_e(QUALITY_DIMENSIONS.get(k, ""))}">{_e(QUALITY_DIM_LABEL.get(k, k))}</div>'
+                    f'<div class="sigtrack"><div class="sigfill" style="width:{100 * v:.0f}%"></div></div>'
+                    f'<div class="sigpts">{v:.0%}</div>'
+                    f'<div class="sigdetail" title="{_e(verdict.quality_reasons.get(k, ""))}">{_e(verdict.quality_reasons.get(k, ""))}</div></div>'
+                    for k, v in sorted(known, key=lambda kv: -kv[1])
+                )
+                st.markdown(f'<div style="margin-top:4px">{rows}</div>', unsafe_allow_html=True)
             # The value-add dimension: which of the firm's specific levers
             # would accelerate this startup, per the classifier.
             if verdict and verdict.value_add_fit is not None:
@@ -1290,6 +1335,7 @@ def _render_startup_feed() -> None:
         # Reset must land BEFORE the filter widgets instantiate.
         FILTER_DEFAULTS: dict = {
             "f_type": ["founder", "startup"], "f_stage": list(STAGES),
+            "f_ctype": list(CUSTOMER_TYPES),
             "f_minscore": 0, "f_minfit": 0, "f_hidepassed": True,
         }
         if st.session_state.pop("filters_reset", False):
@@ -1298,6 +1344,7 @@ def _render_startup_feed() -> None:
         n_active = sum([
             set(st.session_state.get("f_type", FILTER_DEFAULTS["f_type"])) != {"founder", "startup"},
             set(st.session_state.get("f_stage", FILTER_DEFAULTS["f_stage"])) != set(STAGES),
+            set(st.session_state.get("f_ctype", FILTER_DEFAULTS["f_ctype"])) != set(CUSTOMER_TYPES),
             st.session_state.get("f_minscore", 0) > 0,
             st.session_state.get("f_minfit", 0) > 0,
             not st.session_state.get("f_hidepassed", True),
@@ -1309,8 +1356,8 @@ def _render_startup_feed() -> None:
                                   label_visibility="collapsed")
         with f2:
             lift_sort = f"{thesis.firm_name or 'Value-add'} lift"
-            sort_by = st.selectbox("Sort", ["Score", "Score change", "Thesis fit", lift_sort,
-                                            "Followers"],
+            sort_by = st.selectbox("Sort", ["Score", "Quality", "Score change", "Thesis fit",
+                                            lift_sort, "Followers"],
                                    label_visibility="collapsed")
         with f3:
             with st.popover(f"Filters · {n_active}" if n_active else "Filters"):
@@ -1320,6 +1367,11 @@ def _render_startup_feed() -> None:
                 stage_filter = st.multiselect("Stage", list(STAGES),
                                               default=FILTER_DEFAULTS["f_stage"], key="f_stage",
                                               format_func=lambda s: STAGE_LABEL[s])
+                ctype_filter = st.multiselect("Customer type", list(CUSTOMER_TYPES),
+                                              default=FILTER_DEFAULTS["f_ctype"], key="f_ctype",
+                                              format_func=lambda c: CUSTOMER_TYPE_LABEL[c],
+                                              help="B2B vs B2C lens the classifier applied. "
+                                                   "Unclassified leads are never hidden by this.")
                 min_score = st.slider("Minimum score", 0, 100, 0, key="f_minscore")
                 min_fit = st.slider("Minimum thesis fit", 0, 100, 0, format="%d%%", key="f_minfit")
                 hide_passed = st.toggle("Hide passed", value=True, key="f_hidepassed")
@@ -1330,8 +1382,8 @@ def _render_startup_feed() -> None:
             pass
 
         HIDE_LABELS = {"type": "type filter", "stage": "stage filter",
-                       "score": "min score", "fit": "min fit",
-                       "passed": "passed", "search": "search"}
+                       "ctype": "customer type", "score": "min score",
+                       "fit": "min fit", "passed": "passed", "search": "search"}
 
         def _hide_reason(lead: Lead) -> str | None:
             """None = visible; otherwise which filter hides this lead."""
@@ -1345,6 +1397,10 @@ def _render_startup_feed() -> None:
                     return "type"
             if stage_filter and stage and stage not in stage_filter:
                 return "stage"
+            # Same unknown-is-never-hidden semantics for the B2B/B2C lens.
+            if (verdict is not None and verdict.customer_type is not None
+                    and verdict.customer_type not in ctype_filter):
+                return "ctype"
             if lead.score < min_score:
                 return "score"
             if min_fit and (not verdict or verdict.thesis_fit is None
@@ -1373,6 +1429,9 @@ def _render_startup_feed() -> None:
         if sort_by == "Thesis fit":
             shown.sort(key=lambda p: -(p[0].llm.thesis_fit
                                        if p[0].llm and p[0].llm.thesis_fit is not None else -1))
+        elif sort_by == "Quality":
+            shown.sort(key=lambda p: -(qs if (qs := quality_score(p[0].llm, thesis)) is not None
+                                       else -1.0))
         elif sort_by == lift_sort:
             shown.sort(key=lambda p: -(p[0].llm.value_add_fit
                                        if p[0].llm and p[0].llm.value_add_fit is not None else -1))
@@ -1417,7 +1476,7 @@ def _render_startup_feed() -> None:
         # Reset pagination whenever the view changes (track, scope, filters…)
         page_size = 25
         view_key = repr((track, scope, strategy_hash, tuple(type_filter), tuple(stage_filter),
-                         min_score, min_fit, hide_passed, query, sort_by))
+                         tuple(ctype_filter), min_score, min_fit, hide_passed, query, sort_by))
         if st.session_state.get("leads_view_key") != view_key:
             st.session_state["leads_view_key"] = view_key
             st.session_state["leads_limit"] = page_size

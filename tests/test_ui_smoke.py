@@ -32,6 +32,10 @@ def seed_store(db_path: Path) -> None:
                        company_name="SmokeCo", company_url="https://smokeco.ai",
                        one_line_summary="Building an eval platform.",
                        thesis_fit=0.8, confidence=0.9,
+                       grounding="website", customer_type="b2b",
+                       quality={"team": 0.8, "traction": 0.6},
+                       quality_reasons={"team": "prev sold EvalCo",
+                                        "traction": "website: 12 logos"},
                        value_add_fit=0.7,
                        value_add_levers={"global_expansion": 0.9,
                                          "data_driven_growth": 0.5},
@@ -81,6 +85,11 @@ def test_ui_renders_without_exceptions(tmp_path, monkeypatch) -> None:
     # The firm value-add dimension renders (chip + lever bars in Details)
     assert "lift 70%" in page_text
     assert "Local-to-global expansion" in page_text
+    # v7 quality rubric renders: lens chip, quality heading, dim bar + citation
+    assert "B2B" in page_text
+    assert "evidence-backed" in page_text
+    assert "Traction" in page_text
+    assert "12 logos" in page_text
     # The Database sub-page renders the store browser (tiles + row counts)
     assert "On disk" in page_text
     assert "matching rows" in page_text
