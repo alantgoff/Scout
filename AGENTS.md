@@ -35,10 +35,11 @@ pursue** in the UI. Two agents (`scout/agents.py`): the **strategy agent**
 ## 2. Run it / test it — always via `./scout-cli` or `uv run`
 
 ```bash
-uv run pytest -q                 # ~95 tests, ~2s, no network (incl. an AppTest UI smoke test)
+uv run pytest -q                 # ~115 tests, ~3s, no network (incl. an AppTest UI smoke test)
 ./scout-cli demo                 # $0 offline end-to-end run on sample founders — best smoke test
 ./scout-cli source --strategy github,hn   # free live discovery, no scoring
 ./scout-cli ui                   # Streamlit workspace on :8501
+./start                          # user-facing launcher: sync → seed-if-empty → serve → open browser
 ```
 
 **Never rely on the bare `scout` console script.** macOS + uv marks `.venv`
@@ -116,6 +117,10 @@ thesis.yaml         Targeting + weights + signal_params + firm value-add levers
                     + llm_prompt. User-owned.
 seeds.yaml          Query bank, bio_searches, watchlist, github_topics. User-owned.
 scout-cli           Bash wrapper → `uv run python -m scout.cli "$@"`.
+start               One-command launcher: uv sync → .env → seed demo when empty
+                    (only key-less, so guaranteed $0) → streamlit → open browser.
+                    Idempotent; `--port N` overrides 8501.
+Scout.command       macOS double-click wrapper → ./start.
 conftest.py         sys.path shim for pytest.
 .streamlit/config.toml   Headless config for the UI.
 ```

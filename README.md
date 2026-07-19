@@ -16,16 +16,28 @@ language. Internal tool — scrappy on purpose.
 > **Agents:** read [`AGENTS.md`](AGENTS.md) first — it's the fast map of the
 > codebase, data flow, invariants, and gotchas.
 
-## Quickstart
+## Open the app
 
 ```bash
 git clone https://github.com/alantgoff/X-Sourcing-Tool.git scout && cd scout
-uv sync
-cp .env.example .env            # fill in TW_COOKIES (and optionally the keys)
+./start
+```
+
+`./start` does everything: syncs dependencies (uv), creates `.env` on first
+run, seeds the free offline sample dataset when the workspace would otherwise
+be empty, launches the UI, and opens your browser. Run it again anytime — if
+scout is already up it just opens the page. On macOS you can skip the terminal
+entirely: **double-click `Scout.command` in Finder** (first time:
+right-click → Open, to satisfy Gatekeeper).
+
+## Quickstart (the manual pieces)
+
+```bash
+cp .env.example .env            # ./start does this too — fill in TW_COOKIES (and optionally the keys)
 $EDITOR thesis.yaml             # thesis: stages, keywords, orgs, weights
 $EDITOR seeds.yaml              # seeds: query bank, watchlist, github topics
 ./scout-cli demo                # $0 offline end-to-end test on sample founders
-./scout-cli ui                  # the Leads · Pipeline · Sourcing · Database workspace (localhost:8501)
+./scout-cli ui                  # the workspace without the ./start conveniences (localhost:8501)
 ./scout-cli run                 # full pipeline → ./out/leads_*.csv + report_*.md
 ```
 

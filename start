@@ -1,0 +1,87 @@
+#!/usr/bin/env bash
+# scout launcher — one command to open the workspace.
+#
+#   ./start            sync deps, seed sample data on first run, open the browser
+#   ./start --port N   serve on a specific port (default 8501)
+#
+# macOS: double-click Scout.command in Finder for the same thing, no terminal.
+# Idempotent: if scout is already running on the port, it just opens the browser.
+set -euo pipefail
+cd "$(dirname "$0")"
+
+PORT=8501
+if [[ "${1:-}" == "--port" && -n "${2:-}" ]]; then PORT="$2"; fi
+URL="http://localhost:$PORT"
+
+say() { printf '\033[1m▸ %s\033[0m\n' "$*"; }
+
+open_browser() {
+  if command -v open >/dev/null 2>&1; then open "$URL"
+  elif command -v xdg-open >/dev/null 2>&1; then xdg-open "$URL"
+  else say "Open $URL in your browser."
+  fi
+}
+
+# Already running? Just bring it up.
+if curl -s -o /dev/null --max-time 1 "$URL/_stcore/health" 2>/dev/null; then
+  say "scout is already running — opening $URL"
+  open_browser
+  exit 0
+fi
+
+# Python runner: uv preferred, plain .venv as the fallback.
+if command -v uv >/dev/null 2>&1; then
+  PY=(uv run python)
+  say "Checking dependencies (uv sync)…"
+  uv sync --quiet
+elif [[ -x .venv/bin/python ]]; then
+  PY=(.venv/bin/python)
+else
+  echo "scout needs uv (https://docs.astral.sh/uv — brew install uv) or a virtualenv:" >&2
+  echo "  python3.12 -m venv .venv && .venv/bin/pip install -e ." >&2
+  exit 1
+fi
+
+# First-run config: a .env to put keys in later.
+if [[ ! -f .env && -f .env.example ]]; then
+  cp .env.example .env
+  say "Created .env from .env.example — add your keys there when ready."
+fi
+
+# First-run data: seed the free offline sample set so the UI isn't empty —
+# but only when no Anthropic key is configured (with one, demo costs a few
+# cents, so we leave that choice to you).
+HAS_LEADS=$("${PY[@]}" - <<'PY' 2>/dev/null || echo 0
+from scout.config import Settings
+from scout.store import Store
+store = Store(Settings().db_path)
+print(1 if store.db["leads"].exists() and store.db["leads"].count else 0)
+PY
+)
+KEY=$(grep -E '^ANTHROPIC_API_KEY=.+' .env 2>/dev/null | cut -d= -f2- || true)
+if [[ "$HAS_LEADS" == "0" ]]; then
+  if [[ -z "$KEY" ]]; then
+    say "First run — seeding the free offline sample dataset…"
+    "${PY[@]}" -m scout.cli demo >/dev/null 2>&1 || true
+  else
+    say "Tip: run ./scout-cli demo to populate the UI with sample leads (~a few cents with your key)."
+  fi
+fi
+
+say "Starting scout on $URL …"
+"${PY[@]}" -m streamlit run scout/ui.py --server.port "$PORT" --server.headless true &
+APP_PID=$!
+trap 'kill "$APP_PID" 2>/dev/null || true' INT TERM
+
+for _ in $(seq 1 120); do
+  if curl -s -o /dev/null "$URL/_stcore/health" 2>/dev/null; then break; fi
+  if ! kill -0 "$APP_PID" 2>/dev/null; then
+    echo "scout failed to start — run ./scout-cli ui to see the error." >&2
+    exit 1
+  fi
+  sleep 0.5
+done
+
+open_browser
+say "scout is running — press Ctrl-C here to stop it."
+wait "$APP_PID"
