@@ -28,8 +28,8 @@ PRELAUNCH = {"idea", "stealth"}
 WATCH_SIGNALS = {"departure_signal", "bio_change", "bio_intent"}
 
 STATUS_LABELS = {
-    "shortlisted": "To reach out", "contacted": "Contacted", "meeting": "Meeting",
-    "diligence": "Diligence", "won": "Allocated", "passed": "Passed",
+    "longlisted": "Longlisted", "shortlisted": "Shortlisted", "contacted": "Contacted",
+    "meeting": "Meeting", "diligence": "Diligence", "won": "Allocated", "passed": "Passed",
 }
 
 

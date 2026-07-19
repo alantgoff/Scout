@@ -1403,7 +1403,7 @@ def demo(
     md_path = write_markdown(leads, thesis, settings.out_dir)
 
     print_top_table(leads)
-    console.print(f"\nSaved [bold]{len(leads)}[/bold] demo leads — view them in the UI's Leads tab.")
+    console.print(f"\nSaved [bold]{len(leads)}[/bold] demo leads — view them on the UI's Startups page.")
     console.print(f"CSV:    [bold]{csv_path}[/bold]")
     console.print(f"Report: [bold]{md_path}[/bold]")
 

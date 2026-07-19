@@ -2,14 +2,19 @@
 language (headline.com): warm cream paper, ink serif display, butter-yellow
 accents, uppercase tracked labels.
 
-Five surfaces, content first:
+Six surfaces, funnel-ordered:
 
-  LEADS     — the ranked lead feed: information-rich cards, triage inline
-  PIPELINE  — work the shortlist to allocation: status, notes, outreach, briefs
-  SOURCING  — the AI strategy agent, run controls, and (behind disclosure)
-              every manual knob: query bank, watchlist, weights, prompt
-  DATABASE  — the raw store, browsable: any table, auto-generated filters,
-              full-text search, CSV export, read-only SQL
+  THESIS    — define how the scrape runs: the AI strategy agent, run controls,
+              and (behind disclosure) every manual knob: query bank, watchlist,
+              weights, prompt
+  STARTUPS  — what sourcing found: the lead feed (latest run or the all-runs
+              ledger) plus a Database sub-page — the raw store, browsable:
+              any table, auto-generated filters, search, CSV, read-only SQL
+  LONGLIST  — the first cut: candidates worth a closer look, Claude's
+              per-dimension scoring open on every card
+  SHORTLIST — the working set: stage/notes tracking to allocation,
+              per-dimension scoring, CRM-ready CSV export
+  MEMO      — pre-call memo and outreach draft, side by side, per startup
   SETTINGS  — keys, budget, defaults
 
 Edits write back to thesis.yaml / seeds.yaml / .env; deal-flow state lives in
@@ -78,7 +83,8 @@ SIGNAL_HELP = {
 
 STATUS_LABELS = {
     "new": "New",
-    "shortlisted": "To reach out",
+    "longlisted": "Longlisted",
+    "shortlisted": "Shortlisted",
     "contacted": "Contacted",
     "meeting": "Meeting",
     "diligence": "Diligence",
@@ -87,6 +93,8 @@ STATUS_LABELS = {
 }
 LABEL_TO_STATUS = {v: k for k, v in STATUS_LABELS.items()}
 WIN_STAGES = ["shortlisted", "contacted", "meeting", "diligence", "won"]
+# The triage funnel: feed → longlist → shortlist (→ stages to allocation).
+FUNNEL_STAGES = ["longlisted", *WIN_STAGES]
 
 STAGE_LABEL = {"idea": "Idea", "stealth": "Stealth", "launched": "Launched", "scaling": "Scaling"}
 TYPE_LABEL = {"founder": "Founder", "startup": "Startup", "other": "Other"}
@@ -439,8 +447,9 @@ leads = store.load_latest_leads()
 pipeline = store.all_pipeline()
 counts = store.pipeline_counts()
 # The ledger is the person-centric view: best-known state per handle across
-# ALL runs. It backs the "All leads" scope and — always — the Pipeline tab,
-# so a shortlisted lead never degrades just because it missed the latest run.
+# ALL runs. It backs the "All runs" scope and — always — the Longlist,
+# Shortlist, and Memo pages, so a triaged lead never degrades just because
+# it missed the latest run.
 latest_is_demo = bool(leads) and all(x.account.source == "demo" for x in leads)
 ledger = store.load_lead_ledger(include_demo=latest_is_demo)
 entry_by_handle = {e.lead.account.handle.lower(): e for e in ledger}
@@ -455,7 +464,7 @@ def _status_of(lead: Lead) -> str:
 # Header — large title, thesis as the subtitle
 st.markdown(
     f'<div class="hero-title">Scout</div>'
-    f'<div class="hero-sub">{_e(thesis.thesis) or "No thesis yet — open Sourcing and describe one."}</div>',
+    f'<div class="hero-sub">{_e(thesis.thesis) or "No thesis yet — open Thesis and describe one."}</div>',
     unsafe_allow_html=True,
 )
 
@@ -498,12 +507,12 @@ def _scan_indicator() -> None:
 
 _scan_indicator()
 
-tab_leads, tab_pipeline, tab_sourcing, tab_data, tab_settings = st.tabs(
-    ["Leads", "Pipeline", "Sourcing", "Database", "Settings"]
+tab_thesis, tab_startups, tab_long, tab_short, tab_memo, tab_settings = st.tabs(
+    ["Thesis", "Startups", "Longlist", "Shortlist", "Memo", "Settings"]
 )
 
 
-# ============================================================ LEADS
+# ============================================================ STARTUPS · feed
 
 
 def _lead_card(
@@ -513,13 +522,18 @@ def _lead_card(
     view_max: float = 100.0,
     pct_label: str = "",
     secondary: list[Lead] | None = None,
+    details_open: bool = False,
+    key_ns: str = "feed",
 ) -> None:
     """One lead card. `entry` carries cross-run movement (delta / new); `fresh`
     means the lead is from the latest run — run-scoped signals like new
     watchlist follows are suppressed on stale entries. `view_max` normalizes
     the score bar to the strongest lead in view; `pct_label` is an optional
     percentile caption ("top 12%"). `secondary` holds other X accounts folded
-    into this startup (Startups track) — the card is titled by the company."""
+    into this startup (Startups track) — the card is titled by the company.
+    `details_open` renders the per-dimension scoring expanded (Longlist /
+    Shortlist pages); `key_ns` namespaces widget keys so the same lead can
+    render on more than one page."""
     account, verdict = lead.account, lead.llm
     handle_key = account.handle.lower()
     status = _status_of(lead)
@@ -630,31 +644,50 @@ def _lead_card(
                 unsafe_allow_html=True,
             )
             # Triage lives on the card face — no expanding needed to act.
-            if status in WIN_STAGES:
-                if st.button("Remove", key=f"rm_{handle_key}", use_container_width=True):
-                    store.set_pipeline(account.handle, status="new")
-                    st.session_state["toast"] = f"Removed @{account.handle} from the pipeline"
-                    st.rerun()
-            elif status == "passed":
-                if st.button("Restore", key=f"restore_{handle_key}", use_container_width=True):
-                    store.set_pipeline(account.handle, status="new")
-                    st.session_state["toast"] = f"Restored @{account.handle}"
-                    st.rerun()
-            else:
-                if st.button("Shortlist", key=f"short_{handle_key}", type="primary",
+            # The funnel: new → Longlist → Shortlist (→ stages to allocation).
+            if status == "longlisted":
+                if st.button("Shortlist", key=f"{key_ns}_short_{handle_key}", type="primary",
                              use_container_width=True):
                     store.set_pipeline(account.handle, status="shortlisted")
                     st.session_state["toast"] = f"Shortlisted @{account.handle}"
                     st.rerun()
-                if st.button("Pass", key=f"pass_{handle_key}", use_container_width=True):
+                if st.button("Remove", key=f"{key_ns}_rm_{handle_key}", use_container_width=True):
+                    store.set_pipeline(account.handle, status="new")
+                    st.session_state["toast"] = f"Removed @{account.handle} from the longlist"
+                    st.rerun()
+            elif status == "shortlisted":
+                if st.button("To longlist", key=f"{key_ns}_demote_{handle_key}",
+                             use_container_width=True):
+                    store.set_pipeline(account.handle, status="longlisted")
+                    st.session_state["toast"] = f"Moved @{account.handle} back to the longlist"
+                    st.rerun()
+            elif status in WIN_STAGES:  # contacted and beyond — manage on Shortlist
+                if st.button("Remove", key=f"{key_ns}_rm_{handle_key}", use_container_width=True):
+                    store.set_pipeline(account.handle, status="new")
+                    st.session_state["toast"] = f"Removed @{account.handle} from the shortlist"
+                    st.rerun()
+            elif status == "passed":
+                if st.button("Restore", key=f"{key_ns}_restore_{handle_key}",
+                             use_container_width=True):
+                    store.set_pipeline(account.handle, status="new")
+                    st.session_state["toast"] = f"Restored @{account.handle}"
+                    st.rerun()
+            else:
+                if st.button("Longlist", key=f"{key_ns}_long_{handle_key}", type="primary",
+                             use_container_width=True):
+                    store.set_pipeline(account.handle, status="longlisted")
+                    st.session_state["toast"] = f"Longlisted @{account.handle}"
+                    st.rerun()
+                if st.button("Pass", key=f"{key_ns}_pass_{handle_key}", use_container_width=True):
                     store.set_pipeline(account.handle, status="passed")
                     st.session_state["toast"] = f"Passed on @{account.handle}"
                     st.rerun()
 
         # Stateless expander: the `expanded` prop is re-applied only when its
         # value CHANGES between reruns, so user toggles persist. Actions that
-        # must keep a card open (brief generation) set open_card before rerun.
-        with st.expander("Details", expanded=(handle_key == st.session_state.get("open_card"))):
+        # must keep a card open (memo generation) set open_card before rerun.
+        with st.expander("Details", expanded=(details_open
+                                              or handle_key == st.session_state.get("open_card"))):
             if verdict and verdict.why_interesting:
                 st.markdown(f'<div class="lead-summary">{_e(verdict.why_interesting)}</div>',
                             unsafe_allow_html=True)
@@ -727,14 +760,14 @@ def _lead_card(
 
             row = pipeline.get(handle_key, {})
             b1, _sp = st.columns([1.4, 4.6])
-            if b1.button("Research brief", key=f"brief_{handle_key}"):
-                with st.spinner("Compiling brief…"):
+            if b1.button("Memo", key=f"{key_ns}_brief_{handle_key}"):
+                with st.spinner("Compiling memo…"):
                     brief, is_ai = research_brief(lead, thesis, settings)
                 store.set_pipeline(account.handle, brief=brief)
                 st.session_state["open_card"] = handle_key  # keep this card open
                 st.session_state["toast"] = (
-                    f"Brief ready for @{account.handle}" if is_ai
-                    else "No Anthropic key — brief is data-only."
+                    f"Memo ready for @{account.handle}" if is_ai
+                    else "No Anthropic key — memo is data-only."
                 )
                 st.rerun()
 
@@ -746,11 +779,13 @@ def _lead_card(
                 st.markdown(row["brief"])
 
 
-with tab_leads:
+def _render_startup_feed() -> None:
+    """The sourcing feed: startup-first lead cards over the latest run (or the
+    all-runs ledger), with track / scope / filters and inline triage."""
     if not leads and not ledger:
         st.markdown(
-            '<div class="section-title">No leads yet</div>'
-            '<div class="section-sub">Open <b>Sourcing</b>, describe your thesis, and run discovery. '
+            '<div class="section-title">No startups yet</div>'
+            '<div class="section-sub">Open <b>Thesis</b>, describe your thesis, and run discovery. '
             'Or run <code>./scout-cli demo</code> for an offline sample.</div>',
             unsafe_allow_html=True,
         )
@@ -761,14 +796,14 @@ with tab_leads:
         if last_run is None:
             st.markdown(
                 '<div class="nudge">No real discovery run yet — these are sample leads. '
-                'When your X cookies are set, open <b>Sourcing → Run discovery</b>.</div>',
+                'When your X cookies are set, open <b>Thesis → Run discovery</b>.</div>',
                 unsafe_allow_html=True,
             )
         elif (datetime.now(timezone.utc) - last_run).total_seconds() > 24 * 3600:
             st.markdown(
                 f'<div class="nudge">Last discovery run {_ago(last_run.isoformat())} — '
                 'daily runs keep the follow-graph and bio-change signals meaningful. '
-                'Open <b>Sourcing → Run discovery</b>.</div>',
+                'Open <b>Thesis → Run discovery</b>.</div>',
                 unsafe_allow_html=True,
             )
 
@@ -783,9 +818,9 @@ with tab_leads:
             ) or "Startups"
         with sc2:
             scope = st.segmented_control(
-                "Scope", ["All runs", "Latest run"], default="All runs",
+                "Scope", ["Latest run", "All runs"], default="Latest run",
                 key="leads_time_scope", label_visibility="collapsed",
-            ) or "All runs"
+            ) or "Latest run"
         strategy_hash = None
         with sc3:
             if scope == "All runs" and len(strategies) >= 2:
@@ -842,7 +877,8 @@ with tab_leads:
         n_convergence = sum(1 for x in leads if x.account.recent_followed_by)
         fits = [x.llm.thesis_fit for x in base_leads if x.llm and x.llm.thesis_fit is not None]
         strong_fit = sum(1 for f in fits if f >= 0.7)
-        in_pipeline = sum(counts.get(s, 0) for s in WIN_STAGES)
+        n_long = counts.get("longlisted", 0)
+        n_short = sum(counts.get(s, 0) for s in WIN_STAGES)
         sub = f"{n_new} new this run" if scope == "All runs" else "latest run"
         t1, t2, t3, t4 = st.columns(4)
         if track == "Startups":
@@ -855,7 +891,8 @@ with tab_leads:
         t2.markdown(_tile("Strong fit", str(strong_fit), "thesis fit ≥ 70%"), unsafe_allow_html=True)
         t3.markdown(_tile("Smart-money events", str(n_convergence), "new follows · latest run"),
                     unsafe_allow_html=True)
-        t4.markdown(_tile("In pipeline", str(in_pipeline), f"{counts.get('won', 0)} allocated"), unsafe_allow_html=True)
+        t4.markdown(_tile("In funnel", str(n_long + n_short),
+                          f"{n_long} longlisted · {n_short} shortlisted"), unsafe_allow_html=True)
         st.write("")
 
         # Reset must land BEFORE the filter widgets instantiate.
@@ -1023,16 +1060,78 @@ with tab_leads:
                                     use_container_width=True)
 
 
-# ============================================================ PIPELINE
+# ============================================================ LONGLIST · SHORTLIST
 
 
-with tab_pipeline:
-    shortlist = [h for h, p in pipeline.items() if (p.get("status") or "") in WIN_STAGES]
+def _pick_label(h: str) -> str:
+    picked = lead_by_handle.get(h)
+    ident = startup_identity(picked) if picked else None
+    return f"{ident[0]} — @{h}" if ident else f"@{h}"
+
+
+def _ranked(handles: list[str]) -> list[str]:
+    return sorted(handles,
+                  key=lambda h: -(lead_by_handle[h].score if h in lead_by_handle else 0))
+
+
+def _dimension_cards(handles: list[str], key_ns: str) -> None:
+    """Score-ranked lead cards with Claude's per-dimension scoring open on
+    every card: signal bars, step-by-step score math, thesis fit, and the
+    firm value-add levers."""
+    with_leads = [h for h in handles if h in lead_by_handle]
+    view_max = max((lead_by_handle[h].score for h in with_leads), default=100.0)
+    for h in handles:
+        lead = lead_by_handle.get(h)
+        if lead is None:
+            st.markdown(
+                f'<div class="subtle">@{_e(h)} — no lead data in the store '
+                '(cleared or never scored); manage it in the table above.</div>',
+                unsafe_allow_html=True,
+            )
+            continue
+        _lead_card(lead, entry_by_handle.get(h),
+                   fresh=h in latest_handles, view_max=view_max,
+                   details_open=True, key_ns=key_ns)
+
+
+with tab_long:
+    longlist = _ranked([h for h, p in pipeline.items()
+                        if (p.get("status") or "") == "longlisted"])
+    if not longlist:
+        st.markdown(
+            '<div class="section-title">Nothing longlisted yet</div>'
+            '<div class="section-sub">Review the <b>Startups</b> feed and longlist the promising '
+            'ones — they collect here for a closer look before the shortlist cut.</div>',
+            unsafe_allow_html=True,
+        )
+    else:
+        ll_fits = [lead_by_handle[h].llm.thesis_fit for h in longlist
+                   if h in lead_by_handle and lead_by_handle[h].llm
+                   and lead_by_handle[h].llm.thesis_fit is not None]
+        ll_scores = [lead_by_handle[h].score for h in longlist if h in lead_by_handle]
+        t1, t2, t3 = st.columns(3)
+        t1.markdown(_tile("Longlisted", str(len(longlist))), unsafe_allow_html=True)
+        t2.markdown(_tile("Strong fit", str(sum(1 for f in ll_fits if f >= 0.7)),
+                          "thesis fit ≥ 70%"), unsafe_allow_html=True)
+        t3.markdown(_tile("Top score", f"{max(ll_scores):.0f}" if ll_scores else "—"),
+                    unsafe_allow_html=True)
+        st.markdown(
+            '<div class="section-sub" style="margin-top:14px">Claude\'s scoring is open on every '
+            'card — signals, score math, thesis fit, value-add levers. Promote the best to the '
+            'shortlist.</div>',
+            unsafe_allow_html=True,
+        )
+        _dimension_cards(longlist, key_ns="ll")
+
+
+with tab_short:
+    shortlist = _ranked([h for h, p in pipeline.items()
+                         if (p.get("status") or "") in WIN_STAGES])
     if not shortlist:
         st.markdown(
-            '<div class="section-title">Nothing in the pipeline</div>'
-            '<div class="section-sub">Shortlist promising leads from the Leads tab — '
-            'they land here as “To reach out”.</div>',
+            '<div class="section-title">Nothing shortlisted yet</div>'
+            '<div class="section-sub">Promote startups from the <b>Longlist</b> — they land here '
+            'as “Shortlisted”, ready to work toward allocation.</div>',
             unsafe_allow_html=True,
         )
     else:
@@ -1043,8 +1142,7 @@ with tab_pipeline:
         st.write("")
 
         editor_rows = []
-        for handle_key in sorted(shortlist,
-                                 key=lambda h: -(lead_by_handle[h].score if h in lead_by_handle else 0)):
+        for handle_key in shortlist:
             row = pipeline[handle_key]
             lead = lead_by_handle.get(handle_key)
             verdict = lead.llm if lead else None
@@ -1055,7 +1153,7 @@ with tab_pipeline:
                 "Lead": lead.account.url if lead else f"https://x.com/{handle_key}",
                 "Fit": (f"{verdict.thesis_fit:.0%}" if verdict and verdict.thesis_fit is not None else "—"),
                 "Score": lead.score if lead else 0,
-                "Status": STATUS_LABELS.get(row.get("status", "shortlisted"), "To reach out"),
+                "Status": STATUS_LABELS.get(row.get("status") or "shortlisted", "Shortlisted"),
                 "Notes": row.get("notes") or "",
             })
         edited = st.data_editor(
@@ -1072,7 +1170,9 @@ with tab_pipeline:
                                                          format="%d", width="medium"),
                 "Status": st.column_config.SelectboxColumn(
                     "Status",
-                    options=[STATUS_LABELS[s] for s in WIN_STAGES] + [STATUS_LABELS["passed"]],
+                    options=([STATUS_LABELS["longlisted"]]
+                             + [STATUS_LABELS[s] for s in WIN_STAGES]
+                             + [STATUS_LABELS["passed"]]),
                     required=True),
                 "Notes": st.column_config.TextColumn("Notes", width="large"),
             },
@@ -1085,24 +1185,80 @@ with tab_pipeline:
                 st.rerun()
 
         st.write("")
-        st.markdown('<div class="section-title">Work a lead</div>'
-                    '<div class="section-sub">AI-drafted outreach and the research brief, side by side.</div>',
+        st.markdown('<div class="section-title">How Claude scored them</div>'
+                    '<div class="section-sub">Per-dimension detail for every shortlisted startup — '
+                    'signals, score math, thesis fit, value-add levers.</div>',
                     unsafe_allow_html=True)
-        def _pick_label(h: str) -> str:
-            picked = lead_by_handle.get(h)
-            ident = startup_identity(picked) if picked else None
-            return f"{ident[0]} — @{h}" if ident else f"@{h}"
+        _dimension_cards(shortlist, key_ns="sl")
 
-        pick = st.selectbox("Lead", sorted(shortlist), format_func=_pick_label,
+        st.write("")
+        export_rows = pipeline_rows(store)
+        if export_rows:
+            export_path = write_pipeline_csv(export_rows, PROJECT_ROOT / settings.out_dir)
+            st.download_button(
+                f"Export pipeline CSV ({len(export_rows)} leads)",
+                export_path.read_bytes(), file_name=export_path.name,
+            )
+
+
+# ============================================================ MEMO
+
+
+with tab_memo:
+    memo_pool = _ranked([h for h, p in pipeline.items()
+                         if (p.get("status") or "") in FUNNEL_STAGES])
+    if not memo_pool:
+        st.markdown(
+            '<div class="section-title">No startups to brief yet</div>'
+            '<div class="section-sub">Longlist or shortlist startups first — then draft the '
+            'pre-call memo and the outreach message here.</div>',
+            unsafe_allow_html=True,
+        )
+    else:
+        st.markdown('<div class="section-title">Memo</div>'
+                    '<div class="section-sub">A pre-call memo per startup — evidence, thesis fit, '
+                    'risks, questions to ask — with the outreach draft alongside.</div>',
+                    unsafe_allow_html=True)
+        pick = st.selectbox("Startup", memo_pool, format_func=_pick_label,
                             label_visibility="collapsed")
         picked_lead = lead_by_handle.get(pick)
         picked_row = pipeline.get(pick, {})
+        if picked_lead is not None:
+            v = picked_lead.llm
+            bits = [f"score {picked_lead.score:.0f}"]
+            if v and v.thesis_fit is not None:
+                bits.append(f"thesis fit {v.thesis_fit:.0%}")
+            bits.append(STATUS_LABELS.get(_status_of(picked_lead), ""))
+            st.markdown(f'<div class="subtle">{_e(" · ".join(b for b in bits if b))}</div>',
+                        unsafe_allow_html=True)
 
-        col_left, col_right = st.columns(2, gap="large")
-        with col_left:
+        col_memo, col_out = st.columns(2, gap="large")
+        with col_memo:
+            st.markdown("**Memo**")
+            if st.button("Generate memo", type="primary", disabled=picked_lead is None,
+                         key="memo_generate"):
+                with st.spinner("Compiling memo…"):
+                    brief, is_ai = research_brief(picked_lead, thesis, settings)
+                store.set_pipeline(pick, brief=brief)
+                if not is_ai:
+                    st.info("No Anthropic key — memo is data-only.")
+                st.rerun()
+            existing_brief = picked_row.get("brief")
+            if existing_brief:
+                if picked_row.get("brief_at"):
+                    st.markdown(f'<div class="subtle">Generated {_ago(picked_row["brief_at"])}</div>',
+                                unsafe_allow_html=True)
+                st.markdown(existing_brief)
+                st.download_button("Download memo (.md)", existing_brief.encode("utf-8"),
+                                   file_name=f"memo_{pick}.md")
+            else:
+                st.markdown('<div class="subtle">No memo yet — generate one for a pre-call brief: '
+                            'evidence, thesis fit, risks, and questions to ask.</div>',
+                            unsafe_allow_html=True)
+        with col_out:
             st.markdown("**Outreach**")
             channel = st.selectbox("Channel", list(CHANNELS))
-            if st.button("Draft with AI", type="primary", disabled=picked_lead is None):
+            if st.button("Draft with AI", disabled=picked_lead is None):
                 with st.spinner("Drafting…"):
                     message, is_ai = draft_outreach(picked_lead, thesis, settings, channel)
                 store.set_pipeline(pick, outreach=message, channel=channel)
@@ -1118,42 +1274,14 @@ with tab_pipeline:
             if st.button("Save message"):
                 store.set_pipeline(pick, outreach=draft, channel=channel)
                 st.success("Saved.")
-        with col_right:
-            st.markdown("**Research brief**")
-            if st.button("Generate brief", disabled=picked_lead is None):
-                with st.spinner("Compiling brief…"):
-                    brief, is_ai = research_brief(picked_lead, thesis, settings)
-                store.set_pipeline(pick, brief=brief)
-                if not is_ai:
-                    st.info("No Anthropic key — brief is data-only.")
-                st.rerun()
-            existing_brief = picked_row.get("brief")
-            if existing_brief:
-                if picked_row.get("brief_at"):
-                    st.markdown(f'<div class="subtle">Generated {_ago(picked_row["brief_at"])}</div>',
-                                unsafe_allow_html=True)
-                st.markdown(existing_brief)
-            else:
-                st.markdown('<div class="subtle">No brief yet — generate one for a pre-call memo: '
-                            'evidence, thesis fit, risks, and questions to ask.</div>',
-                            unsafe_allow_html=True)
-
-        st.write("")
-        export_rows = pipeline_rows(store)
-        if export_rows:
-            export_path = write_pipeline_csv(export_rows, PROJECT_ROOT / settings.out_dir)
-            st.download_button(
-                f"Export pipeline CSV ({len(export_rows)} leads)",
-                export_path.read_bytes(), file_name=export_path.name,
-            )
 
 
-# ============================================================ SOURCING
+# ============================================================ THESIS
 
 
-with tab_sourcing:
+with tab_thesis:
     # --- AI strategy designer -------------------------------------------------
-    st.markdown('<div class="section-title">Design the sourcing strategy</div>'
+    st.markdown('<div class="section-title">Define the thesis</div>'
                 '<div class="section-sub">Describe your thesis in plain language. The agent writes '
                 'the targeting, the X query bank, bio searches, GitHub topics, and a watchlist — '
                 'you review before anything is saved.</div>',
@@ -1398,9 +1526,9 @@ with tab_sourcing:
     with st.expander("Signals & scoring — weights, parameters, classifier prompt"):
         stats = triage_stats(ledger, pipeline)
         if stats is None:
-            st.markdown('<div class="subtle">Triage at least 5 leads (shortlist or pass) and '
-                        'insights appear here: how your decisions cluster by sector and signal, '
-                        'plus AI-suggested weight adjustments.</div>', unsafe_allow_html=True)
+            st.markdown('<div class="subtle">Triage at least 5 leads (longlist, shortlist, or '
+                        'pass) and insights appear here: how your decisions cluster by sector and '
+                        'signal, plus AI-suggested weight adjustments.</div>', unsafe_allow_html=True)
         else:
             st.markdown("**Triage insights** — "
                         f"{stats.shortlisted} shortlisted · {stats.passed} passed")
@@ -1498,7 +1626,7 @@ with tab_sourcing:
                 st.markdown(f"**{lever.label}** (`{lever.key}`) — {lever.description}")
 
 
-# ============================================================ DATABASE
+# ============================================== STARTUPS · database sub-page
 
 
 # Friendly presentation order + one-liners; unknown tables still appear after.
@@ -1556,7 +1684,9 @@ def _db_filter_meta(db, table: str, text_cols: list[str],
     return value_filters, range_filters
 
 
-with tab_data:
+def _render_database() -> None:
+    """The raw store, browsable: any table, auto-generated filters, full-text
+    search, CSV export of the view, and a read-only SQL console."""
     db = store.db
     known_tables = [t for t in DB_TABLE_ORDER if db[t].exists()]
     extra_tables = sorted(
@@ -1703,6 +1833,15 @@ with tab_data:
                                     unsafe_allow_html=True)
                     except Exception as exc:  # surface SQL errors inline
                         st.error(f"{type(exc).__name__}: {exc}")
+
+
+# The Startups page: the sourcing feed + the raw database, as sub-pages.
+with tab_startups:
+    sub_feed, sub_db = st.tabs(["Latest run", "Database"])
+    with sub_feed:
+        _render_startup_feed()
+    with sub_db:
+        _render_database()
 
 
 # ============================================================ SETTINGS

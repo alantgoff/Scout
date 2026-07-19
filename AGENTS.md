@@ -17,7 +17,8 @@ resolves every founder-like lead to a startup identity (real company name, or
 a synthesized "Ada Lin's stealth startup" placeholder when unnamed) and folds
 founder + company accounts into one entry, in every view and the report. It's
 a Python 3.12 package with a **Typer CLI** and a **Streamlit UI** (Headline design
-language: Leads · Pipeline · Sourcing · Database · Settings), managed by **uv**. A thesis
+language, funnel-ordered: Thesis · Startups (Latest run / Database) · Longlist ·
+Shortlist · Memo · Settings), managed by **uv**. A thesis
 (`thesis.yaml`) drives all targeting; nothing is hardcoded.
 
 The pipeline: **discover** candidate accounts (free) → run cheap deterministic
@@ -82,7 +83,7 @@ scout/
   score.py          Pure scoring. score_leads + score_breakdown (THE score math,
                     single source of truth; UI renders its steps).
   export.py         CSV + Markdown writers, rich terminal table.
-  outreach.py       Claude-drafted first-touch outreach (Pipeline tab); template fallback.
+  outreach.py       Claude-drafted first-touch outreach (Memo page); template fallback.
   agents.py         Strategy agent (generate_strategy/parse_strategy/apply_strategy),
                     research-brief agent (research_brief), weight-tuning agent
                     (suggest_weights/parse_weight_proposal), watchlist validation
@@ -99,8 +100,9 @@ scout/
                     signals); company_key/group_by_company fold accounts
                     sharing a company into one entry (primary = highest score).
   demo_data.py      8 synthetic sample founders for `scout demo` (obviously fake handles).
-  ui.py             Streamlit app: Leads / Pipeline / Sourcing / Database / Settings.
-                    Headline design language; lead cards; agent flows. ~800 lines.
+  ui.py             Streamlit app: Thesis / Startups (Latest run + Database) /
+                    Longlist / Shortlist / Memo / Settings. Headline design
+                    language; lead cards; agent flows. ~1800 lines.
   ingest/
     base.py         SourceAdapter ABC (X sources) + DiscoverySource ABC (github/hn).
     twscrape_src.py Primary free X adapter: query bank, bio search, list members,
@@ -151,8 +153,9 @@ score_leads(leads, thesis)               →  score 0–100, ranked   (uses scor
 store.save_leads + write_csv + write_markdown + print_top_table
 ```
 
-The UI then reads `store.load_latest_leads()` for **Pick** (triage → shortlist/pass,
-persisted in the `pipeline` table) and **Win** (status/notes/outreach).
+The UI then reads `store.load_latest_leads()` for **Pick** (triage → longlist →
+shortlist / pass, persisted in the `pipeline` table as statuses `longlisted` /
+`shortlisted`…`won` / `passed`) and **Win** (stage/notes/outreach/memo).
 
 ---
 
@@ -223,8 +226,8 @@ partition key is `lower(handle)` (leads pk is case-sensitive, everything else is
 NOCASE); ordering is `(created_at, run_id)`, never run_id alone (rows in a run
 share one created_at; `verify-` > `demo-` lexicographically); `demo-` runs are
 excluded unless `include_demo`; `verify-` runs are always included (real
-re-scores). The UI's Pipeline tab always resolves leads through the ledger so a
-shortlisted lead missing from the latest run never degrades. `scout export` and
+re-scores). The UI's Longlist / Shortlist / Memo pages always resolve leads
+through the ledger so a triaged lead missing from the latest run never degrades. `scout export` and
 `scout verify` deliberately keep latest-run semantics (verify is paid — never
 silently widen its input set to all-time).
 
@@ -297,8 +300,9 @@ silently widen its input set to all-time).
 ## 10. Current state / open threads
 
 - Fully working: demo, source (all strategies), the whole scored pipeline, the
-  Leads/Pipeline/Sourcing/Settings UI (Headline design language, lead cards),
-  strategy agent (`scout strategy` + Sourcing tab, validated live), research
+  Thesis/Startups/Longlist/Shortlist/Memo/Settings UI (Headline design
+  language, lead cards),
+  strategy agent (`scout strategy` + Thesis tab, validated live), research
   briefs, verdict cache, paid probe + verify (validated live, ~$0.83 spent).
 - v4 additions (all validated live): person-centric lead ledger with score
   deltas + strategy grouping (runs table), paid-run + precision-pass cost

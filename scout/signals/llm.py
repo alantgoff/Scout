@@ -43,7 +43,7 @@ _CORRECTIVE_NOTE = (
 
 
 # Default classification prompt. Editable per-thesis via thesis.llm_prompt
-# (UI: Sourcing → Signals & scoring); placeholders {thesis} {sectors} {stages}
+# (UI: Thesis → Signals & scoring); placeholders {thesis} {sectors} {stages}
 # {firm} {value_add} are substituted.
 DEFAULT_PROMPT_TEMPLATE = """You are a venture analyst at {firm} screening Twitter/X accounts for startup leads.
 Investment thesis: {thesis}

@@ -18,7 +18,7 @@ from scout.models import Lead, LedgerEntry
 MIN_DECISIONS = 5
 
 # Any of these statuses counts as a positive ("shortlisted") decision.
-POSITIVE_STATUSES = {"shortlisted", "contacted", "meeting", "diligence", "won"}
+POSITIVE_STATUSES = {"longlisted", "shortlisted", "contacted", "meeting", "diligence", "won"}
 
 
 class TriageStats(BaseModel):

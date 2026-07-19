@@ -62,9 +62,12 @@ def test_ui_renders_without_exceptions(tmp_path, monkeypatch) -> None:
     at.run()
 
     assert not at.exception, at.exception[0].message if at.exception else ""
-    # All five surfaces render
+    # All six surfaces render, plus the two Startups sub-pages (nested tabs
+    # flatten into the element tree inside Startups)
     tab_labels = [t.label for t in at.tabs]
-    assert tab_labels == ["Leads", "Pipeline", "Sourcing", "Database", "Settings"]
+    top_level = ["Thesis", "Startups", "Longlist", "Shortlist", "Memo", "Settings"]
+    assert [l for l in tab_labels if l in top_level] == top_level
+    assert {"Latest run", "Database"} <= set(tab_labels)
     # The seeded lead renders in the default Startups track (stage=launched),
     # titled by its COMPANY — startups-first presentation.
     page_text = " ".join(m.value for m in at.markdown)
@@ -78,6 +81,10 @@ def test_ui_renders_without_exceptions(tmp_path, monkeypatch) -> None:
     # The firm value-add dimension renders (chip + lever bars in Details)
     assert "lift 70%" in page_text
     assert "Local-to-global expansion" in page_text
-    # The Database tab renders the store browser (tiles + row counts)
+    # The Database sub-page renders the store browser (tiles + row counts)
     assert "On disk" in page_text
     assert "matching rows" in page_text
+    # Funnel pages render their empty states (nothing triaged in the seed)
+    assert "Nothing longlisted yet" in page_text
+    assert "Nothing shortlisted yet" in page_text
+    assert "No startups to brief yet" in page_text

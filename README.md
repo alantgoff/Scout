@@ -54,50 +54,56 @@ the last `--ttl-days` (default 7) are skipped, so re-running while you tune
 the thesis is fast and (in xapi mode) free. A legacy `./scout.db` in the
 working directory is migrated to the home location automatically on first run.
 
-## The workspace: Leads · Pipeline · Sourcing · Database · Settings
+## The workspace: Thesis · Startups · Longlist · Shortlist · Memo · Settings
 
-The UI (`./scout-cli ui`) is a content-first workspace:
+The UI (`./scout-cli ui`) is a content-first workspace, ordered like the
+funnel — define the thesis, review what sourcing found, longlist, shortlist,
+write the memo:
 
-1. **Leads** — the STARTUP is the first-class object in every view: cards are
+1. **Thesis** — how the scrape runs. The **strategy agent** front and center:
+   describe the thesis in plain language, review the proposed targeting /
+   query bank / watchlist (handles are **existence-checked** via twscrape;
+   fabrications are struck through and dropped on apply). Below: run controls
+   — the paid X API path shows a **worst-case cost estimate and requires an
+   explicit confirmation** before the Run button enables — a **Precision
+   pass** section (paid verify with the same confirm-the-cost gate), and
+   every manual knob behind disclosure. The Signals & scoring panel opens
+   with **triage insights** (how your longlist/shortlist/pass decisions
+   cluster) and can ask Claude to **suggest weight adjustments**, reviewed
+   before apply.
+2. **Startups** — what sourcing found, in two sub-pages. **Latest run** is
+   the feed: the STARTUP is the first-class object in every view — cards are
    titled by the company (founder + company accounts folded into one entry,
-   founders as the byline). A founder whose company isn't named yet still
-   renders as a startup with a synthesized identity tied to the person —
-   "Ada Lin's stealth startup" (pre-launch) or "…'s unnamed startup" (launched,
-   name unknown); only non-founder accounts keep a plain account card. Three
-   tracks: **Startups** (default — launched companies), **Pre-launch watch**
-   (expected to launch or found soon — departures, stealth language, bio
-   changes), and **Everything**. Two time
-   scopes: **All runs** (the ledger — every handle ever scored, best-known
-   state, with **score-change arrows**, **New** chips, and a "seen N× since"
-   history line) and **Latest run**. Runs made with identical settings group
-   into a **strategy**; a strategy filter appears once you have more than one.
-   Cards carry the thesis-fit chip, taxonomy chips, and triage buttons
-   (Shortlist / Pass) on the face; details expand to per-signal bars,
-   step-by-step score math, and a one-click **research brief**. Search, sort,
-   and filters — with a hidden-by-which-filter caption — live in one toolbar.
-   A quiet banner nudges you when the last real run is >24h old.
-2. **Pipeline** — work the shortlist to allocation (To reach out → Contacted →
-   Meeting → Diligence → Allocated) with inline status and notes, **AI-drafted
-   outreach** and the research brief side by side (each stamped with freshness),
-   and a one-click **pipeline CSV export** (CRM-import-ready).
-3. **Sourcing** — the **strategy agent** front and center: describe the thesis
-   in plain language, review the proposed targeting / query bank / watchlist
-   (handles are **existence-checked** via twscrape; fabrications are struck
-   through and dropped on apply). Below: run controls — the paid X API path
-   shows a **worst-case cost estimate and requires an explicit confirmation**
-   before the Run button enables — a **Precision pass** section (paid verify
-   with the same confirm-the-cost gate), and every manual knob behind
-   disclosure. The Signals & scoring panel opens with **triage insights**
-   (how your shortlist/pass decisions cluster) and can ask Claude to
-   **suggest weight adjustments**, reviewed before apply.
-4. **Database** — the raw store, browsable: pick any table (row counts inline),
-   full-text search across text columns, auto-generated filters (low-cardinality
-   columns become value pickers, numeric columns become range sliders), a column
-   chooser, sort controls, CSV export of the filtered view, and a read-only SQL
-   console for anything else.
-5. **Settings** — keys, the budget ledger, and defaults.
+   founders as the byline); a founder whose company isn't named yet still
+   renders as a startup with a synthesized identity ("Ada Lin's stealth
+   startup"). Three tracks: **Startups** (default — launched companies),
+   **Pre-launch watch** (departures, stealth language, bio changes), and
+   **Everything**. Two time scopes: **Latest run** (default) and **All runs**
+   (the ledger — every handle ever scored, best-known state, with
+   **score-change arrows**, **New** chips, and a "seen N× since" history
+   line); a strategy filter appears once runs group into more than one
+   strategy. Cards carry the thesis-fit chip, taxonomy chips, and triage
+   buttons (**Longlist / Pass**) on the face; details expand to per-signal
+   bars, step-by-step score math, and a one-click **memo**. Search, sort,
+   and filters live in one toolbar; a quiet banner nudges you when the last
+   real run is >24h old. **Database** is the raw store, browsable: any table
+   (row counts inline), full-text search, auto-generated filters, a column
+   chooser, CSV export of the filtered view, and a read-only SQL console.
+3. **Longlist** — the first cut. Everything you longlisted, score-ranked,
+   with Claude's per-dimension scoring **open on every card** (signal bars,
+   score math, thesis fit, value-add levers). Promote the best to the
+   shortlist or drop them.
+4. **Shortlist** — the working set. Stage tiles and an inline editor
+   (Shortlisted → Contacted → Meeting → Diligence → Allocated) with notes,
+   the same per-dimension scoring cards, and a one-click **pipeline CSV
+   export** (CRM-import-ready).
+5. **Memo** — pre-call memo per startup (evidence, thesis fit, risks,
+   questions to ask; downloadable as Markdown) with the **AI-drafted
+   outreach** message alongside, each stamped with freshness.
+6. **Settings** — keys, the budget ledger, and defaults.
 
-Deal-flow state (status, notes, outreach, briefs) persists in `scout.db`.
+Deal-flow state (longlist/shortlist status, notes, outreach, memos) persists
+in `scout.db`.
 
 ## Stage targeting
 
