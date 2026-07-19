@@ -18,23 +18,43 @@ a Python 3.12 package with a **Typer CLI** and a **Streamlit UI** (Apple design
 language: Leads · Pipeline · Sourcing · Settings), managed by **uv**. A thesis
 (`thesis.yaml`) drives all targeting; nothing is hardcoded.
 
-The pipeline: **discover** candidate accounts (free) → run cheap deterministic
-**heuristics** → gate + rank to **Claude** classification (fine-grained:
-stage/sector/subsector/business model/tags + a 0–1 **thesis_fit**; verdicts
-cached in the store) → **score** 0–100 → **export** CSV/Markdown → **triage &
-pursue** in the UI. Two agents (`scout/agents.py`): the **strategy agent**
-(plain-language thesis → full thesis.yaml + seeds.yaml proposal) and the
-**research-brief agent** (per-lead pre-call memo, cached in the pipeline table).
+The screening pipeline: **discover** candidate accounts (free) → run cheap
+deterministic **heuristics** → gate + rank to **Claude** classification
+(fine-grained: stage/sector/subsector/business model/tags + a 0–1
+**thesis_fit**; verdicts cached in the store) → **score** 0–100 → **export**
+CSV/Markdown → **triage & pursue** in the UI. Two agents (`scout/agents.py`):
+the **strategy agent** (plain-language thesis → full thesis.yaml + seeds.yaml
+proposal) and the **research-brief agent** (per-lead pre-call memo, cached in
+the pipeline table).
+
+On top of that sit two v5 systems:
+
+- **Diligence engine** (`scout/diligence/`, `scout analyze`): a manually
+  triggered multi-agent deep analysis — recon + 8 web-researched dimensions
+  on the configured model, cross-examination + memo synthesis on a premium
+  model — producing a **Diligence Score** (0–100 composite, a DIFFERENT
+  score from the screening score) plus a native investment memo, feeding a
+  small knowledge graph so competitive analysis compounds across memos.
+  ~$4–8/memo, hard-capped, fingerprint-cached.
+- **Remote-control digest** (`scout publish`, `.github/workflows/`): the
+  GitHub Pages phone page can triage/tag startups (decision files →
+  `remote/inbox/` in the code repo) and dispatch headless runs via GitHub
+  Actions, with the store accumulating at `data/scout.db` IN the repo.
+  The page's only "backend" is the GitHub API + a user-held PAT.
 
 ---
 
 ## 2. Run it / test it — always via `./scout-cli` or `uv run`
 
 ```bash
-uv run pytest -q                 # ~95 tests, ~2s, no network (incl. an AppTest UI smoke test)
+uv run pytest -q                 # ~180 tests, ~5s, no network (incl. an AppTest UI smoke test)
 ./scout-cli demo                 # $0 offline end-to-end run on sample founders — best smoke test
 ./scout-cli source --strategy github,hn   # free live discovery, no scoring
 ./scout-cli ui                   # Streamlit workspace on :8501
+./scout-cli analyze <name>       # PAID (~$4-8) deep analysis — never in tests/CI experiments
+./scout-cli memo <name>          # print a stored memo ($0)
+./scout-cli inbox                # list pending phone-triage decisions ($0)
+./scout-cli publish              # render the phone digest to docs/ ($0; --push publishes)
 ```
 
 **Never rely on the bare `scout` console script.** macOS + uv marks `.venv`
@@ -63,10 +83,11 @@ about the hidden-`.pth` issue).
 scout/
   cli.py            Typer app — ALL orchestration. Commands: run, source, inspect,
                     verify, probe, demo, export, budget, strategy, analyze,
-                    memo, ui. Pipeline
-                    helpers: _run_pipeline, _enrich_accounts, _run_discovery,
-                    _merge_accounts (fills Account.sources), _fetch_tweets
-                    (parallel for free adapters).
+                    memo, inbox, publish, ui. Pipeline helpers: _run_pipeline,
+                    _enrich_accounts, _run_discovery, _merge_accounts (fills
+                    Account.sources), _fetch_tweets (parallel for free
+                    adapters). `run` degrades to github/hn + cached data when
+                    the twscrape adapter can't be built (headless CI).
   config.py         Pydantic Settings (.env) + Thesis/Seeds/SignalParams (yaml)
                     + save_thesis/save_seeds (shared by CLI + UI).
                     STAGE_* maps: stage → search categories / discovery sources.
@@ -103,7 +124,13 @@ scout/
                     and poll run status. Read-only without a token.
   demo_data.py      8 synthetic sample founders for `scout demo` (obviously fake handles).
   ui.py             Streamlit app: Leads / Pipeline / Sourcing / Settings.
-                    Apple design language; lead cards; agent flows. ~800 lines.
+                    Apple design language; lead cards; agent flows; diligence
+                    surfaces ("Worth a deep look" shelf, Analyze gate,
+                    scorecard + memo, Landscape/KG block). ~1500 lines.
+                    All diligence page-state (memo_by_handle, fresh keys,
+                    suggestions, known company names) is derived ONCE per
+                    rerun near the top over the FULL ledger grouping — never
+                    derive memo identity/staleness from a filtered card view.
   diligence/        Multi-agent deep-analysis engine (`scout analyze`) — the
                     Diligence Score + investment memos. TWO-TIER SCORING: the
                     screening score (score.py) ranks the feed; the Diligence
@@ -133,14 +160,28 @@ scout/
     hn_src.py       Hacker News (Algolia) discovery.
     linkedin_src.py Stub (NotImplementedError) — LinkedIn automation is a dead end.
   signals/
-    heuristics.py   8 deterministic signals + run_heuristics + intent_appeared.
+    heuristics.py   9 deterministic signals + run_heuristics + intent_appeared.
     llm.py          Claude classification. DEFAULT_PROMPT_TEMPLATE. Batches of 10.
-tests/              pytest — test_heuristics, test_score, test_store, test_sourcing_v2.
-thesis.yaml         Targeting + weights + signal_params + llm_prompt. User-owned.
+tests/              pytest — offline only. test_diligence_* stub research_call;
+                    test_inbox/test_publish cover the remote layer; test_ui_smoke
+                    renders the whole UI via AppTest against a temp DB.
+thesis.yaml         Targeting + weights + diligence_weights + signal_params +
+                    llm_prompt. User-owned.
 seeds.yaml          Query bank, bio_searches, watchlist, github_topics. User-owned.
 scout-cli           Bash wrapper → `uv run python -m scout.cli "$@"`.
 conftest.py         sys.path shim for pytest.
 .streamlit/config.toml   Headless config for the UI.
+.github/workflows/  Headless backend for the phone digest (all commit with
+                    [skip ci] and serialize on the `scout-db` concurrency group):
+  scout-run.yml       daily cron + dispatch: fold inbox → run → publish → commit DB
+  scout-apply.yml     fires on remote/inbox pushes: apply + republish (~1 min loop)
+  scout-analyze.yml   dispatch-only deep analysis (cost-confirmed on the page)
+data/scout.db       The HEADLESS store (gitignore exception) — Actions runs use
+                    DB_PATH=data/scout.db and commit it back; distinct from the
+                    local ~/.scout/scout.db. Absent until the first Actions run.
+remote/inbox/       Phone-triage decision files (one JSON per tap; .gitkeep only
+                    when empty). Written by the digest page via the GitHub
+                    Contents API; consumed by `scout inbox --apply --delete`.
 ```
 
 Future-hook stubs that are intentionally unbuilt: `linkedin_src.py`, star-velocity
@@ -171,6 +212,41 @@ store.save_leads + write_csv + write_markdown + print_top_table
 
 The UI then reads `store.load_latest_leads()` for **Pick** (triage → shortlist/pass,
 persisted in the `pipeline` table) and **Win** (status/notes/outreach).
+
+### Data flow — one `scout analyze` (diligence)
+
+```
+build_evidence_pack ($0: ledger group, bios, cached tweets, verdict,
+      │              pipeline notes, KG competitor seed)
+      ▼   fingerprint hit? → serve cached Memo, done
+recon agent (web tools) ──►  8 dimension agents (ThreadPoolExecutor,
+      │                      each budget-gated BEFORE launch; a failure
+      │                      becomes a gap finding, never aborts)
+      ▼
+cross-exam (synth model, no web; confidence DOWNGRADES only)
+      ▼
+diligence_breakdown (pure math, thin-wrapper cap) ──► memo synthesis
+      ▼                                               (synth model, restate-only)
+store.save_memo + graph.ingest → kg_nodes/kg_edges  (seeds the NEXT analysis)
+```
+
+Identity note: everything diligence-keyed (memos pk, KG company nodes, UI
+lookups, priority exclusions) flows through `companies.startup_key(lead)` —
+company key when the classifier named the company, else the NORMALIZED
+handle. Never re-derive this rule inline.
+
+### Data flow — the remote loop (phone → GitHub → phone)
+
+```
+digest page tap ──PUT──► remote/inbox/<ts>-<action>-<handle>-<rand>.json
+      │                      (private code repo, via user-held PAT)
+      ▼  push triggers scout-apply.yml   (or scout-run.yml cron/dispatch)
+scout inbox --apply --delete  →  pipeline table (status/tags/notes)
+      ▼
+scout publish --push  →  digest repo (GitHub Pages)  →  page reflects triage
+      ▼
+commit data/scout.db back  [skip ci]
+```
 
 ---
 
@@ -206,6 +282,17 @@ from store history, not by adapters — `recent_followed_by`, `bio_changed`,
 
 `signal_params` (traction floor/saturation/window, convergence threshold, stage
 multiplier) are UI-editable, read by the heuristics — do not re-hardcode them.
+
+**The other tier — the Diligence Score** lives in
+`diligence/composite.py::diligence_breakdown` (same single-source-of-truth
+pattern: pipeline takes the last step's value, UI renders the steps). It is a
+weighted mean of the 8 dimension scores (0–10 each, `score=None` excluded
+from BOTH numerator and denominator) × 10, weights from
+`thesis.yaml: diligence_weights` merged over `DEFAULT_WEIGHTS`, with one hard
+rule: `thin_wrapper` classification + data-flywheel score < 4 caps the
+composite at 40 (`commodity_risk`). Adding a dimension touches FIVE
+registries — see §9; `test_prompt_registries_cover_all_dimensions` guards
+them.
 
 ---
 
@@ -321,6 +408,20 @@ silently widen its input set to all-time).
   these tools (dynamic filtering is built in; a second env confuses the model).
   Structured outputs are NOT guaranteed on sonnet-4-6 — all diligence agents
   keep the JSON-in-text + corrective-retry idiom.
+- **GitHub API facts the remote layer relies on:** `api.github.com` allows
+  CORS from any origin, so a GitHub Pages page can call it directly with a
+  user-supplied PAT (`Authorization: Bearer`, `X-GitHub-Api-Version:
+  2022-11-28`). `workflow_dispatch` is addressed by workflow FILE NAME
+  (`/actions/workflows/scout-run.yml/dispatches`, returns 204). The Contents
+  API `PUT` needs a `sha` only when UPDATING a file — creating a NEW uniquely
+  named file needs none, which is why one-decision-one-file has no write
+  races. Commits containing `[skip ci]` skip workflow triggers natively.
+  PyYAML parses a workflow's `on:` key as boolean `True` (YAML 1.1) — tests
+  that load workflow files must check `data.get("on") or data.get(True)`.
+- **sqlite across threads:** sqlite3 connections must not cross threads —
+  diligence dimension workers each open their OWN `Store(db_path)`; the
+  usage-ledger write inside `research.py` is best-effort (a transient sqlite
+  error must never discard a paid finding).
 
 ---
 
@@ -340,9 +441,30 @@ silently widen its input set to all-time).
   `try/except (BudgetExceededError, RuntimeError, Exception)` → clean message +
   `typer.Exit(1)`, never a traceback.
 - **Change scoring:** edit `score_breakdown` only — everything else (score_leads,
-  the UI's step display) flows from it.
+  the UI's step display) flows from it. Same rule for the Diligence Score:
+  edit `diligence_breakdown` only.
 - **Add a stage behavior:** edit the `STAGE_SEARCH_CATEGORIES` /
   `STAGE_DISCOVERY_SOURCES` / `STAGE_BIO_GRAPH` maps in config.py.
+- **Add a diligence dimension:** five registries must stay in sync (guarded
+  by `test_prompt_registries_cover_all_dimensions`): `DIMENSION_KEYS` +
+  `DIMENSION_LABELS` (+ optionally `PAYLOAD_MODELS`/`CLASSIFIED_DIMENSIONS`)
+  in diligence/schema.py, a stepped rubric in `RUBRICS` (diligence/rubrics.py
+  — end it with THREE_LAWS + `_finding_schema`), a default weight in
+  `composite.DEFAULT_WEIGHTS`, and a commented default in thesis.yaml's
+  `diligence_weights`. The pipeline, UI scorecard, and memo template pick the
+  new key up automatically. Note the user-facing agent count derives from
+  `pipeline.AGENT_COUNT` — don't hardcode "11".
+- **Add a phone (remote) action:** add the action name to `ACTIONS` +
+  `apply_decision` in scout/inbox.py (keep it idempotent — absolute statuses,
+  deduped tags), a button/`data-act` handler in `_REMOTE_JS`
+  (scout/publish.py), and a test in test_inbox.py. The JS writes decisions;
+  ONLY `apply_decision` interprets them.
+- **Add or edit a workflow:** keep the `scout-db` concurrency group, the
+  `[skip ci]` commit convention, `DB_PATH: data/scout.db`, and secrets via
+  env-indirection (never interpolate `inputs.*` into `run:` shell — use an
+  `env:` block; workflow inputs are attacker-influencable text). If the page
+  must dispatch it, add the file name to publish.py's constants so
+  `test_workflow_files_parse_and_match_dispatch_targets` covers it.
 
 ---
 
@@ -358,15 +480,6 @@ silently widen its input set to all-time).
   with expander state preservation (see the stateless-expander note in ui.py),
   triage insights + AI weight suggestions (insights.py + suggest_weights),
   pipeline CSV export, agent timeouts, staleness nudge.
-- v5.1 additions: the **remote-control digest** — pipeline tags, the decision
-  inbox (`scout/inbox.py` + `scout inbox`), the GitHub-API-driven page
-  (`publish.py`), and the Actions backend (`.github/workflows/scout-run|
-  scout-apply|scout-analyze.yml`) accumulating the store at `data/scout.db`.
-  Headless `scout run` degrades gracefully without X cookies (github/hn legs
-  + cached data). NOT yet exercised against live GitHub: the user still needs
-  to add the Actions secrets, create the phone PAT, and tap through the flow
-  (see README → Remote control) — the page↔API contract is covered by offline
-  tests only.
 - v5 additions: the **diligence engine** (`scout/diligence/`) — `scout analyze`
   / `scout memo`, Diligence Score scorecard + native investment memos in the
   UI, knowledge graph with manual competitor linking, the "Worth a deep look"
@@ -376,9 +489,21 @@ silently widen its input set to all-time).
   `./scout-cli analyze tuva` after a discovery run), then a UI walkthrough:
   scorecard, memo render, Landscape chips, manual link persisting into the
   next analysis's competition seed.
-- **Waiting on the user:** X account cookies (`TW_COOKIES`) to activate the X
-  discovery legs (query bank, bio search, follow-graph); replacing the suggested
-  default `watchlist` in seeds.yaml with Headline's own investors.
+- v5.1 additions: the **remote-control digest** — pipeline tags, the decision
+  inbox (`scout/inbox.py` + `scout inbox`), the GitHub-API-driven page
+  (`publish.py`), and the Actions backend (`.github/workflows/scout-run|
+  scout-apply|scout-analyze.yml`) accumulating the store at `data/scout.db`.
+  Headless `scout run` degrades gracefully without X cookies (github/hn legs
+  + cached data). NOT yet exercised against live GitHub: the user still needs
+  to add the Actions secrets, create the phone PAT, and tap through the flow
+  (see README → Remote control) — the page↔API contract is covered by offline
+  tests only.
+- **Waiting on the user:** X account cookies (`TW_COOKIES` locally /
+  `TW_COOKIES_B64` Actions secret) to activate the X discovery legs (query
+  bank, bio search, follow-graph); replacing the suggested default
+  `watchlist` in seeds.yaml with Headline's own investors; the remote-control
+  first-run setup (Actions secrets, phone PAT — README → Remote control);
+  the first live `scout analyze`.
 - `thesis.target_stages` is currently `[launched]` (the user is sourcing
   just-launched startups).
 - Two secrets were pasted into chat historically (Anthropic + X bearer) — the
