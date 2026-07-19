@@ -25,6 +25,16 @@ def test_company_key_normalizes_variants() -> None:
     assert company_key(Lead(account=Account(id="f", handle="f"))) is None  # no verdict
 
 
+def test_startup_key_canonical_identity() -> None:
+    """startup_key is the memo/KG identity: the company key when named, else
+    the NORMALIZED handle (it must match KG node ids, which strip
+    non-alphanumerics — a raw "smoke_founder" would never match a node)."""
+    from scout.companies import startup_key
+
+    assert startup_key(make_lead("whoever", "Eval-HQ.ai", 1)) == "evalhq"
+    assert startup_key(make_lead("smoke_founder", None, 1)) == "smokefounder"
+
+
 def test_group_by_company_folds_and_keeps_highest_score_primary() -> None:
     founder = make_lead("ada_infra", "EvalHQ", 40.0)
     company = make_lead("evalhq", "EvalHQ", 25.0, account_type="startup")

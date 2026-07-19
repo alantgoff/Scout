@@ -15,6 +15,7 @@ from pathlib import Path
 import sqlite_utils
 
 from scout.config import DEFAULT_DB_PATH
+from scout.diligence.schema import Memo
 from scout.models import Account, Lead, LedgerEntry, LLMVerdict, Tweet, UnlinkedLead
 
 # Pre-~/.scout location: a scout.db relative to wherever scout was run from.
@@ -611,3 +612,218 @@ class Store:
             "select coalesce(sum(est_cost_usd), 0) from xapi_usage"
         ).fetchone()
         return float(row[0])
+
+    # ------------------------------------------------------------------- memos
+
+    def save_memo(self, memo: Memo) -> None:
+        """Persist a deep-analysis memo (one per company; re-analysis
+        replaces). The fingerprint makes the cache: re-running with unchanged
+        inputs is served from here (mirrors the llm_verdicts idiom)."""
+        self.db["memos"].upsert(
+            {
+                "company_key": memo.company_key,
+                "company_name": memo.company_name,
+                "fingerprint": memo.fingerprint,
+                "composite": memo.composite,
+                "memo_json": memo.model_dump_json(),
+                "memo_md": memo.memo_md,
+                "cost_usd": memo.cost_usd,
+                "created_at": memo.created_at
+                or datetime.now(timezone.utc).isoformat(),
+            },
+            pk="company_key",
+            alter=True,
+        )
+
+    def load_memo(self, company_key: str) -> Memo | None:
+        if not self.db["memos"].exists():
+            return None
+        rows = list(
+            self.db["memos"].rows_where("company_key = ?", [company_key], limit=1)
+        )
+        return Memo.model_validate_json(rows[0]["memo_json"]) if rows else None
+
+    def list_memos(self) -> list[Memo]:
+        """All stored memos, newest first."""
+        if not self.db["memos"].exists():
+            return []
+        return [
+            Memo.model_validate_json(r["memo_json"])
+            for r in self.db["memos"].rows_where(order_by="created_at desc")
+        ]
+
+    # ------------------------------------------------- diligence budget ledger
+
+    def record_diligence_usage(
+        self,
+        *,
+        company_key: str,
+        stage: str,
+        model: str,
+        input_tokens: int,
+        output_tokens: int,
+        searches: int,
+        est_cost_usd: float,
+    ) -> None:
+        """Append one diligence API call to the spend ledger (mirrors
+        xapi_usage: estimates, recorded per call, never rewritten)."""
+        self.db["diligence_usage"].insert(
+            {
+                "company_key": company_key,
+                "stage": stage,
+                "model": model,
+                "input_tokens": input_tokens,
+                "output_tokens": output_tokens,
+                "searches": searches,
+                "est_cost_usd": est_cost_usd,
+                "at": datetime.now(timezone.utc).isoformat(),
+            }
+        )
+
+    def diligence_spend_usd(self, company_key: str | None = None) -> float:
+        """Cumulative estimated diligence spend — all-time, or one company's."""
+        if not self.db["diligence_usage"].exists():
+            return 0.0
+        if company_key is None:
+            row = self.db.execute(
+                "select coalesce(sum(est_cost_usd), 0) from diligence_usage"
+            ).fetchone()
+        else:
+            row = self.db.execute(
+                "select coalesce(sum(est_cost_usd), 0) from diligence_usage "
+                "where company_key = ?",
+                [company_key],
+            ).fetchone()
+        return float(row[0])
+
+    # --------------------------------------------------------- knowledge graph
+
+    def kg_upsert_node(
+        self, id: str, type: str, name: str, meta: dict | None = None
+    ) -> None:
+        """Read-merge upsert: an ingest with an empty name/meta never clobbers
+        richer data already on the node."""
+        row = {"id": id, "type": type, "name": name, "meta": json.dumps(meta or {})}
+        if self.db["kg_nodes"].exists():
+            existing = list(self.db["kg_nodes"].rows_where("id = ?", [id], limit=1))
+            if existing:
+                old = dict(existing[0])
+                # First non-empty display name wins — a later write keyed by
+                # the normalized key must not clobber "Tuva AI" with "tuvaai".
+                if old.get("name"):
+                    row["name"] = old["name"]
+                old_meta = json.loads(old.get("meta") or "{}")
+                row["meta"] = json.dumps({**old_meta, **(meta or {})})
+        self.db["kg_nodes"].upsert(row, pk="id", alter=True)
+
+    def kg_upsert_edge(
+        self,
+        src: str,
+        rel: str,
+        dst: str,
+        provenance: str = "agent",
+        source_url: str = "",
+        memo_ref: str = "",
+    ) -> None:
+        """Upsert one edge. INVARIANT: user-provenance edges are never
+        overwritten (or deleted) by agents — a manual "X competes with Y"
+        link survives every re-analysis."""
+        existing = None
+        if self.db["kg_edges"].exists():
+            rows = list(
+                self.db["kg_edges"].rows_where(
+                    "src = ? and rel = ? and dst = ?", [src, rel, dst], limit=1
+                )
+            )
+            existing = dict(rows[0]) if rows else None
+        if existing is not None and existing.get("provenance") == "user" and provenance == "agent":
+            return
+        self.db["kg_edges"].upsert(
+            {
+                "src": src,
+                "rel": rel,
+                "dst": dst,
+                "provenance": provenance,
+                "source_url": source_url,
+                "memo_ref": memo_ref,
+                "created_at": (existing or {}).get("created_at")
+                or datetime.now(timezone.utc).isoformat(),
+            },
+            pk=("src", "rel", "dst"),
+            alter=True,
+        )
+
+    def _kg_node_names(self, ids: list[str]) -> dict[str, dict]:
+        if not ids or not self.db["kg_nodes"].exists():
+            return {}
+        marks = ",".join("?" for _ in ids)
+        rows = self.db["kg_nodes"].rows_where(f"id in ({marks})", ids)
+        return {r["id"]: dict(r) for r in rows}
+
+    def kg_neighbors(self, company_key: str) -> list[dict]:
+        """Every edge touching this company, with the far node resolved:
+        [{"id", "type", "name", "meta", "rel", "direction", "provenance"}]."""
+        node = f"company:{company_key}"
+        if not self.db["kg_edges"].exists():
+            return []
+        edges: list[tuple[str, dict]] = []  # (far_node_id, edge_row)
+        seen: set[tuple[str, str]] = set()
+        for row in self.db["kg_edges"].rows_where("src = ? or dst = ?", [node, node]):
+            far = row["dst"] if row["src"] == node else row["src"]
+            if far == node or (far, row["rel"]) in seen:
+                continue
+            seen.add((far, row["rel"]))
+            edges.append((far, dict(row)))
+        names = self._kg_node_names([far for far, _ in edges])  # one batched query
+        return [
+            {
+                "id": far,
+                "type": (names.get(far) or {}).get("type") or far.split(":", 1)[0],
+                "name": (names.get(far) or {}).get("name") or far.split(":", 1)[-1],
+                "meta": json.loads((names.get(far) or {}).get("meta") or "{}"),
+                "rel": row["rel"],
+                "direction": "out" if row["src"] == node else "in",
+                "provenance": row.get("provenance") or "agent",
+            }
+            for far, row in edges
+        ]
+
+    def kg_competitors_for_sectors(
+        self, sector_keys: list[str], exclude_company_key: str | None = None
+    ) -> list[str]:
+        """Names of companies previously mapped into these sectors — the seed
+        the competition agent starts from ("previously mapped in this space").
+        sector_keys are normalized sector node keys (graph.normalize_name)."""
+        if not sector_keys or not self.db["kg_edges"].exists():
+            return []
+        sector_ids = [f"sector:{k}" for k in sector_keys]
+        marks = ",".join("?" for _ in sector_ids)
+        company_ids = {
+            r["src"]
+            for r in self.db["kg_edges"].rows_where(
+                f"rel = 'in_sector' and dst in ({marks})", sector_ids
+            )
+            if r["src"].startswith("company:")
+        }
+        if exclude_company_key:
+            company_ids.discard(f"company:{exclude_company_key}")
+        names = self._kg_node_names(sorted(company_ids))
+        return sorted(
+            (names.get(cid) or {}).get("name") or cid.split(":", 1)[-1]
+            for cid in company_ids
+        )
+
+    def kg_link_competitors(self, a: str, b: str, provenance: str = "user") -> bool:
+        """Manually link two companies as competitors (both directions).
+        Accepts display names or keys; creates missing nodes. Returns False
+        when either name normalizes to nothing."""
+        from scout.diligence.graph import node_id
+
+        aid, bid = node_id("company", a), node_id("company", b)
+        if aid is None or bid is None or aid == bid:
+            return False
+        self.kg_upsert_node(aid, "company", a.strip())
+        self.kg_upsert_node(bid, "company", b.strip())
+        self.kg_upsert_edge(aid, "competes_with", bid, provenance=provenance)
+        self.kg_upsert_edge(bid, "competes_with", aid, provenance=provenance)
+        return True

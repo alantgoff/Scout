@@ -1048,6 +1048,205 @@ def verify(
         store.scan_finish("done" if ok else "failed")
 
 
+# --------------------------------------------------------------------- analyze
+
+
+def _print_memo_scorecard(memo) -> None:
+    from scout.diligence.schema import DIMENSION_LABELS
+
+    table = Table(title=f"Diligence scorecard — {memo.company_name}")
+    table.add_column("dimension")
+    table.add_column("score", justify="right")
+    table.add_column("conf", justify="right")
+    table.add_column("summary", overflow="fold")
+    for finding in memo.findings:
+        table.add_row(
+            DIMENSION_LABELS.get(finding.key, finding.key),
+            f"{finding.score:.1f}" if finding.score is not None else "—",
+            f"{finding.confidence:.0%}",
+            finding.summary,
+        )
+    console.print(table)
+    composite = f"{memo.composite:.1f}" if memo.composite is not None else "n/a"
+    console.print(
+        f"Diligence Score: [bold]{composite}[/bold] / 100 "
+        f"[dim](deep analysis — distinct from the screening score)[/dim]"
+    )
+    if memo.flags:
+        console.print(f"Flags: [yellow]{', '.join(memo.flags)}[/yellow]")
+    console.print(f"Estimated cost: [bold]${memo.cost_usd:.2f}[/bold]")
+
+
+def _write_memo_file(memo, out_dir: Path) -> Path:
+    out_dir.mkdir(parents=True, exist_ok=True)
+    date = datetime.now(timezone.utc).strftime("%Y%m%d")
+    path = out_dir / f"memo_{memo.company_key}_{date}.md"
+    composite = f"{memo.composite:.1f}/100" if memo.composite is not None else "n/a"
+    header = (
+        f"# {memo.company_name} — investment memo\n\n"
+        f"_Diligence Score: {composite} · generated {memo.created_at[:10]} · "
+        f"est. ${memo.cost_usd:.2f}_\n\n"
+    )
+    path.write_text(header + memo.memo_md + "\n", encoding="utf-8")
+    return path
+
+
+@app.command()
+def analyze(
+    query: Annotated[
+        str, typer.Argument(help="Startup name or account handle (with or without @).")
+    ],
+    refresh: Annotated[
+        bool, typer.Option("--refresh", help="Re-run even if a fresh memo is cached.")
+    ] = False,
+    yes: Annotated[
+        bool, typer.Option("--yes", help="Skip the cost confirmation.")
+    ] = False,
+) -> None:
+    """Deep analysis: 11 research agents -> Diligence Score + investment memo.
+
+    Recon + 8 web-researched dimensions on the configured Claude model, then
+    cross-examination and memo synthesis on the premium synth model. Costs
+    real money (~$4-8, hard-capped by DILIGENCE_COST_CAP_USD); cached by an
+    input fingerprint so an unchanged re-run is free.
+    """
+    from scout.diligence.pipeline import (
+        build_evidence_pack,
+        memo_fingerprint,
+        run_analysis,
+    )
+
+    settings = Settings()
+    thesis = _load_thesis_or_exit(Path("thesis.yaml"))
+    store = Store(settings.db_path)
+    if not settings.anthropic_api_key:
+        console.print(
+            "[red]ANTHROPIC_API_KEY is not set — deep analysis needs Claude.[/red]"
+        )
+        raise typer.Exit(1)
+
+    pack = build_evidence_pack(store, query)
+    if pack is None:
+        console.print(
+            f"[red]No tracked startup matches '{query}'.[/red] Check the name or "
+            "handle, or run discovery first."
+        )
+        raise typer.Exit(1)
+
+    from scout.diligence.pipeline import AGENT_COUNT
+
+    cached = store.load_memo(pack.company_key)
+    fresh_cache = (
+        cached is not None
+        and cached.fingerprint == memo_fingerprint(pack, thesis, settings)
+    )
+    if fresh_cache and not refresh:
+        console.print(
+            f"Serving cached memo for [bold]{pack.company_name}[/bold] — inputs "
+            "unchanged since it was generated (re-run with --refresh to redo, ~$0 saved)."
+        )
+        memo = cached
+    else:
+        console.print(
+            f"Deep analysis of [bold]{pack.company_name}[/bold] "
+            f"(@{pack.primary_handle}): {AGENT_COUNT} research agents, a few "
+            f"minutes, ≈ [bold]$4–8[/bold] (hard cap "
+            f"${settings.diligence_cost_cap_usd:.2f})."
+        )
+        if not yes and not typer.confirm("Proceed?"):
+            raise typer.Exit()
+        store.scan_start("analyze", os.getpid())
+        ok = False
+        try:
+            memo = run_analysis(
+                pack.company_key, store, thesis, settings, refresh=refresh, pack=pack
+            )
+            ok = True
+        except typer.Exit:
+            raise
+        except RuntimeError as exc:
+            console.print(f"[red]Cannot analyze:[/red] {exc}")
+            raise typer.Exit(1) from None
+        except Exception as exc:
+            console.print(f"[red]{type(exc).__name__}:[/red] {exc}")
+            raise typer.Exit(1) from None
+        finally:
+            store.scan_finish("done" if ok else "failed")
+
+    try:
+        _print_memo_scorecard(memo)
+        path = _write_memo_file(memo, settings.out_dir)
+    except OSError as exc:
+        console.print(f"[red]Could not write the memo file:[/red] {exc}")
+        raise typer.Exit(1) from None
+    console.print(f"Memo: [bold]{path}[/bold]")
+    console.print(
+        f"Diligence spend to date: [bold]${store.diligence_spend_usd():.2f}[/bold]"
+    )
+
+
+@app.command("memo")
+def memo_cmd(
+    query: Annotated[str, typer.Argument(help="Startup name or account handle.")],
+    refresh: Annotated[
+        bool,
+        typer.Option(
+            "--refresh",
+            help="Re-synthesize the memo text from the STORED findings "
+            "(one cheap synth call — no new research).",
+        ),
+    ] = False,
+) -> None:
+    """Print a stored investment memo (optionally re-synthesized)."""
+    from scout.companies import normalize_company
+    from scout.diligence.pipeline import resolve_company, resynthesize_memo
+
+    settings = Settings()
+    thesis = _load_thesis_or_exit(Path("thesis.yaml"))
+    store = Store(settings.db_path)
+
+    # Resolve through the ledger FIRST — "memo notion" should mean the tracked
+    # startup @notion resolves to, not whichever memo key the raw string
+    # happens to normalize into. Direct key lookup is the fallback for memos
+    # whose lead has since left the ledger.
+    memo = None
+    resolved = resolve_company(store, query)
+    if resolved is not None:
+        memo = store.load_memo(resolved[0])
+    if memo is None:
+        key = normalize_company(query)
+        if key:
+            memo = store.load_memo(key)
+    if memo is None:
+        console.print(
+            f"[yellow]No memo stored for '{query}' — run "
+            f"`scout analyze {query}` first.[/yellow]"
+        )
+        raise typer.Exit(1)
+
+    if refresh:
+        if not settings.anthropic_api_key:
+            console.print("[red]ANTHROPIC_API_KEY is not set.[/red]")
+            raise typer.Exit(1)
+        try:
+            with console.status("Re-synthesizing memo from stored findings..."):
+                memo = resynthesize_memo(memo, store, thesis, settings)
+        except RuntimeError as exc:
+            console.print(f"[red]Cannot re-synthesize:[/red] {exc}")
+            raise typer.Exit(1) from None
+
+    _print_memo_scorecard(memo)
+    from rich.markdown import Markdown
+
+    console.print(Markdown(memo.memo_md))
+    try:
+        path = _write_memo_file(memo, settings.out_dir)
+    except OSError as exc:
+        console.print(f"[red]Could not write the memo file:[/red] {exc}")
+        raise typer.Exit(1) from None
+    console.print(f"\nMemo file: [bold]{path}[/bold]")
+
+
 # -------------------------------------------------------------------- strategy
 
 

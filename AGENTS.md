@@ -62,7 +62,8 @@ about the hidden-`.pth` issue).
 ```
 scout/
   cli.py            Typer app — ALL orchestration. Commands: run, source, inspect,
-                    verify, probe, demo, export, budget, strategy, ui. Pipeline
+                    verify, probe, demo, export, budget, strategy, analyze,
+                    memo, ui. Pipeline
                     helpers: _run_pipeline, _enrich_accounts, _run_discovery,
                     _merge_accounts (fills Account.sources), _fetch_tweets
                     (parallel for free adapters).
@@ -93,6 +94,26 @@ scout/
   demo_data.py      8 synthetic sample founders for `scout demo` (obviously fake handles).
   ui.py             Streamlit app: Leads / Pipeline / Sourcing / Settings.
                     Apple design language; lead cards; agent flows. ~800 lines.
+  diligence/        Multi-agent deep-analysis engine (`scout analyze`) — the
+                    Diligence Score + investment memos. TWO-TIER SCORING: the
+                    screening score (score.py) ranks the feed; the Diligence
+                    Score (0-100 composite of 8 researched dimensions) attaches
+                    only to analyzed startups. Never conflate them in UI copy.
+    schema.py       Pydantic models (Evidence/DimensionFinding/ReconReport/Memo)
+                    + pure parse helpers (JSON-in-text, clamp, payload validation).
+    rubrics.py      The 8 dimension system prompts (stepped rubrics + the three
+                    evidence laws) + recon/cross-exam/memo prompts + render().
+    research.py     research_call(): one Messages API call with server web tools
+                    (web_search/web_fetch _20260209, max_uses-capped), pause_turn
+                    continuation loop, corrective parse retry, usage ledger.
+    composite.py    diligence_breakdown() — pure weighted math mirroring
+                    score_breakdown; thin_wrapper+weak-flywheel commodity cap.
+    pipeline.py     run_analysis() orchestrator: evidence pack ($0) → recon →
+                    8 dims (ThreadPoolExecutor, budget-gated) → cross-exam
+                    (downgrades only) → composite → memo synthesis → KG ingest.
+    graph.py        Knowledge-graph pure logic (node ids reuse the company_key
+                    normalizer); persistence lives in store.py.
+    priority.py     $0 "worth a deep look" ranking (the Startups-track shelf).
   ingest/
     base.py         SourceAdapter ABC (X sources) + DiscoverySource ABC (github/hn).
     twscrape_src.py Primary free X adapter: query bank, bio search, list members,
@@ -192,6 +213,9 @@ multiplier) are UI-editable, read by the heuristics — do not re-hardcode them.
 | pipeline | deal-flow state: status, notes, outreach, channel, brief |
 | llm_verdicts | **verdict cache** — Claude verdict per handle, keyed by an input fingerprint (bio + tweets + thesis + model); TTL `VERDICT_TTL_DAYS` |
 | xapi_usage | **budget ledger** — every paid call, cumulative spend |
+| memos | deep-analysis memos, pk company_key; fingerprint-cached (bios + website + thesis + both model ids) — unchanged inputs re-serve for $0 |
+| diligence_usage | diligence spend ledger — every research/synth call (tokens, searches, est $); `diligence_spend_usd()` |
+| kg_nodes, kg_edges | knowledge graph: company/person/org/sector nodes, competes_with/founded_by/worked_at/in_sector edges. **Edge provenance "user" beats "agent": manual links are never overwritten or deleted by analysis runs** |
 
 DB path defaults to `~/.scout/scout.db` (not cwd) so the budget guard can't be
 defeated by running from another directory; `DB_PATH` overrides. Handle lookups
@@ -234,7 +258,21 @@ silently widen its input set to all-time).
   (regexes for launch language, github detection) live in code; *targeting*
   (keywords, orgs, stages, weights, params, prompt) lives in the yaml.
 - **Tests never make live network calls.** Adapter tests hit pure parser
-  functions on fixture JSON.
+  functions on fixture JSON; diligence pipeline tests stub `research_call`.
+- **Diligence cost cap.** Every diligence API call goes through
+  `research.research_call` (usage → `diligence_usage` ledger); the pipeline's
+  budget tracker checks spend-so-far before LAUNCHING each call and stops at
+  `DILIGENCE_COST_CAP_USD`, keeping completed findings and flagging the gap
+  (`budget_capped`). Web tools carry hard `max_uses` caps. Never add a
+  diligence call path that bypasses research_call.
+- **Two-tier scoring, never conflated.** The screening score (score.py) ranks
+  the feed; the Diligence Score (diligence/composite.py) is a separate 0–100
+  composite shown only on analyzed startups. UI copy must always name which
+  one it means.
+- **KG user edges are sacred.** `kg_upsert_edge` refuses agent writes over
+  provenance="user" rows; nothing may delete user edges.
+- **Memos never reach the public digest** (scout publish stays lead-cards
+  only — memos are private work product).
 
 ---
 
@@ -250,7 +288,17 @@ silently widen its input set to all-time).
 - **LinkedIn automation is dead** (Proxycurl sued & shut down 2025) — do not add
   a LinkedIn scraper.
 - **Claude model:** `claude-sonnet-4-6` is the configured default (`CLAUDE_MODEL`),
-  a real current model ID. Don't "correct" it.
+  a real current model ID. Don't "correct" it. The diligence synth model
+  default `claude-opus-4-8` (`DILIGENCE_SYNTH_MODEL`) is likewise real.
+- **Server web tools (diligence):** `web_search_20260209` / `web_fetch_20260209`
+  are the current API tool types and run on `claude-sonnet-4-6`. web_fetch only
+  fetches URLs already present in the conversation — recon/dimension prompts
+  must include candidate URLs verbatim. `stop_reason == "pause_turn"` means
+  the server-side tool loop paused: re-send with the partial assistant turn
+  appended (handled in research.py). Do NOT declare code_execution alongside
+  these tools (dynamic filtering is built in; a second env confuses the model).
+  Structured outputs are NOT guaranteed on sonnet-4-6 — all diligence agents
+  keep the JSON-in-text + corrective-retry idiom.
 
 ---
 
@@ -288,6 +336,15 @@ silently widen its input set to all-time).
   with expander state preservation (see the stateless-expander note in ui.py),
   triage insights + AI weight suggestions (insights.py + suggest_weights),
   pipeline CSV export, agent timeouts, staleness nudge.
+- v5 additions: the **diligence engine** (`scout/diligence/`) — `scout analyze`
+  / `scout memo`, Diligence Score scorecard + native investment memos in the
+  UI, knowledge graph with manual competitor linking, the "Worth a deep look"
+  shelf, diligence spend ledger + per-memo cost cap. Fully covered by offline
+  tests (stubbed research calls); **live end-to-end run still pending** — it
+  needs `ANTHROPIC_API_KEY` plus a real tracked startup (e.g.
+  `./scout-cli analyze tuva` after a discovery run), then a UI walkthrough:
+  scorecard, memo render, Landscape chips, manual link persisting into the
+  next analysis's competition seed.
 - **Waiting on the user:** X account cookies (`TW_COOKIES`) to activate the X
   discovery legs (query bank, bio search, follow-graph); replacing the suggested
   default `watchlist` in seeds.yaml with Headline's own investors.

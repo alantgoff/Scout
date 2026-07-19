@@ -231,6 +231,12 @@ source       Discovery PREVIEW — raw accounts per strategy, no scoring/LLM/cos
 
 inspect <handle>   Score one account and print the per-signal breakdown (@ optional)
 
+analyze <name-or-handle>   Deep analysis → Diligence Score + investment memo (paid)
+  --refresh                re-run even if a fresh memo is cached
+  --yes                    skip the cost confirmation
+memo <name-or-handle>      Print a stored investment memo
+  --refresh                re-synthesize the memo text from stored findings (cheap)
+
 verify       Hydrate the current shortlist with FRESH paid X API data and re-score
   --max N            how many top leads to hydrate (default 50)
   --tweets N         tweets to pull per account (default 10)
@@ -260,6 +266,34 @@ the graph leg last, so the highest-yield legs get budget priority).
 Outputs land in `./out/`: `leads_YYYYMMDD.csv` (full columns) and
 `report_YYYYMMDD.md` (top-20 cards — the thing you paste into the one-pager).
 Top 10 also prints to the terminal.
+
+## Deep analysis (Diligence Score + investment memos)
+
+The screening score ranks the feed cheaply; when a startup deserves real
+depth, `./scout-cli analyze <name>` (or the **Analyze** button on a startup
+card) runs a multi-agent diligence pipeline: a recon agent plus eight
+dimension agents research the company with live web search/fetch (founder
+pedigree, technical differentiation, wrapper-vs-proprietary, deployment
+model, data flywheel, market size top-down AND bottom-up, defensibility vs
+the model labs, competition), a cross-examiner checks the findings for
+contradictions, and a premium model writes an investment memo with numbered
+citations. The result is a **Diligence Score** (0–100, weighted composite —
+weights in `thesis.yaml: diligence_weights`) shown as a per-dimension
+scorecard, never to be confused with the screening score.
+
+Costs ~$4–8 per memo, hard-capped by `DILIGENCE_COST_CAP_USD` (default 8) —
+past the cap remaining agents are skipped and the gap is flagged. Every call
+lands in the `diligence_usage` ledger (Settings shows spend to date). Memos
+are cached by an input fingerprint: re-running an unchanged company is free.
+
+Analyses also feed a small knowledge graph (competitors, founders, prior
+employers, sectors), so each memo's competitive landscape seeds the next
+one. The **Landscape** block on a card shows mapped competitors and lets you
+link "X competes with Y" by hand — manual links are never overwritten by
+agents. The **"Worth a deep look"** shelf at the top of the Startups track
+ranks who deserves analysis next ($0, computed from existing data); analysis
+itself only ever runs when you pull the trigger. Memos stay private — they
+are never included in the phone digest.
 
 ## Phone digest (GitHub Pages)
 

@@ -20,23 +20,44 @@ Pair = tuple[Lead, LedgerEntry | None]
 Grouped = tuple[Lead, LedgerEntry | None, list[Lead]]  # primary, entry, secondaries
 
 
-def company_key(lead: Lead) -> str | None:
-    """Normalized grouping key for the startup behind a lead (None = unknown).
+def normalize_company(name: str) -> str | None:
+    """Normalize a company name to its grouping key (None = unusable).
 
     Lowercased alphanumerics only, so "EvalHQ", "eval hq", and "Eval-HQ.ai"
-    merge. Single-character keys are discarded as noise.
+    merge. A trailing TLD the classifier sometimes includes ("evalhq.ai") is
+    stripped. Single-character keys are discarded as noise. Shared by the
+    company grouping here and the knowledge-graph node ids (scout.diligence).
     """
+    raw = name.lower().strip()
+    for tld in ("ai", "io", "com", "dev", "app", "xyz", "co"):
+        if raw.endswith("." + tld):
+            raw = raw[: -len(tld) - 1]
+            break
+    key = re.sub(r"[^a-z0-9]", "", raw)
+    return key if len(key) > 1 else None
+
+
+def company_key(lead: Lead) -> str | None:
+    """Normalized grouping key for the startup behind a lead (None = unknown)."""
     verdict = lead.llm
     if verdict is None or not verdict.company_name:
         return None
-    key = re.sub(r"[^a-z0-9]", "", verdict.company_name.lower())
-    # Strip a trailing TLD the classifier sometimes includes ("evalhq.ai").
-    for tld in ("ai", "io", "com", "dev", "app", "xyz", "co"):
-        raw = verdict.company_name.lower().strip()
-        if raw.endswith("." + tld):
-            key = re.sub(r"[^a-z0-9]", "", raw[: -len(tld) - 1])
-            break
-    return key if len(key) > 1 else None
+    return normalize_company(verdict.company_name)
+
+
+def startup_key(lead: Lead) -> str:
+    """CANONICAL identity for the startup behind a lead — the memos-table
+    primary key and the KG company-node key. The company key when the
+    classifier named the company; else the NORMALIZED handle (normalized so
+    it agrees with KG node ids, which strip non-alphanumerics — a raw
+    "smoke_founder" fallback would never match node "company:smokefounder").
+    Every consumer (pipeline, priority, UI) must derive the key through here.
+    """
+    return (
+        company_key(lead)
+        or normalize_company(lead.account.handle)
+        or lead.account.handle.lower()
+    )
 
 
 def group_by_company(pairs: list[Pair]) -> list[Grouped]:

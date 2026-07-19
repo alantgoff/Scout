@@ -47,6 +47,20 @@ signal_params:
   # multiplier = (1 - w) + w * fit.
   thesis_fit_weight: 0.5
 
+# Diligence Score dimension weights (deep analysis memos — `scout analyze`).
+# Relative, like the screening weights below but for a DIFFERENT score: the
+# 0-100 composite of the 8 researched dimensions. Defaults emphasize the
+# thesis dimensions (data flywheel, defensibility vs the model labs, founders).
+diligence_weights:
+  data_flywheel: 20.0
+  defensibility_vs_labs: 18.0
+  founder_pedigree: 15.0
+  technical_differentiation: 12.0
+  wrapper_vs_proprietary: 10.0
+  market_size: 10.0
+  competition: 9.0
+  deployment_model: 8.0
+
 weights:
   bio_intent: 20.0
   smart_money_convergence: 20.0

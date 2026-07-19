@@ -281,3 +281,70 @@ def test_current_scan_flips_dead_process_to_failed(tmp_path: Path) -> None:
     scan = store.current_scan()
     assert scan["status"] == "failed"
     assert "exited" in scan["detail"]
+
+
+# --- memos + diligence usage ----------------------------------------------------
+
+
+def make_memo(company_key: str = "tuvaai", fingerprint: str = "fp-1"):
+    from scout.diligence.schema import DimensionFinding, Memo
+
+    return Memo(
+        company_key=company_key, company_name="Tuva AI", fingerprint=fingerprint,
+        composite=71.5, memo_md="## Recommendation\nPursue.",
+        findings=[DimensionFinding(key="data_flywheel", score=8.0, confidence=0.9)],
+        cost_usd=5.12, created_at="2026-07-18T00:00:00+00:00",
+    )
+
+
+def test_memo_save_load_roundtrip(tmp_path: Path) -> None:
+    store = make_store(tmp_path)
+    assert store.load_memo("tuvaai") is None
+    store.save_memo(make_memo())
+    loaded = store.load_memo("tuvaai")
+    assert loaded is not None
+    assert loaded.composite == 71.5
+    assert loaded.findings[0].score == 8.0
+    assert loaded.fingerprint == "fp-1"
+
+
+def test_memo_fingerprint_cache_semantics(tmp_path: Path) -> None:
+    """The memo cache is fingerprint-keyed like llm_verdicts: same key -> the
+    caller compares fingerprints; a re-save replaces (one memo per company)."""
+    store = make_store(tmp_path)
+    store.save_memo(make_memo(fingerprint="fp-1"))
+    assert store.load_memo("tuvaai").fingerprint == "fp-1"
+    store.save_memo(make_memo(fingerprint="fp-2"))  # re-analysis replaces
+    assert store.load_memo("tuvaai").fingerprint == "fp-2"
+    assert len(store.list_memos()) == 1
+
+
+def test_list_memos_newest_first(tmp_path: Path) -> None:
+    store = make_store(tmp_path)
+    old = make_memo("oldco")
+    old.created_at = "2026-01-01T00:00:00+00:00"
+    store.save_memo(old)
+    store.save_memo(make_memo("newco"))
+    assert [m.company_key for m in store.list_memos()] == ["newco", "oldco"]
+
+
+def test_diligence_usage_ledger_sums(tmp_path: Path) -> None:
+    store = make_store(tmp_path)
+    assert store.diligence_spend_usd() == 0.0
+    store.record_diligence_usage(
+        company_key="tuvaai", stage="recon", model="claude-sonnet-4-6",
+        input_tokens=1000, output_tokens=500, searches=2, est_cost_usd=0.30,
+    )
+    store.record_diligence_usage(
+        company_key="tuvaai", stage="memo", model="claude-opus-4-8",
+        input_tokens=2000, output_tokens=1500, searches=0, est_cost_usd=0.75,
+    )
+    store.record_diligence_usage(
+        company_key="otherco", stage="recon", model="claude-sonnet-4-6",
+        input_tokens=100, output_tokens=50, searches=1, est_cost_usd=0.05,
+    )
+    import pytest
+
+    assert store.diligence_spend_usd() == pytest.approx(1.10)
+    assert store.diligence_spend_usd("tuvaai") == pytest.approx(1.05)
+    assert store.diligence_spend_usd("unknown") == 0.0

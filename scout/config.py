@@ -84,6 +84,10 @@ class Thesis(BaseModel):
     # Which company stages to hunt (drives search strategy AND scoring fit).
     target_stages: list[str] = Field(default_factory=lambda: list(STAGES))
     signal_params: SignalParams = Field(default_factory=SignalParams)
+    # Relative weights for the 8 Diligence Score dimensions (deep analysis).
+    # Empty = built-in defaults (scout.diligence.composite.DEFAULT_WEIGHTS).
+    # Distinct from `weights` (the screening score) — never conflate the two.
+    diligence_weights: dict[str, float] = Field(default_factory=dict)
     # Optional override of the Claude classification system prompt.
     # Placeholders: {thesis} {sectors} {stages}. Empty = built-in default.
     llm_prompt: str = ""
@@ -169,6 +173,21 @@ class Settings(BaseSettings):
     # Claude classification (omit key to run heuristics-only)
     anthropic_api_key: str | None = None
     claude_model: str = "claude-sonnet-4-6"
+
+    # Diligence engine (deep analysis memos — scout analyze / UI Analyze).
+    # Research dimensions run on claude_model with web tools; cross-exam and
+    # memo synthesis run on the synth model below (premium depth).
+    diligence_synth_model: str = "claude-opus-4-8"  # DILIGENCE_SYNTH_MODEL
+    diligence_cost_cap_usd: float = 8.0  # hard per-memo spend cap
+    diligence_concurrency: int = 4  # dimension agents in flight
+    # Cost ESTIMATES (like the xapi_cost_* knobs): per-MTok token rates for the
+    # research + synth models and a per-web-search charge. Tune via .env if
+    # Anthropic pricing changes; the ledger records estimates, not invoices.
+    diligence_cost_per_search: float = 0.01
+    diligence_research_cost_per_mtok_in: float = 3.0  # claude-sonnet-4-6
+    diligence_research_cost_per_mtok_out: float = 15.0
+    diligence_synth_cost_per_mtok_in: float = 5.0  # claude-opus-4-8
+    diligence_synth_cost_per_mtok_out: float = 25.0
 
     # GitHub discovery (optional; unauthenticated works at lower rate limits)
     github_token: str | None = None

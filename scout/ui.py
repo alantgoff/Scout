@@ -45,7 +45,10 @@ from scout.config import (
     save_seeds,
     save_thesis,
 )
-from scout.companies import group_by_company
+from scout.companies import group_by_company, startup_key
+from scout.diligence.pipeline import AGENT_COUNT, members_fingerprint
+from scout.diligence.priority import analysis_priority
+from scout.diligence.schema import DIMENSION_LABELS, Memo
 from scout.export import pipeline_rows, write_pipeline_csv
 from scout.insights import stats_prompt, triage_stats
 from scout.models import Lead, LedgerEntry
@@ -340,6 +343,115 @@ def _stream_command(args: list[str]) -> None:
         "Done." if proc.returncode == 0 else f"Exited {proc.returncode} — see output.")
 
 
+# ------------------------------------------------------------------- diligence
+
+
+def _analyze_gate(handle: str, key_suffix: str, refresh: bool = False) -> None:
+    """Cost-confirm gate for a deep analysis (xapi-gate pattern): estimate
+    line + explicit checkbox before anything spends. Streams `scout analyze`
+    inline; the authoritative concurrent-scan guard lives in _stream_command
+    (click time) — `scan_running_at_load` only disables the widgets."""
+    st.markdown(
+        f'<div class="subtle">Deep analysis ≈ <b>$4–8</b> (hard cap '
+        f'${settings.diligence_cost_cap_usd:.0f}) — {AGENT_COUNT} research '
+        'agents, ~4 min.</div>',
+        unsafe_allow_html=True,
+    )
+    if not settings.anthropic_api_key:
+        st.markdown('<div class="subtle">Add ANTHROPIC_API_KEY in Settings to enable.</div>',
+                    unsafe_allow_html=True)
+        return
+    ready = st.checkbox(
+        f"Spend up to ${settings.diligence_cost_cap_usd:.0f} on this analysis",
+        key=f"dg_ok_{key_suffix}", disabled=scan_running_at_load,
+    )
+    label = "Re-analyze" if refresh else "Run deep analysis"
+    if st.button(label, key=f"dg_run_{key_suffix}", type="primary",
+                 disabled=not ready or scan_running_at_load):
+        _stream_command(["analyze", handle, "--yes"] + (["--refresh"] if refresh else []))
+
+
+def _diligence_scorecard(memo: Memo, stale: bool) -> None:
+    """Composite + per-dimension bars (single hue; confidence as opacity),
+    flags, unknowns, expandable memo."""
+    composite = f"{memo.composite:.0f}" if memo.composite is not None else "—"
+    scored = sum(1 for f in memo.findings if f.score is not None)
+    stale_note = " · <b>inputs changed since analysis — re-analyze to refresh</b>" if stale else ""
+    st.markdown(
+        f'<div class="lead-name">Diligence Score {composite}'
+        f'<span class="lead-handle"> / 100 · deep analysis, not the screening score</span></div>'
+        f'<div class="subtle">Generated {_ago(memo.created_at)} · est. ${memo.cost_usd:.2f} · '
+        f'{scored}/{len(memo.findings)} dimensions scored{stale_note}</div>',
+        unsafe_allow_html=True,
+    )
+    rows = ""
+    for f in memo.findings:
+        width = 0.0 if f.score is None else f.score * 10
+        value = "—" if f.score is None else f"{f.score:.1f}"
+        opacity = 0.35 + 0.65 * f.confidence  # confidence shown as opacity
+        detail = f"conf {f.confidence:.0%}" + (f" · {f.summary}" if f.summary else "")
+        rows += (
+            f'<div class="sigrow"><div class="signame">{_e(DIMENSION_LABELS.get(f.key, f.key))}</div>'
+            f'<div class="sigtrack"><div class="sigfill" style="width:{width:.0f}%;opacity:{opacity:.2f}"></div></div>'
+            f'<div class="sigpts">{value}</div>'
+            f'<div class="sigdetail" title="{_e(detail)}">{_e(detail)}</div></div>'
+        )
+    st.markdown(rows, unsafe_allow_html=True)
+    if memo.flags:
+        st.markdown(_chips([(flag, "status") for flag in memo.flags]), unsafe_allow_html=True)
+    unknowns = [u for f in memo.findings for u in f.unknowns]
+    if unknowns:
+        shown = " · ".join(_e(u) for u in unknowns[:5])
+        more = f" (+{len(unknowns) - 5} more in the memo)" if len(unknowns) > 5 else ""
+        st.markdown(f'<div class="subtle" style="margin-top:6px">Open questions: {shown}{more}</div>',
+                    unsafe_allow_html=True)
+    with st.expander("Full memo"):
+        st.markdown(memo.memo_md)
+
+
+def _landscape_section(memo: Memo, handle_key: str) -> None:
+    """Competitor chips from the knowledge graph + manual "X competes with Y"
+    linking. Keyed by memo.company_key — the key the analysis wrote the KG
+    nodes under. User-made links carry provenance=user and survive
+    re-analysis. Only http(s) URLs become links (KG meta holds agent-
+    researched web content — never render other schemes as hrefs)."""
+    st.markdown('<div class="subtle" style="margin-top:10px">Landscape</div>',
+                unsafe_allow_html=True)
+    neighbors = [
+        n for n in store.kg_neighbors(memo.company_key) if n["rel"] == "competes_with"
+    ]
+    if neighbors:
+        spans = ""
+        for n in neighbors:
+            url = (n.get("meta") or {}).get("url") or ""
+            if not url.startswith(("http://", "https://")):
+                url = ""
+            name = _e(n["name"]) + (" ·&#8202;linked by you" if n["provenance"] == "user" else "")
+            spans += (f'<span class="chip"><a href="{_e(url)}" target="_blank">{name}</a></span>'
+                      if url else f'<span class="chip">{name}</span>')
+        st.markdown(f'<div class="chiprow">{spans}</div>', unsafe_allow_html=True)
+    else:
+        st.markdown('<div class="subtle">No competitors mapped yet — they land here '
+                    'after an analysis, or link one below.</div>', unsafe_allow_html=True)
+    company_name = memo.company_name or memo.company_key
+    known = [n for n in known_company_names if n != company_name]
+    c1, c2, c3 = st.columns([2, 2, 1])
+    pick = c1.selectbox("Known company", ["—"] + known, key=f"kg_pick_{handle_key}",
+                        label_visibility="collapsed")
+    typed = c2.text_input("New name", key=f"kg_new_{handle_key}",
+                          placeholder="…or type a competitor", label_visibility="collapsed")
+    if c3.button("Link", key=f"kg_link_{handle_key}"):
+        target = typed.strip() or (pick if pick and pick != "—" else "")
+        # Anchor on the memo's key so the edge lands on the same node the
+        # analysis wrote (display name may normalize differently).
+        if target and store.kg_link_competitors(memo.company_key, target, provenance="user"):
+            st.session_state["open_card"] = handle_key
+            st.session_state["toast"] = f"Linked {target} as a competitor"
+            st.rerun()
+        elif target:
+            st.warning("Couldn't normalize that name — try a longer one.")
+
+
 # ----------------------------------------------------------------------- page
 
 
@@ -359,6 +471,9 @@ store = Store(Path(settings.db_path))
 leads = store.load_latest_leads()
 pipeline = store.all_pipeline()
 counts = store.pipeline_counts()
+# Deep-analysis memos by company key (Diligence Score — distinct from the
+# screening score that ranks the feed).
+memos: dict[str, Memo] = {m.company_key: m for m in store.list_memos()}
 # The ledger is the person-centric view: best-known state per handle across
 # ALL runs. It backs the "All leads" scope and — always — the Pipeline tab,
 # so a shortlisted lead never degrades just because it missed the latest run.
@@ -367,6 +482,37 @@ ledger = store.load_lead_ledger(include_demo=latest_is_demo)
 entry_by_handle = {e.lead.account.handle.lower(): e for e in ledger}
 lead_by_handle = {h: e.lead for h, e in entry_by_handle.items()}
 latest_handles = {x.account.handle.lower() for x in leads}
+
+# Diligence derivations, computed ONCE per rerun over the FULL ledger
+# grouping. Cards render a filtered view — deriving memo identity or memo
+# staleness from that view gives wrong answers (a hidden secondary account
+# would fake an "inputs changed" fingerprint mismatch).
+memo_by_handle: dict[str, Memo] = {}  # every member handle -> the group's memo
+fresh_memo_company_keys: set[str] = set()  # memo.company_key, fingerprint fresh
+_fresh_group_keys: set[str] = set()  # startup_key(primary), for shelf exclusion
+for _primary, _entry, _secondaries in group_by_company([(e.lead, e) for e in ledger]):
+    _members = [_primary, *_secondaries]
+    # A memo may be stored under any member's key (the analysis-time primary
+    # can differ from today's after a re-score) — try them all.
+    _memo = next(
+        (m for m in (memos.get(startup_key(x)) for x in _members) if m is not None),
+        None,
+    )
+    if _memo is None:
+        continue
+    for _m in _members:
+        memo_by_handle[_m.account.handle.lower()] = _memo
+    if members_fingerprint(_members, thesis, settings) == _memo.fingerprint:
+        fresh_memo_company_keys.add(_memo.company_key)
+        _fresh_group_keys.add(startup_key(_primary))
+suggestions = analysis_priority(ledger, memoed=_fresh_group_keys, pipeline=pipeline)[:3]
+suggested_keys = {s.company_key for s in suggestions}
+scan_running_at_load = (store.current_scan() or {}).get("status") == "running"
+known_company_names = sorted(
+    {(e.lead.llm.company_name or "").strip() for e in ledger
+     if e.lead.llm and e.lead.llm.company_name}
+    | {m.company_name for m in memos.values() if m.company_name}
+)
 
 
 def _status_of(lead: Lead) -> str:
@@ -434,19 +580,27 @@ def _lead_card(
     view_max: float = 100.0,
     pct_label: str = "",
     secondary: list[Lead] | None = None,
+    diligence: bool = False,
 ) -> None:
     """One lead card. `entry` carries cross-run movement (delta / new); `fresh`
     means the lead is from the latest run — run-scoped signals like new
     watchlist follows are suppressed on stale entries. `view_max` normalizes
     the score bar to the strongest lead in view; `pct_label` is an optional
     percentile caption ("top 12%"). `secondary` holds other X accounts folded
-    into this startup (Startups track) — the card is titled by the company."""
+    into this startup (Startups track) — the card is titled by the company.
+    `diligence` (Startups track) adds the deep-analysis surfaces: Analyze
+    gate, Diligence scorecard + memo, and the Landscape block."""
     account, verdict = lead.account, lead.llm
     handle_key = account.handle.lower()
     status = _status_of(lead)
     secondary = secondary or []
+    memo = memo_by_handle.get(handle_key) if diligence else None
 
     chips: list[tuple[str, str]] = []
+    if memo is not None and memo.composite is not None:
+        chips.append((f"Diligence {memo.composite:.0f}", "accent"))
+    if diligence and memo is None and startup_key(lead) in suggested_keys:
+        chips.append(("Suggested", ""))
     if verdict and verdict.thesis_fit is not None:
         chips.append((f"Fit {verdict.thesis_fit:.0%}", "accent"))
     if status != "new":
@@ -630,6 +784,25 @@ def _lead_card(
                                 unsafe_allow_html=True)
                 st.markdown(row["brief"])
 
+            # Deep analysis (Startups track): memo scorecard + landscape when
+            # analyzed; the cost-gated Analyze action when not.
+            if diligence:
+                st.markdown("---")
+                if memo is not None:
+                    # Staleness comes from the page-top FULL-ledger grouping —
+                    # never from this card's (possibly filtered) member view.
+                    _diligence_scorecard(
+                        memo, stale=memo.company_key not in fresh_memo_company_keys
+                    )
+                    _landscape_section(memo, handle_key)
+                    with st.expander("Re-analyze (new research run)"):
+                        _analyze_gate(account.handle, f"re_{handle_key}", refresh=True)
+                else:
+                    st.markdown('<div class="subtle">Deep analysis — Diligence Score, '
+                                'investment memo, competitive landscape.</div>',
+                                unsafe_allow_html=True)
+                    _analyze_gate(account.handle, handle_key)
+
 
 with tab_leads:
     if not leads and not ledger:
@@ -722,6 +895,27 @@ with tab_leads:
 
         pairs = [(x, e) for x, e in pairs if _in_track(x)]
         base_leads = [x for x, _ in pairs]
+
+        # "Worth a deep look" — smart surfacing for the Startups track: a $0
+        # ranking from data scout already has (computed once at page top).
+        # Analysis never auto-runs; the shelf only queues the trigger.
+        if track == "Startups" and suggestions:
+            st.markdown(
+                '<div class="section-title">Worth a deep look</div>'
+                '<div class="section-sub">Ranked from data scout already has — '
+                'a deep analysis runs only when you pull the trigger.</div>',
+                unsafe_allow_html=True,
+            )
+            for col, s in zip(st.columns(3), suggestions):
+                with col, st.container(border=True):
+                    st.markdown(
+                        f'<div class="lead-name">{_e(s.company_name)}</div>'
+                        f'<div class="subtle">{_e(s.reason)}</div>',
+                        unsafe_allow_html=True,
+                    )
+                    with st.popover("Analyze"):
+                        _analyze_gate(s.handle, f"shelf_{s.company_key}")
+            st.write("")
 
         n_new = sum(1 for _, e in pairs if e and e.is_new)
         n_convergence = sum(1 for x in leads if x.account.recent_followed_by)
@@ -880,7 +1074,7 @@ with tab_leads:
             _lead_card(lead, entry,
                        fresh=lead.account.handle.lower() in latest_handles,
                        view_max=view_max, pct_label=_pct_label(lead.score),
-                       secondary=secondary)
+                       secondary=secondary, diligence=(track == "Startups"))
         if len(display) > limit:
             if st.button(f"Show more ({len(display) - limit} remaining)"):
                 st.session_state["leads_limit"] = limit + page_size
@@ -1010,6 +1204,22 @@ with tab_pipeline:
                 st.markdown('<div class="subtle">No brief yet — generate one for a pre-call memo: '
                             'evidence, thesis fit, risks, and questions to ask.</div>',
                             unsafe_allow_html=True)
+            # The deep-analysis memo sits beside the brief when one exists —
+            # resolved through the page-top handle map (memo keys are company
+            # keys, not handles).
+            picked_memo = memo_by_handle.get(pick)
+            if picked_memo is not None:
+                st.write("")
+                st.markdown("**Investment memo**")
+                comp = (f"{picked_memo.composite:.0f}/100"
+                        if picked_memo.composite is not None else "n/a")
+                st.markdown(
+                    f'<div class="subtle">Diligence Score {comp} · generated '
+                    f'{_ago(picked_memo.created_at)} · est. ${picked_memo.cost_usd:.2f}</div>',
+                    unsafe_allow_html=True,
+                )
+                with st.expander("Read memo"):
+                    st.markdown(picked_memo.memo_md)
 
         st.write("")
         export_rows = pipeline_rows(store)
@@ -1358,10 +1568,13 @@ with tab_sourcing:
 with tab_settings:
     spent = store.xapi_spend_usd()
     cap = settings.xapi_spend_cap_usd
-    s1, s2, s3 = st.columns(3)
+    s1, s2, s3, s4 = st.columns(4)
     s1.markdown(_tile("X API spend", f"${spent:.2f}", f"of ${cap:.0f} cap"), unsafe_allow_html=True)
-    s2.markdown(_tile("Latest leads", str(len(leads)), "most recent run"), unsafe_allow_html=True)
-    s3.markdown(_tile("Verdict cache TTL", f"{settings.verdict_ttl_days}d",
+    s2.markdown(_tile("Diligence spend", f"${store.diligence_spend_usd():.2f}",
+                      f"{len(memos)} memos · cap ${settings.diligence_cost_cap_usd:.0f}/memo"),
+                unsafe_allow_html=True)
+    s3.markdown(_tile("Latest leads", str(len(leads)), "most recent run"), unsafe_allow_html=True)
+    s4.markdown(_tile("Verdict cache TTL", f"{settings.verdict_ttl_days}d",
                       "re-runs reuse Claude verdicts"), unsafe_allow_html=True)
     st.write("")
 
@@ -1381,11 +1594,18 @@ with tab_settings:
             model_in = st.text_input("Claude model", settings.claude_model)
             llm_cap_in = st.number_input("Max accounts sent to Claude per run", 10, 2000,
                                          settings.llm_max_candidates)
+            dg_cap_in = st.number_input("Diligence cost cap per memo (USD)", 1.0, 50.0,
+                                        float(settings.diligence_cost_cap_usd), 1.0,
+                                        help="Hard stop for one deep analysis: past this, "
+                                        "remaining agents are skipped and the gap is flagged.")
         with c2:
             max_in = st.number_input("Default max accounts / run", 10, 5000, settings.max_accounts)
             ttl_in = st.number_input("Default TTL days", 0, 90, settings.ttl_days)
             verdict_ttl_in = st.number_input("Verdict cache TTL (days)", 0, 90,
                                              settings.verdict_ttl_days)
+            synth_in = st.text_input("Diligence synthesis model", settings.diligence_synth_model,
+                                     help="Cross-examination + memo writing (premium). "
+                                     "Research dimensions run on the Claude model at left.")
         if st.form_submit_button("Save settings", type="primary"):
             _set_env_var("XAPI_SPEND_CAP_USD", f"{cap_in:.2f}")
             _set_env_var("CLAUDE_MODEL", model_in.strip())
@@ -1393,4 +1613,6 @@ with tab_settings:
             _set_env_var("TTL_DAYS", str(int(ttl_in)))
             _set_env_var("LLM_MAX_CANDIDATES", str(int(llm_cap_in)))
             _set_env_var("VERDICT_TTL_DAYS", str(int(verdict_ttl_in)))
+            _set_env_var("DILIGENCE_COST_CAP_USD", f"{dg_cap_in:.2f}")
+            _set_env_var("DILIGENCE_SYNTH_MODEL", synth_in.strip())
             st.success(".env updated."); st.rerun()
