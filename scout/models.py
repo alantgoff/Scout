@@ -38,6 +38,24 @@ class Account(BaseModel):
         return f"https://x.com/{self.handle}"
 
 
+class SitePage(BaseModel):
+    """One fetched company website — the classifier's ground truth for what
+    a startup actually does. Cached in the store's `websites` table
+    (failures too: negative caching keeps dead domains from being re-tried
+    every run)."""
+
+    url: str  # normalized root URL — the cache key ("https://raindrop.ai/")
+    final_url: str = ""  # after redirects
+    status: str = ""  # "ok" | "thin" | "non-html" | "too-large" | "error:*"
+    text: str = ""  # extracted text ("" on failure)
+    fetched_at: datetime | None = None
+
+    @property
+    def usable(self) -> bool:
+        """Text worth showing to the classifier."""
+        return self.status in ("ok", "thin") and bool(self.text)
+
+
 class UnlinkedLead(BaseModel):
     """A founder signal from a non-X source with no X handle to bridge to.
 
@@ -118,6 +136,16 @@ class LLMVerdict(BaseModel):
     value_add_reason: str = ""  # one line naming the lever(s) that apply
     tags: list[str] = Field(default_factory=list)  # fine-grained descriptors
     confidence: float = 0.0
+    # v6 — grounded classification: the product claim must trace to evidence.
+    # All optional so cached v5 verdicts still validate.
+    product_summary: str | None = None  # what the company ACTUALLY does, evidence-cited
+    # Strongest evidence that established the product:
+    # "website" | "pinned_tweet" | "tweets" | "github" | "bio" | "none"
+    grounding: str | None = None
+    # Adversarial audit outcome (top-N leads): "confirmed" | "corrected" |
+    # "unverifiable"; None = not audited.
+    verification: str | None = None
+    verification_note: str = ""
 
 
 class Lead(BaseModel):

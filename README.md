@@ -212,7 +212,25 @@ All targeting lives here — the code never hardcodes keywords.
 scaled down but never zeroed on fit alone. The same shape applies to
 `value_add_fit` via `signal_params.value_add_weight`, but that weight defaults
 to **0** — the value-add dimension is informational unless you opt it into the
-ranking.
+ranking. Finally `× signal_params.ungrounded_multiplier` (default 0.6) when
+the product claim never traced to real evidence (audit "unverifiable", or
+unaudited with grounding none/bio) — speculation sinks, verified leads don't.
+
+**Grounded classification.** The classifier doesn't take the bio's word for
+anything: each candidate's **company website is fetched** (cached in the
+store, TTL 7 days) and the extracted product copy leads the evidence dossier
+(website > pinned tweet > tweets > GitHub > bio). Hard prompt rules forbid
+inferring the product from the founder's past employers, and when the
+evidence doesn't establish the product the verdict says so honestly (null
+sector, low confidence) instead of guessing. After scoring, the top
+`VERIFY_TOP_N` (25) verdicts get an **adversarial audit** — a second Claude
+pass that re-reads the dossier and corrects anything the evidence
+contradicts; cards show the outcome (`✓ verified · raindrop.ai`,
+`✓ corrected`, `⚠ unverifiable`). After editing the thesis, prompt, or
+weights, **`./scout-cli reclassify`** (or the Thesis-page button) re-runs
+classification + audit + scoring on the latest run's leads in minutes — no
+discovery, cache-first, so unchanged verdicts and already-fetched sites are
+free.
 
 ### Headline value-add fit — which startups benefit from what Headline offers
 

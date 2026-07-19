@@ -64,6 +64,10 @@ def _parse_cookies(raw: str) -> str:
 
 
 def _to_account(user: TwUser, *, source: str) -> Account:
+    # twscrape's descriptionLinks = bio links FIRST, then the profile's
+    # dedicated website entity LAST — so [-1] is the actual website whenever
+    # one is set; [0] would grab a random bio link (and misground the
+    # classifier's website fetch).
     links = getattr(user, "descriptionLinks", None) or []
     pinned = getattr(user, "pinnedIds", None) or []
     return Account(
@@ -71,7 +75,7 @@ def _to_account(user: TwUser, *, source: str) -> Account:
         handle=user.username,
         name=user.displayname,
         bio=user.rawDescription,
-        website=links[0].url if links else None,
+        website=links[-1].url if links else None,
         followers=user.followersCount,
         following=user.friendsCount,
         pinned_tweet_id=str(pinned[0]) if pinned else None,

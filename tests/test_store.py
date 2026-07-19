@@ -5,7 +5,7 @@ from __future__ import annotations
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-from scout.models import Account, Lead, LLMVerdict, Signal
+from scout.models import Account, Lead, LLMVerdict, Signal, SitePage
 from scout.store import Store
 
 
@@ -285,3 +285,44 @@ def test_current_scan_flips_dead_process_to_failed(tmp_path: Path) -> None:
     scan = store.current_scan()
     assert scan["status"] == "failed"
     assert "exited" in scan["detail"]
+
+
+# --- site cache -----------------------------------------------------------
+
+
+def test_site_cache_roundtrip(tmp_path: Path) -> None:
+    store = make_store(tmp_path)
+    page = SitePage(url="https://raindrop.ai/", final_url="https://www.raindrop.ai/",
+                    status="ok", text="AI agent monitoring and observability.",
+                    fetched_at=datetime.now(timezone.utc))
+    store.record_site(page)
+    cached = store.cached_site("https://raindrop.ai/", ttl_days=7)
+    assert cached is not None
+    assert cached.status == "ok"
+    assert "observability" in cached.text
+    assert cached.usable
+    assert store.cached_site("https://other.ai/", ttl_days=7) is None
+
+
+def test_site_cache_expires_after_ttl(tmp_path: Path) -> None:
+    store = make_store(tmp_path)
+    old = datetime.now(timezone.utc) - timedelta(days=8)
+    store.record_site(SitePage(url="https://a.io/", status="ok",
+                               text="x" * 300, fetched_at=old))
+    assert store.cached_site("https://a.io/", ttl_days=7) is None
+    assert store.cached_site("https://a.io/", ttl_days=30) is not None
+
+
+def test_site_cache_failures_expire_after_one_day(tmp_path: Path) -> None:
+    store = make_store(tmp_path)
+    stale = datetime.now(timezone.utc) - timedelta(days=2)
+    store.record_site(SitePage(url="https://down.io/", status="error:timeout",
+                               fetched_at=stale))
+    # A 2-day-old failure is expired even under a 7-day TTL...
+    assert store.cached_site("https://down.io/", ttl_days=7) is None
+    # ...but a fresh failure IS served (negative caching within the day).
+    store.record_site(SitePage(url="https://down.io/", status="error:timeout",
+                               fetched_at=datetime.now(timezone.utc)))
+    cached = store.cached_site("https://down.io/", ttl_days=7)
+    assert cached is not None
+    assert not cached.usable

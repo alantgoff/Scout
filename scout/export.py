@@ -22,6 +22,9 @@ CSV_COLUMNS = [
     "company_url",
     "url",
     "score",
+    "product_summary",
+    "grounding",
+    "verification",
     "thesis_fit",
     "fit_reason",
     "value_add_fit",
@@ -72,6 +75,9 @@ def write_csv(leads: list[Lead], out_dir: Path) -> Path:
                     "company_url": (llm.company_url or "") if llm else "",
                     "url": lead.account.url,
                     "score": lead.score,
+                    "product_summary": (llm.product_summary or "") if llm else "",
+                    "grounding": (llm.grounding or "") if llm else "",
+                    "verification": (llm.verification or "") if llm else "",
                     "thesis_fit": (
                         f"{llm.thesis_fit:.2f}"
                         if llm and llm.thesis_fit is not None

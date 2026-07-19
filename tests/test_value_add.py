@@ -40,7 +40,12 @@ def test_custom_levers_replace_defaults_in_prompt() -> None:
 def test_custom_prompt_without_new_placeholders_still_renders() -> None:
     thesis = Thesis(llm_prompt="Screen for: {thesis} in {sectors} at {stages}.",
                     thesis="agents", sectors=["ai"], target_stages=["launched"])
-    assert _system_prompt(thesis) == "Screen for: agents in ai at launched."
+    prompt = _system_prompt(thesis)
+    assert prompt.startswith("Screen for: agents in ai at launched.")
+    # The grounding rules are appended to EVERY prompt — even fully custom
+    # ones. They are the anti-speculation contract and not editable away.
+    assert "EVIDENCE RULES" in prompt
+    assert "past employers" in prompt
 
 
 def test_parse_verdict_with_value_add_fields() -> None:

@@ -92,4 +92,25 @@ def score_breakdown(lead: Lead, thesis: Thesis) -> list[tuple[str, float]]:
             steps.append(
                 (f"× {multiplier:.2f} (value-add fit {fit:.2f}, weight {w:g})", score)
             )
+        # Grounding penalty: a product claim that never traced to evidence
+        # must not float on confidence alone (the Raindrop failure mode).
+        # Audited leads answer for themselves ("unverifiable" is penalized,
+        # confirmed/corrected are exempt); unaudited leads are penalized only
+        # when their own grounding is none/bio.
+        ungrounded = (
+            lead.llm.verification == "unverifiable"
+            if lead.llm.verification is not None
+            else lead.llm.grounding in (None, "none", "bio")
+        )
+        if ungrounded:
+            multiplier = thesis.signal_params.ungrounded_multiplier
+            score *= multiplier
+            basis = (
+                "audit: unverifiable"
+                if lead.llm.verification == "unverifiable"
+                else f"grounding: {lead.llm.grounding or 'none'}"
+            )
+            steps.append(
+                (f"× {multiplier:g} (product unverified — {basis})", score)
+            )
     return steps

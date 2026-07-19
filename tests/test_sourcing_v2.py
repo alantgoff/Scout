@@ -243,3 +243,34 @@ def test_outreach_template_without_key() -> None:
     msg, is_ai = draft_outreach(lead, Thesis(thesis="AI infra"), settings, "X DM")
     assert is_ai is False
     assert "eval platform" in msg.lower()
+
+
+# --- twscrape website extraction -------------------------------------------
+
+
+def test_to_account_prefers_profile_website_over_bio_links() -> None:
+    """descriptionLinks = bio links first, the profile's dedicated website
+    entity LAST (twscrape merges entities.description.urls + entities.url.urls
+    in that order) — the account's website must be the dedicated one."""
+    from types import SimpleNamespace
+
+    from scout.ingest.twscrape_src import _to_account
+
+    user = SimpleNamespace(
+        id=1, username="founder", displayname="Founder",
+        rawDescription="building — read https://blog.example.com",
+        descriptionLinks=[
+            SimpleNamespace(url="https://blog.example.com/post"),  # bio link
+            SimpleNamespace(url="https://startup.ai"),  # profile website
+        ],
+        pinnedIds=[], followersCount=10, friendsCount=5,
+    )
+    account = _to_account(user, source="search")
+    assert account.website == "https://startup.ai"
+
+    no_links = SimpleNamespace(
+        id=2, username="quiet", displayname="Quiet",
+        rawDescription="", descriptionLinks=[], pinnedIds=[],
+        followersCount=0, friendsCount=0,
+    )
+    assert _to_account(no_links, source="search").website is None

@@ -15,7 +15,7 @@ from pathlib import Path
 import sqlite_utils
 
 from scout.config import DEFAULT_DB_PATH
-from scout.models import Account, Lead, LedgerEntry, LLMVerdict, Tweet, UnlinkedLead
+from scout.models import Account, Lead, LedgerEntry, LLMVerdict, SitePage, Tweet, UnlinkedLead
 
 # Pre-~/.scout location: a scout.db relative to wherever scout was run from.
 _LEGACY_DB_PATH = Path("scout.db")
@@ -340,6 +340,47 @@ class Store:
         if datetime.now(timezone.utc) - fetched >= timedelta(days=ttl_days):
             return None
         return json.loads(rows[0]["handles"])
+
+    # ------------------------------------------------------------- site cache
+
+    def record_site(self, page: SitePage) -> None:
+        """Cache one fetched company site — failures too (negative caching)."""
+        self.db["websites"].upsert(
+            {
+                "url": page.url,
+                "final_url": page.final_url,
+                "status": page.status,
+                "text": page.text,
+                "fetched_at": (page.fetched_at or datetime.now(timezone.utc)).isoformat(),
+            },
+            pk="url",
+            alter=True,
+        )
+
+    def cached_site(self, url: str, ttl_days: int) -> SitePage | None:
+        """Previously fetched site, or None when absent/expired. Failure rows
+        expire after 1 day regardless of ttl_days, so a transient outage
+        doesn't blind the classifier to a site for a whole TTL window."""
+        if not self.db["websites"].exists():
+            return None
+        rows = list(self.db["websites"].rows_where("url = ?", [url], limit=1))
+        if not rows:
+            return None
+        row = rows[0]
+        fetched = datetime.fromisoformat(row["fetched_at"])
+        if fetched.tzinfo is None:
+            fetched = fetched.replace(tzinfo=timezone.utc)
+        # ok/thin/non-html/too-large describe the site itself → full TTL;
+        # error:* is likely transient → 1 day.
+        settled = not (row.get("status") or "").startswith("error")
+        effective_ttl = ttl_days if settled else min(1, ttl_days)
+        if datetime.now(timezone.utc) - fetched >= timedelta(days=effective_ttl):
+            return None
+        return SitePage(
+            url=row["url"], final_url=row.get("final_url") or "",
+            status=row.get("status") or "", text=row.get("text") or "",
+            fetched_at=fetched,
+        )
 
     # ---------------------------------------------------- follow-graph edges
 

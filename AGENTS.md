@@ -22,12 +22,18 @@ Shortlist · Memo · Settings), managed by **uv**. A thesis
 (`thesis.yaml`) drives all targeting; nothing is hardcoded.
 
 The pipeline: **discover** candidate accounts (free) → run cheap deterministic
-**heuristics** → gate + rank to **Claude** classification (fine-grained:
-stage/sector/subsector/business model/tags + a 0–1 **thesis_fit** + a 0–1
-**value_add_fit** with per-lever breakdown — would the firm's strategic
-value-add, `thesis.firm_value_add`, accelerate this startup?; verdicts
-cached in the store) → **score** 0–100 → **export** CSV/Markdown → **triage &
-pursue** in the UI. Two agents (`scout/agents.py`): the **strategy agent**
+**heuristics** → gate + rank → **read each candidate's company website**
+(scout/web.py: normalized root URL, cached in the `websites` table with TTL,
+failures negative-cached) → **Claude** classification GROUNDED in the site
+text (fine-grained: stage/sector/subsector/business model/tags + a 0–1
+**thesis_fit** + a 0–1 **value_add_fit** with per-lever breakdown, plus
+**product_summary** and a **grounding** claim; EVIDENCE_RULES forbid inferring
+the product from founder pedigree, with an unknown-escape; verdicts cached in
+the store) → **adversarial verification** of the top `VERIFY_TOP_N` verdicts
+against their dossiers (corrections re-cached) → **score** 0–100 → **export**
+CSV/Markdown → **triage & pursue** in the UI. `scout reclassify` re-runs
+everything from classification down on the latest run's leads — cache-first,
+no discovery — the fast loop for thesis/prompt iteration. Two agents (`scout/agents.py`): the **strategy agent**
 (plain-language thesis → full thesis.yaml + seeds.yaml proposal) and the
 **research-brief agent** (per-lead pre-call memo, cached in the pipeline table).
 
@@ -113,8 +119,19 @@ scout/
     linkedin_src.py Stub (NotImplementedError) — LinkedIn automation is a dead end.
   signals/
     heuristics.py   8 deterministic signals + run_heuristics + intent_appeared.
-    llm.py          Claude classification. DEFAULT_PROMPT_TEMPLATE. Batches of 10.
-tests/              pytest — test_heuristics, test_score, test_store, test_sourcing_v2.
+    llm.py          Claude classification, GROUNDED: site text in the dossier,
+                    EVIDENCE_RULES appended to every prompt (even custom ones),
+                    unknown-escape, batches of CLASSIFY_BATCH_SIZE (5). Plus the
+                    adversarial audit (verify_leads/apply_verification) — top-N
+                    verdicts re-checked against evidence, corrections re-cached.
+                    EVERY parsed verdict attaches (no MIN_CONFIDENCE drop) —
+                    score ×= confidence does the sinking.
+  web.py            Company-website evidence: normalize_site_url (root URL,
+                    skip link farms/socials/IPs), extract_site_text (bs4,
+                    title+meta first for SPAs), async fetch_sites (semaphore
+                    fan-out, cache-first, negative caching).
+tests/              pytest — test_heuristics, test_score, test_store,
+                    test_sourcing_v2, test_web, test_grounding.
 thesis.yaml         Targeting + weights + signal_params + firm value-add levers
                     + llm_prompt. User-owned.
 seeds.yaml          Query bank, bio_searches, watchlist, github_topics. User-owned.
@@ -176,6 +193,13 @@ shortlist / pass, persisted in the `pipeline` table as statuses `longlisted` /
    The value-add dimension (firm levers in `thesis.firm_value_add`, per-lever
    scores in `llm.value_add_levers`) is otherwise informational: card chip +
    lever bars, sort option, CSV/report columns, brief context, digest chip.
+7. `× signal_params.ungrounded_multiplier` (0.6) when the product claim never
+   traced to evidence: audit says "unverifiable", or the lead was never
+   audited AND `llm.grounding` ∈ {None, "none", "bio"}. Audit-confirmed/
+   corrected leads and evidence-grounded leads are exempt. NOTE: verdicts
+   below MIN_CONFIDENCE are no longer dropped — they attach and sink via the
+   confidence multiplier (dropping them used to RESTORE the full heuristic
+   score, rewarding speculation over honest unknowns).
 
 The 9 signals (heuristics.py). Three read enrichment fields set by the pipeline
 from store history, not by adapters — `recent_followed_by`, `bio_changed`,
@@ -211,8 +235,10 @@ multiplier) are UI-editable, read by the heuristics — do not re-hardcode them.
 | bio_snapshots | bio history for bio_change detection |
 | unlinked_leads | github/hn founders with no X handle (manual lookup) |
 | pipeline | deal-flow state: status, notes, outreach, channel, brief |
-| llm_verdicts | **verdict cache** — Claude verdict per handle, keyed by an input fingerprint (bio + tweets + thesis + model); TTL `VERDICT_TTL_DAYS` |
+| llm_verdicts | **verdict cache** — Claude verdict per handle, keyed by an input fingerprint (bio + tweets + rendered prompt + model + website URL + site-text hash + github + pinned); TTL `VERDICT_TTL_DAYS`. The audit pass re-records corrected verdicts under the same fingerprint |
+| websites | **site cache** — extracted company-site text per normalized root URL; TTL `WEBSITE_TTL_DAYS` (7d), failures expire after 1 day |
 | xapi_usage | **budget ledger** — every paid call, cumulative spend |
+| scan, scan_history | live run status (drives the UI cockpit) + completed-scan phase timings (drives time estimates) |
 
 DB path defaults to `~/.scout/scout.db` (not cwd) so the budget guard can't be
 defeated by running from another directory; `DB_PATH` overrides. Handle lookups

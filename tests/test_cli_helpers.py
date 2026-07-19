@@ -136,3 +136,17 @@ def test_paid_adapter_stays_sequential_and_stops_on_budget() -> None:
     assert adapter.calls == ["a", "b"]  # stopped at the budget error —
     assert "c" not in result  # remaining fetches skipped, run continues
     assert len(result["a"]) == 1
+
+
+# --- reclassify (empty-store guard; no network) ---------------------------------
+
+
+def test_reclassify_exits_cleanly_on_empty_store(tmp_path, monkeypatch) -> None:
+    from typer.testing import CliRunner
+
+    from scout.cli import app
+
+    monkeypatch.setenv("DB_PATH", str(tmp_path / "empty.db"))
+    result = CliRunner().invoke(app, ["reclassify"])
+    assert result.exit_code == 1
+    assert "No leads yet" in result.output

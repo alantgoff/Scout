@@ -136,6 +136,11 @@ class SignalParams(BaseModel):
     # startup?). Defaults to 0 — an informational dimension that never moves
     # the score unless you opt in.
     value_add_weight: float = 0.0
+    # Score × this when the verdict's product claim never traced to real
+    # evidence: the audit said "unverifiable", or the lead was never audited
+    # AND its grounding is none/bio. Grounded-in-evidence or audit-confirmed
+    # leads are exempt.
+    ungrounded_multiplier: float = 0.6
 
 
 class Thesis(BaseModel):
@@ -259,6 +264,14 @@ class Settings(BaseSettings):
     llm_max_candidates: int = 150  # top-N by heuristic pre-score sent to Claude
     llm_concurrency: int = 4  # Claude classification batches in flight
     verdict_ttl_days: int = 14  # reuse a cached verdict if inputs unchanged
+    classify_batch_size: int = 5  # accounts per Claude classification call
+
+    # Grounded classification — the classifier reads each candidate's website
+    website_ttl_days: int = 7  # company-site text cache TTL (failures: 1 day)
+    web_fetch_concurrency: int = 12  # parallel company-site fetches
+    web_fetch_timeout_s: float = 8.0  # per-site fetch cap
+    web_text_max_chars: int = 6000  # site text sent to Claude (~1.5k tokens)
+    verify_top_n: int = 25  # adversarial verdict audit on the top N leads (0 = off)
     # Hard wall-clock cap on the twscrape sourcing phase. X rate limits (the
     # follow-graph endpoint especially) make twscrape sleep through 15-minute
     # windows; when the budget expires the run continues with what it has.

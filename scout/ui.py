@@ -38,6 +38,8 @@ _ROOT = Path(__file__).resolve().parent.parent
 if str(_ROOT) not in sys.path:
     sys.path.insert(0, str(_ROOT))
 
+from urllib.parse import urlparse
+
 import pandas as pd
 import streamlit as st
 
@@ -62,10 +64,10 @@ from scout.config import (
 from scout.companies import group_by_company, startup_identity
 from scout.export import pipeline_rows, write_pipeline_csv
 from scout.insights import stats_prompt, triage_stats
-from scout.models import Lead, LedgerEntry
+from scout.models import Lead, LedgerEntry, LLMVerdict
 from scout.outreach import CHANNELS, draft_outreach
 from scout.score import score_breakdown
-from scout.signals.llm import BATCH_SIZE, DEFAULT_PROMPT_TEMPLATE
+from scout.signals.llm import DEFAULT_PROMPT_TEMPLATE
 from scout.store import Store
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
@@ -102,6 +104,26 @@ FUNNEL_STAGES = ["longlisted", *WIN_STAGES]
 
 STAGE_LABEL = {"idea": "Idea", "stealth": "Stealth", "launched": "Launched", "scaling": "Scaling"}
 TYPE_LABEL = {"founder": "Founder", "startup": "Startup", "other": "Other"}
+
+GROUNDED_SOURCES = {"website", "pinned_tweet", "tweets", "github"}
+
+
+def _grounding_chip(verdict: LLMVerdict) -> tuple[str, str] | None:
+    """The evidence-trust chip: audit outcome first, else the classifier's
+    own grounding claim. None for legacy verdicts (no claim either way)."""
+    domain = urlparse(verdict.company_url or "").netloc.removeprefix("www.")
+    suffix = f" · {domain}" if domain else ""
+    if verdict.verification == "confirmed":
+        return (f"✓ verified{suffix}", "accent")
+    if verdict.verification == "corrected":
+        return (f"✓ corrected{suffix}", "accent")
+    if verdict.verification == "unverifiable":
+        return ("⚠ unverifiable", "")
+    if verdict.grounding in GROUNDED_SOURCES:
+        return (f"grounded: {verdict.grounding.replace('_', ' ')}", "")
+    if verdict.grounding is not None:
+        return ("⚠ ungrounded", "")
+    return None
 
 
 # --------------------------------------------------------------------- styling
@@ -454,16 +476,24 @@ PHASE_LABELS = {
     "starting": "Starting",
     "discovering": "Discover accounts",
     "fetching timelines": "Fetch timelines",
+    "reading websites": "Read company websites",
     "classifying": "Claude classification",
+    "verifying": "Adversarial verification",
     "scoring & saving": "Score & save",
     "hydrating": "Hydrate via X API",
+    "preparing": "Load cached leads",
 }
 PHASE_BLURB = {
     "discovering": "X searches, watchlist follow-diff, GitHub & Hacker News legs",
     "fetching timelines": "recent tweets per candidate (wall-clock budgeted)",
-    "classifying": "Claude reads each candidate: stage, sector, thesis fit",
+    "reading websites": "fetch each candidate's site so Claude classifies from "
+                        "real product copy, not bio pedigree",
+    "classifying": "Claude reads each dossier: product, stage, sector, thesis fit",
+    "verifying": "Claude re-reads each top lead's evidence and corrects "
+                 "speculative verdicts",
     "scoring & saving": "weighted signals × fit multipliers → ranked leads",
     "hydrating": "fresh official X API reads for the shortlist",
+    "preparing": "reload the latest run's leads and cached evidence",
 }
 
 
@@ -566,24 +596,42 @@ def _estimate_scan(kind: str, max_accounts: int | None = None,
         budget = float(settings.sourcing_time_budget_s)
         n = float(max_accounts or settings.max_accounts)
         n_class = min(max(n * 0.5, 10.0), float(settings.llm_max_candidates))
-        batch_waves = math.ceil(n_class / BATCH_SIZE) / max(settings.llm_concurrency, 1)
+        batch_waves = (math.ceil(n_class / max(settings.classify_batch_size, 1))
+                       / max(settings.llm_concurrency, 1))
         per = {
             # discovery + timelines share one wall-clock budget — the pair
             # can't exceed it, which caps the whole network phase.
             "discovering": (min(60.0, budget * 0.15), budget * 0.45),
             "fetching timelines": (budget * 0.10, budget * 0.55),
-            "classifying": (batch_waves * 8.0, batch_waves * 18.0),
+            "reading websites": (10.0, min(100.0, n_class * 0.7)),
+            "classifying": (batch_waves * 10.0, batch_waves * 25.0),
+            "verifying": (settings.verify_top_n * 1.5, settings.verify_top_n * 4.0)
+            if settings.verify_top_n else (0.0, 0.0),
             "scoring & saving": (5.0, 20.0),
         }
         label = ("first-run estimate — the network phase is hard-capped at "
                  f"{_fmt_dur(budget)}; real timings are learned after one run")
     elif kind == "verify":
         n = float(n_verify or 20)
-        waves = math.ceil(min(n, settings.llm_max_candidates) / BATCH_SIZE) / max(settings.llm_concurrency, 1)
+        waves = (math.ceil(min(n, settings.llm_max_candidates)
+                           / max(settings.classify_batch_size, 1))
+                 / max(settings.llm_concurrency, 1))
         per = {"hydrating": (n * 0.6, n * 1.5),
-               "classifying": (waves * 8.0, waves * 18.0),
+               "reading websites": (5.0, min(60.0, n * 0.7)),
+               "classifying": (waves * 10.0, waves * 25.0),
                "scoring & saving": (5.0, 15.0)}
         label = "first-run estimate"
+    elif kind == "reclassify":
+        n_class = float(settings.llm_max_candidates)
+        waves = (math.ceil(n_class / max(settings.classify_batch_size, 1))
+                 / max(settings.llm_concurrency, 1))
+        per = {"preparing": (2.0, 10.0),
+               "reading websites": (5.0, 60.0),
+               "classifying": (waves * 10.0, waves * 25.0),
+               "verifying": (settings.verify_top_n * 1.5, settings.verify_top_n * 4.0)
+               if settings.verify_top_n else (0.0, 0.0),
+               "scoring & saving": (5.0, 15.0)}
+        label = "cache-first — unchanged verdicts and cached websites are free"
     else:  # source preview
         budget = float(settings.sourcing_time_budget_s)
         per = {"discovering": (min(60.0, budget * 0.2), budget)}
@@ -875,6 +923,8 @@ def _lead_card(
     chips: list[tuple[str, str]] = []
     if verdict and verdict.thesis_fit is not None:
         chips.append((f"Fit {verdict.thesis_fit:.0%}", "accent"))
+    if verdict is not None and (g_chip := _grounding_chip(verdict)) is not None:
+        chips.append(g_chip)
     if verdict and verdict.value_add_fit is not None:
         chips.append((f"{thesis.firm_name or 'Firm'} lift {verdict.value_add_fit:.0%}", "accent"))
     if status != "new":
@@ -905,7 +955,11 @@ def _lead_card(
         detail_chips.append((f"sources: {', '.join(sorted({s for s in account.sources if s}))}", ""))
     detail_chips += chips[7:]
 
-    summary = (verdict.one_line_summary if verdict else "") or account.bio or "—"
+    # Product truth first: the grounded product_summary beats the one-liner,
+    # which beats the bio.
+    summary = ((verdict.product_summary if verdict else "")
+               or (verdict.one_line_summary if verdict else "")
+               or account.bio or "—")
 
     # STARTUP-FIRST identity: every founder-like lead is titled by its startup
     # — the classifier's company when named, otherwise a synthesized stealth
@@ -1026,6 +1080,9 @@ def _lead_card(
                             unsafe_allow_html=True)
             if verdict and verdict.fit_reason:
                 st.markdown(f'<div class="subtle" style="margin-top:6px">Fit — {_e(verdict.fit_reason)}</div>',
+                            unsafe_allow_html=True)
+            if verdict and verdict.verification_note:
+                st.markdown(f'<div class="subtle" style="margin-top:6px">Audit — {_e(verdict.verification_note)}</div>',
                             unsafe_allow_html=True)
             # The value-add dimension: which of the firm's specific levers
             # would accelerate this startup, per the classifier.
@@ -1755,7 +1812,7 @@ with tab_thesis:
             f"Spend up to ${est_total:.2f} of the X API budget",
             key="confirm_run_spend",
         )
-    run_col, preview_col, _sp = st.columns([1, 1.6, 3])
+    run_col, preview_col, reclass_col, _sp = st.columns([1, 1.75, 1.75, 1.5])
     if run_col.button("Run scout", type="primary", disabled=not run_ready):
         _launch_scan(["run", "--source", "xapi" if paid_run else "twscrape",
                       "--max-accounts", str(int(max_accounts)),
@@ -1763,6 +1820,13 @@ with tab_thesis:
                      "run")
     if preview_col.button("Preview discovery (free, no scoring)", disabled=scan_active):
         _launch_scan(["source", "--max-accounts", str(int(max_accounts))], "source")
+    if reclass_col.button(
+        "Reclassify latest run", disabled=scan_active or not (leads or ledger),
+        help="Re-run Claude classification + the adversarial audit on the latest "
+             "run's leads — no discovery, cache-first, minutes not an hour. Use "
+             "after editing the thesis, prompt, or weights.",
+    ):
+        _launch_scan(["reclassify"], "reclassify")
 
     # The run cockpit — phase stepper, progress bars, ETA, log tail. Renders
     # only while a scan runs (or just finished) and polls on its own.

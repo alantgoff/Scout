@@ -27,13 +27,14 @@ from scout.config import (
     load_thesis,
     strategy_fingerprint,
 )
+from scout import web
 from scout.export import print_top_table, write_csv, write_markdown
 from scout.ingest.base import DiscoverySource, SourceAdapter
 from scout.ingest.xapi_src import BudgetExceededError
-from scout.models import Account, Lead, Signal, Tweet, UnlinkedLead
+from scout.models import Account, Lead, Signal, SitePage, Tweet, UnlinkedLead
 from scout.score import score_breakdown, score_leads
 from scout.signals.heuristics import intent_appeared, run_heuristics
-from scout.signals.llm import classify
+from scout.signals.llm import classify, verify_leads
 from scout.store import Store
 
 app = typer.Typer(
@@ -302,6 +303,94 @@ def _rank_candidates(
     return with_signals[:cap], max(len(with_signals) - cap, 0)
 
 
+def _fetch_candidate_sites(
+    candidates: list[tuple[Account, list[Tweet]]],
+    settings: Settings,
+    store: Store,
+) -> dict[str, SitePage]:
+    """Lowercased handle → the candidate's company website, fetched — so the
+    classifier grounds "what do they build" in real product copy instead of
+    the founder's bio. Cache-first (websites table, TTL); failures are
+    negative-cached AND returned so the prompt can say 'unreachable'."""
+    targets: dict[str, str] = {}  # normalized root URL -> original URL
+    by_handle: dict[str, str] = {}
+    for account, _tweets in candidates:
+        normalized = web.normalize_site_url(account.website)
+        if normalized is None:
+            continue
+        targets.setdefault(normalized, account.website or "")
+        by_handle[account.handle.lower()] = normalized
+    if not targets:
+        return {}
+    urls = list(targets)
+    console.print(f"Reading [bold]{len(urls)}[/bold] company websites...")
+    store.scan_update("reading websites", f"0/{len(urls)} sites",
+                      done=0, total=len(urls), unit="items")
+    last_tick = 0.0
+
+    def progress(done: int, total: int) -> None:
+        # Throttled store heartbeat for the UI progress bar (~1 write/s).
+        nonlocal last_tick
+        now = time.monotonic()
+        if done == total or now - last_tick >= 1.0:
+            last_tick = now
+            store.scan_update("reading websites", f"{done}/{total} sites read",
+                              done=done, total=total, unit="items")
+
+    pages = asyncio.run(web.fetch_sites(
+        urls, settings, store=store, progress=progress,
+        fallbacks={norm: orig for norm, orig in targets.items() if orig},
+    ))
+    return {handle: pages[url] for handle, url in by_handle.items() if url in pages}
+
+
+def _verification_pass(
+    leads: list[Lead],
+    tweets_by_handle: dict[str, list[Tweet]],
+    sites: dict[str, SitePage],
+    thesis: Thesis,
+    settings: Settings,
+    store: Store,
+) -> None:
+    """Adversarial audit of the TOP leads' verdicts before final scoring —
+    a second Claude pass that catches product claims sourced from founder
+    pedigree instead of evidence. Mutates lead.llm in place; corrected
+    verdicts are re-cached under the same fingerprint (llm.verify_leads)."""
+    if settings.verify_top_n <= 0:
+        return
+    ranked = [x for x in score_leads(list(leads), thesis) if x.llm is not None]
+    top = ranked[: settings.verify_top_n]
+    if not top:
+        return
+    tweets_lower = {h.lower(): t for h, t in tweets_by_handle.items()}
+    # The classifier may have surfaced a company_url the account row lacked —
+    # fetch those sites (cache-first) so the audit sees the best evidence.
+    extra: dict[str, str] = {}
+    for lead in top:
+        key = lead.account.handle.lower()
+        if key in sites or lead.llm is None:
+            continue
+        url = web.normalize_site_url(lead.llm.company_url or lead.account.website)
+        if url is not None:
+            extra[key] = url
+    if extra:
+        pages = asyncio.run(web.fetch_sites(
+            list(dict.fromkeys(extra.values())), settings, store=store))
+        for key, url in extra.items():
+            page = pages.get(url)
+            if page is not None and page.usable:
+                sites[key] = page
+    console.print(f"Auditing [bold]{len(top)}[/bold] top verdicts against their evidence...")
+    store.scan_update("verifying", f"0/{len(top)} verdicts audited",
+                      done=0, total=len(top), unit="items")
+    verify_leads(
+        top, tweets_lower, sites, thesis, settings, store=store,
+        progress=lambda done, total: store.scan_update(
+            "verifying", f"{done}/{total} verdicts audited",
+            done=done, total=total, unit="items"),
+    )
+
+
 def _merge_accounts(*groups: list[Account]) -> list[Account]:
     """Dedupe by handle; earlier groups win, followed_by / sources merge.
 
@@ -496,7 +585,9 @@ def _run_pipeline(
         (lead.account, tweets_by_handle.get(lead.account.handle, []))
         for lead in ranked
     ]
+    sites: dict[str, SitePage] = {}
     if candidates:
+        sites = _fetch_candidate_sites(candidates, settings, store)
         console.print(f"Classifying [bold]{len(candidates)}[/bold] candidates with Claude...")
         store.scan_update("classifying", f"{len(candidates)} candidates",
                           done=0, total=len(candidates), unit="items")
@@ -505,9 +596,12 @@ def _run_pipeline(
             progress=lambda done, total: store.scan_update(
                 "classifying", f"{done}/{total} classified by Claude",
                 done=done, total=total, unit="items"),
+            sites=sites,
         )
         for lead in leads:
             lead.llm = verdicts.get(lead.account.handle.lower())
+
+    _verification_pass(leads, tweets_by_handle, sites, thesis, settings, store)
 
     store.scan_update("scoring & saving")
     leads = score_leads(leads, thesis)
@@ -578,9 +672,12 @@ def run(
     effective_max = max_accounts if max_accounts is not None else settings.max_accounts
     effective_ttl = ttl_days if ttl_days is not None else settings.ttl_days
 
-    store.scan_start("run", os.getpid(),
-                     phases=["discovering", "fetching timelines",
-                             "classifying", "scoring & saving"])
+    run_phases = ["discovering", "fetching timelines", "reading websites",
+                  "classifying"]
+    if settings.verify_top_n > 0:
+        run_phases.append("verifying")
+    run_phases.append("scoring & saving")
+    store.scan_start("run", os.getpid(), phases=run_phases)
     ok = False
     try:
         adapter = _build_adapter(source, settings, store)
@@ -606,6 +703,119 @@ def run(
     except RuntimeError as exc:
         console.print(f"[red]Cannot run:[/red] {exc}")
         raise typer.Exit(1) from None
+    except Exception as exc:
+        console.print(f"[red]{type(exc).__name__}:[/red] {exc}")
+        raise typer.Exit(1) from None
+    finally:
+        store.scan_finish("done" if ok else "failed")
+
+
+# ------------------------------------------------------------------ reclassify
+
+
+@app.command()
+def reclassify(
+    top: Annotated[
+        int | None,
+        typer.Option(help="Only reclassify the top N leads of the latest run."),
+    ] = None,
+    skip_verify: Annotated[
+        bool, typer.Option("--skip-verify", help="Skip the adversarial audit pass.")
+    ] = False,
+    thesis_path: Annotated[
+        Path, typer.Option("--thesis", help="Path to thesis.yaml.")
+    ] = Path("thesis.yaml"),
+) -> None:
+    """Re-run classification + audit + scoring on the LATEST run's leads —
+    no discovery, no timeline fetching. Cache-first everywhere (tweets,
+    websites, unchanged verdicts), so this is the fast loop for iterating
+    on the thesis or prompt: minutes and cents, not an hour."""
+    settings = Settings()
+    thesis = _load_thesis_or_exit(thesis_path)
+    store = Store(settings.db_path)
+    prior = store.load_latest_leads()
+    if not prior:
+        console.print("[red]No leads yet[/red] — run `scout run` first.")
+        raise typer.Exit(1)
+    if all(x.account.source == "demo" for x in prior):
+        console.print(
+            "[yellow]Latest run is the offline demo — reclassify works on real runs.[/yellow]"
+        )
+        raise typer.Exit(1)
+
+    phases = ["preparing", "reading websites", "classifying"]
+    if settings.verify_top_n > 0 and not skip_verify:
+        phases.append("verifying")
+    phases.append("scoring & saving")
+    store.scan_start("reclassify", os.getpid(), phases=phases)
+    ok = False
+    try:
+        store.scan_update("preparing", f"{len(prior)} leads from the latest run")
+        console.print(
+            f"Reclassifying [bold]{len(prior)}[/bold] leads from the latest run "
+            "(no discovery — cached tweets and sites)."
+        )
+        # The store row may be fresher than the lead snapshot (a later run
+        # can refresh bio/website) — prefer it.
+        accounts = [store.get_account(x.account.handle) or x.account for x in prior]
+        _enrich_accounts(accounts, store, thesis, settings)
+        tweets_by_handle = {
+            account.handle: store.get_tweets(account.id, settings.tweets_per_account)
+            for account in accounts
+        }
+        leads: list[Lead] = []
+        for account in accounts:
+            signals, disqualified = run_heuristics(
+                account, tweets_by_handle.get(account.handle, []), thesis
+            )
+            if not disqualified:
+                leads.append(Lead(account=account, signals=signals))
+
+        cap = top if top is not None else settings.llm_max_candidates
+        ranked, _skipped = _rank_candidates(leads, thesis, cap)
+        candidates = [
+            (lead.account, tweets_by_handle.get(lead.account.handle, []))
+            for lead in ranked
+        ]
+        sites: dict[str, SitePage] = {}
+        if candidates:
+            sites = _fetch_candidate_sites(candidates, settings, store)
+            console.print(
+                f"Classifying [bold]{len(candidates)}[/bold] candidates with Claude..."
+            )
+            store.scan_update("classifying", f"{len(candidates)} candidates",
+                              done=0, total=len(candidates), unit="items")
+            verdicts = classify(
+                candidates, thesis, settings, store=store,
+                progress=lambda done, total: store.scan_update(
+                    "classifying", f"{done}/{total} classified by Claude",
+                    done=done, total=total, unit="items"),
+                sites=sites,
+            )
+            for lead in leads:
+                lead.llm = verdicts.get(lead.account.handle.lower())
+
+        if not skip_verify:
+            _verification_pass(leads, tweets_by_handle, sites, thesis, settings, store)
+
+        store.scan_update("scoring & saving")
+        leads = score_leads(leads, thesis)
+        if not leads:
+            console.print("[yellow]No leads survived — check disqualifiers.[/yellow]")
+            ok = True
+            return
+        run_id = datetime.now(timezone.utc).strftime("reclass-%Y%m%d-%H%M%S-%f")
+        store.save_leads(run_id, leads)
+        _record_run(store, run_id, "reclassify", thesis, _load_seeds_or_default())
+        csv_path = write_csv(leads, settings.out_dir)
+        md_path = write_markdown(leads, thesis, settings.out_dir)
+        print_top_table(leads)
+        console.print(f"Saved [bold]{len(leads)}[/bold] reclassified leads (run {run_id}).")
+        console.print(f"CSV:    [bold]{csv_path}[/bold]")
+        console.print(f"Report: [bold]{md_path}[/bold]")
+        ok = True
+    except typer.Exit:
+        raise
     except Exception as exc:
         console.print(f"[red]{type(exc).__name__}:[/red] {exc}")
         raise typer.Exit(1) from None
@@ -652,7 +862,13 @@ def inspect(
         signals, disqualified = run_heuristics(account, tweets, thesis)
         lead = Lead(account=account, signals=signals, disqualified=disqualified)
         if not disqualified:
-            verdicts = classify([(account, tweets)], thesis, settings, store=store)
+            sites = _fetch_candidate_sites([(account, tweets)], settings, store)
+            if sites:
+                site = sites[account.handle.lower()]
+                console.print(f"[dim]website: {site.url} → {site.status} "
+                              f"({len(site.text)} chars extracted)[/dim]")
+            verdicts = classify([(account, tweets)], thesis, settings,
+                                store=store, sites=sites)
             lead.llm = verdicts.get(account.handle.lower())
         lead = score_leads([lead], thesis)[0]
 
@@ -688,14 +904,19 @@ def inspect(
             verdict_table.add_row("is_founder", str(v.is_founder))
             verdict_table.add_row("stage", v.stage or "-")
             verdict_table.add_row("sector", v.sector or "-")
+            verdict_table.add_row("subsector", v.subsector or "-")
+            verdict_table.add_row("business_model", v.business_model or "-")
+            verdict_table.add_row("product_summary", v.product_summary or "-")
+            verdict_table.add_row("grounding", v.grounding or "-")
+            verdict_table.add_row("thesis_fit",
+                                  f"{v.thesis_fit:.2f}" if v.thesis_fit is not None else "-")
+            verdict_table.add_row("fit_reason", v.fit_reason or "-")
             verdict_table.add_row("one_line_summary", v.one_line_summary)
             verdict_table.add_row("why_interesting", v.why_interesting)
             verdict_table.add_row("confidence", f"{v.confidence:.2f}")
             console.print(verdict_table)
         elif not disqualified:
-            console.print(
-                "[dim]No LLM verdict (missing API key or confidence < 0.4).[/dim]"
-            )
+            console.print("[dim]No LLM verdict (missing API key).[/dim]")
 
         console.print(f"Final score: [bold]{lead.score:.1f}[/bold] / 100")
     except typer.Exit:
@@ -981,8 +1202,11 @@ def verify(
         f"(worst case ≈ [bold]${est:.2f}[/bold], cap ${settings.xapi_spend_cap_usd:.2f})."
     )
 
-    store.scan_start("verify", os.getpid(),
-                     phases=["hydrating", "classifying", "scoring & saving"])
+    verify_phases = ["hydrating", "reading websites", "classifying"]
+    if settings.verify_top_n > 0:
+        verify_phases.append("verifying")
+    verify_phases.append("scoring & saving")
+    store.scan_start("verify", os.getpid(), phases=verify_phases)
     ok = False
     try:
         from scout.ingest.xapi_src import XApiSource
@@ -1045,7 +1269,9 @@ def verify(
             for lead in fresh_leads
             if lead.signals_hit
         ]
+        v_sites: dict[str, SitePage] = {}
         if candidates:
+            v_sites = _fetch_candidate_sites(candidates, settings, store)
             console.print(
                 f"Classifying [bold]{len(candidates)}[/bold] candidates with Claude..."
             )
@@ -1056,9 +1282,13 @@ def verify(
                 progress=lambda done, total: store.scan_update(
                     "classifying", f"{done}/{total} classified by Claude",
                     done=done, total=total, unit="items"),
+                sites=v_sites,
             )
             for lead in fresh_leads:
                 lead.llm = verdicts.get(lead.account.handle.lower())
+
+        _verification_pass(fresh_leads, tweets_by_handle, v_sites,
+                           thesis, settings, store)
 
         store.scan_update("scoring & saving")
         fresh_leads = score_leads(fresh_leads, thesis)

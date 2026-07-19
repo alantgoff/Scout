@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import pytest
+
 from scout.config import Thesis
 from scout.models import Account, Lead, LLMVerdict, Signal
-from scout.score import score_leads
+from scout.score import score_breakdown, score_leads
 
 # Spec §3 defaults: total weight 100, so contributions read as points.
 DEFAULT_WEIGHTS: dict[str, float] = {
@@ -56,7 +58,8 @@ def test_llm_confidence_multiplies_score() -> None:
     with_llm = make_lead(
         "vetted",
         signals=[s.model_copy() for s in signals],
-        llm=LLMVerdict(handle="vetted", is_founder=True, confidence=0.5),
+        llm=LLMVerdict(handle="vetted", is_founder=True, confidence=0.5,
+                       grounding="website"),
     )
     score_leads([without, with_llm], make_thesis())
     assert without.score == 45.0
@@ -106,12 +109,14 @@ def test_not_founder_verdict_slashes_score() -> None:
     founder = make_lead(
         "founder",
         signals=[Signal(name="bio_intent", value=1.0)],
-        llm=LLMVerdict(handle="founder", is_founder=True, confidence=0.8),
+        llm=LLMVerdict(handle="founder", is_founder=True, confidence=0.8,
+                       grounding="website"),
     )
     corp = make_lead(
         "corp",
         signals=[Signal(name="bio_intent", value=1.0)],
-        llm=LLMVerdict(handle="corp", is_founder=False, confidence=0.8),
+        llm=LLMVerdict(handle="corp", is_founder=False, confidence=0.8,
+                       grounding="website"),
     )
     ranked = score_leads([corp, founder], thesis)
     assert ranked[0].account.handle == "founder"
@@ -124,9 +129,11 @@ def test_stage_mismatch_halves_score() -> None:
 
     thesis = Thesis(weights={"bio_intent": 100.0}, target_stages=["launched"])
     on = Lead(account=Account(id="a", handle="a"), signals=[Signal(name="bio_intent", value=1.0)],
-              llm=LLMVerdict(handle="a", is_founder=True, stage="launched", confidence=1.0))
+              llm=LLMVerdict(handle="a", is_founder=True, stage="launched", confidence=1.0,
+                             grounding="website"))
     off = Lead(account=Account(id="b", handle="b"), signals=[Signal(name="bio_intent", value=1.0)],
-               llm=LLMVerdict(handle="b", is_founder=True, stage="idea", confidence=1.0))
+               llm=LLMVerdict(handle="b", is_founder=True, stage="idea", confidence=1.0,
+                              grounding="website"))
     ranked = score_leads([off, on], thesis)
     by = {x.account.handle: x for x in ranked}
     assert by["a"].score == 100.0
@@ -143,7 +150,7 @@ def test_thesis_fit_scales_score() -> None:
         return Lead(
             account=Account(id=handle, handle=handle),
             signals=[Signal(name="bio_intent", value=1.0)],
-            llm=LLMVerdict(handle=handle, is_founder=True, stage="launched",
+            llm=LLMVerdict(handle=handle, is_founder=True, stage="launched", grounding="website",
                            confidence=1.0, thesis_fit=fit),
         )
 
@@ -167,7 +174,8 @@ def test_thesis_fit_weight_zero_disables_fit() -> None:
     lead = Lead(
         account=Account(id="a", handle="a"),
         signals=[Signal(name="bio_intent", value=1.0)],
-        llm=LLMVerdict(handle="a", is_founder=True, confidence=1.0, thesis_fit=0.0),
+        llm=LLMVerdict(handle="a", is_founder=True, confidence=1.0, thesis_fit=0.0,
+                       grounding="website"),
     )
     assert score_leads([lead], thesis)[0].score == 100.0
 
@@ -180,7 +188,8 @@ def test_value_add_fit_informational_at_default_weight() -> None:
     lead = make_lead(
         "a",
         signals=[Signal(name="bio_intent", value=1.0)],
-        llm=LLMVerdict(handle="a", is_founder=True, confidence=1.0, value_add_fit=0.0),
+        llm=LLMVerdict(handle="a", is_founder=True, confidence=1.0, value_add_fit=0.0,
+                       grounding="website"),
     )
     assert score_leads([lead], thesis)[0].score == 100.0
     assert not any("value-add" in desc for desc, _ in score_breakdown(lead, thesis))
@@ -198,7 +207,7 @@ def test_value_add_weight_scales_score() -> None:
         return make_lead(
             handle,
             signals=[Signal(name="bio_intent", value=1.0)],
-            llm=LLMVerdict(handle=handle, is_founder=True, confidence=1.0,
+            llm=LLMVerdict(handle=handle, is_founder=True, confidence=1.0, grounding="website",
                            value_add_fit=fit),
         )
 
@@ -226,3 +235,53 @@ def test_signal_params_drive_traction() -> None:
     loose_sig = next(s for s in run_heuristics(account, [tweet], loose)[0] if s.name == "launch_traction")
     assert strict_sig.value == 0.0  # 0.04 below the 0.05 floor
     assert loose_sig.value > 0.0    # above the lowered floor
+
+
+# --- grounding penalty ---------------------------------------------------------
+
+
+def _grounding_lead(**verdict_overrides) -> Lead:
+    verdict = LLMVerdict(
+        handle="x", account_type="founder", is_founder=True, stage="launched",
+        thesis_fit=None, confidence=1.0, **verdict_overrides,
+    )
+    return Lead(
+        account=Account(id="1", handle="x"),
+        signals=[Signal(name="bio_intent", value=1.0)],
+        llm=verdict,
+    )
+
+
+def _has_penalty_step(lead: Lead, thesis: Thesis) -> bool:
+    return any("product unverified" in desc
+               for desc, _ in score_breakdown(lead, thesis))
+
+
+def test_ungrounded_penalty_fires_for_none_and_bio() -> None:
+    thesis = Thesis(weights={"bio_intent": 20.0})
+    assert _has_penalty_step(_grounding_lead(grounding="none"), thesis)
+    assert _has_penalty_step(_grounding_lead(grounding="bio"), thesis)
+
+
+def test_grounded_and_audited_leads_exempt() -> None:
+    thesis = Thesis(weights={"bio_intent": 20.0})
+    assert not _has_penalty_step(_grounding_lead(grounding="website"), thesis)
+    assert not _has_penalty_step(_grounding_lead(grounding="tweets"), thesis)
+    # Audit outcome outranks grounding in both directions:
+    assert not _has_penalty_step(
+        _grounding_lead(grounding="bio", verification="confirmed"), thesis)
+    assert not _has_penalty_step(
+        _grounding_lead(grounding="none", verification="corrected"), thesis)
+    assert _has_penalty_step(
+        _grounding_lead(grounding="website", verification="unverifiable"), thesis)
+
+
+def test_ungrounded_multiplier_math_and_knob() -> None:
+    thesis = Thesis(weights={"bio_intent": 20.0})
+    grounded = _grounding_lead(grounding="website")
+    ungrounded = _grounding_lead(grounding="none")
+    base = score_breakdown(grounded, thesis)[-1][1]
+    penalized = score_breakdown(ungrounded, thesis)[-1][1]
+    assert penalized == pytest.approx(base * 0.6)
+    thesis.signal_params.ungrounded_multiplier = 1.0  # knob off
+    assert score_breakdown(ungrounded, thesis)[-1][1] == pytest.approx(base)
