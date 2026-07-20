@@ -142,12 +142,20 @@ PIPELINE_COLUMNS = [
 ]
 
 
-def pipeline_rows(store) -> list[dict]:
+def pipeline_rows(store, thesis: Thesis | None = None) -> list[dict]:
     """Deal-flow rows (any status beyond 'new') joined with each lead's
     best-known ledger state. `store` is a scout.store.Store (duck-typed to
-    avoid an import cycle in type-checking-averse callers)."""
+    avoid an import cycle in type-checking-averse callers). With a thesis,
+    the investor's manual score overrides are applied so the export matches
+    what the UI shows."""
+    from scout.score import apply_override  # local import — avoids a cycle
+
     ledger = {e.lead.account.handle.lower(): e.lead for e in
               store.load_lead_ledger(include_demo=True)}
+    if thesis is not None:
+        overrides = store.all_overrides()
+        for handle, lead in ledger.items():
+            apply_override(lead, overrides.get(handle), thesis)
     rows: list[dict] = []
     for handle, entry in sorted(store.all_pipeline().items()):
         status = entry.get("status") or "new"
@@ -189,6 +197,57 @@ def write_pipeline_csv(rows: list[dict], out_dir: Path) -> Path:
         writer.writeheader()
         writer.writerows(rows)
     return path
+
+
+# Print-friendly take on the app's editorial language: serif display headings,
+# hairline section rules, warm-black ink on paper white.
+_MEMO_PDF_CSS = """
+body { font-family: "Helvetica", sans-serif; font-size: 10pt; color: #20180f;
+       line-height: 1.55; }
+h1 { font-family: "Georgia", serif; font-size: 21pt; font-weight: 600;
+     margin: 0 0 2pt; line-height: 1.15; }
+h2 { font-family: "Georgia", serif; font-size: 13.5pt; font-weight: 600;
+     margin: 16pt 0 4pt; padding-bottom: 3pt;
+     border-bottom: 0.6pt solid #c9beac; }
+h3 { font-family: "Georgia", serif; font-size: 11.5pt; font-weight: 600;
+     margin: 10pt 0 2pt; }
+p { margin: 5pt 0; }
+li { margin: 2pt 0; }
+strong { color: #20180f; }
+em { color: #4a4034; }
+code { font-size: 9pt; }
+blockquote { color: #4a4034; margin: 6pt 0 6pt 10pt; }
+"""
+
+
+def memo_pdf_bytes(memo_md: str, title: str, subtitle: str = "") -> bytes:
+    """Render an investment memo's markdown to a styled PDF.
+
+    Prepends a title block (startup name + a context line) to the memo body.
+    Raises RuntimeError with an actionable message when the optional
+    markdown-pdf dependency is missing."""
+    try:
+        from markdown_pdf import MarkdownPdf, Section
+    except ImportError as exc:  # pragma: no cover — dep is in pyproject
+        raise RuntimeError(
+            "PDF export needs the markdown-pdf package — run `uv sync`."
+        ) from exc
+    import tempfile
+
+    header = f"# {title}\n"
+    if subtitle:
+        header += f"*{subtitle}*\n\n"
+    pdf = MarkdownPdf(toc_level=0, optimize=True)
+    pdf.add_section(Section(header + memo_md.strip() + "\n"), user_css=_MEMO_PDF_CSS)
+    pdf.meta["title"] = title
+    pdf.meta["creationDate"] = ""  # fitz rejects Python datetimes here
+    with tempfile.NamedTemporaryFile(suffix=".pdf", delete=False) as tmp:
+        path = Path(tmp.name)
+    try:
+        pdf.save(str(path))
+        return path.read_bytes()
+    finally:
+        path.unlink(missing_ok=True)
 
 
 def _lead_card_lines(lead: Lead, index: int, firm: str = "") -> list[str]:

@@ -377,3 +377,81 @@ def test_stealth_pedigree_founder_sinks_despite_team_score() -> None:
     # ungrounded ≈ 12.2 — an order of magnitude below a verified fit lead.
     assert final(lead, thesis) == pytest.approx(67.5 * 0.3 * 0.6)
     assert final(lead, thesis) < 15
+
+
+# --- manual overrides -----------------------------------------------------------
+
+
+def _override_lead() -> Lead:
+    return make_lead(
+        "ada", signals=[Signal(name="bio_intent", value=1.0)],
+        llm=LLMVerdict(
+            handle="ada", account_type="founder", is_founder=True,
+            stage="launched", grounding="website", thesis_fit=0.4,
+            confidence=1.0, quality={"traction": 0.2},
+            quality_reasons={"traction": "few users"},
+        ),
+    )
+
+
+def test_apply_override_none_is_noop() -> None:
+    from scout.score import apply_override
+
+    thesis = make_thesis(weights={"bio_intent": 100.0})
+    lead = _override_lead()
+    base = score_breakdown(lead, thesis)[-1][1]
+    lead.score = round(base, 1)
+    assert apply_override(lead, None, thesis) is False
+    assert lead.score == round(base, 1)
+
+
+def test_apply_override_dims_and_fit_recompute_through_the_math() -> None:
+    from scout.score import apply_override
+
+    thesis = make_thesis(weights={"bio_intent": 100.0})
+    lead = _override_lead()
+    base = score_breakdown(lead, thesis)[-1][1]
+    assert apply_override(
+        lead,
+        {"quality": {"traction": 1.0, "team": 0.8}, "fit": 0.9,
+         "note": "insider info"},
+        thesis,
+    ) is True
+    # Overridden values live IN the verdict, with a manual citation…
+    assert lead.llm.quality["team"] == 0.8
+    assert lead.llm.thesis_fit == 0.9
+    assert lead.llm.quality_reasons["traction"] == "manual — insider info"
+    assert lead.llm.fit_reason == "manual — insider info"
+    # …and the score was recomputed through the normal breakdown.
+    assert lead.score == pytest.approx(score_breakdown(lead, thesis)[-1][1], abs=0.06)
+    assert lead.score > base
+
+
+def test_apply_override_pinned_score_wins_and_is_clamped() -> None:
+    from scout.score import apply_override
+
+    thesis = make_thesis(weights={"bio_intent": 100.0})
+    lead = _override_lead()
+    assert apply_override(lead, {"quality": {}, "score": 150.0}, thesis) is True
+    assert lead.score == 100.0
+
+
+def test_apply_override_without_verdict_only_pins() -> None:
+    from scout.score import apply_override
+
+    thesis = make_thesis(weights={"bio_intent": 100.0})
+    lead = make_lead("bare", signals=[Signal(name="bio_intent", value=1.0)])
+    # dim/fit overrides have no verdict to live on -> nothing applies…
+    assert apply_override(lead, {"quality": {"team": 0.9}, "fit": 0.8}, thesis) is False
+    # …but a pinned score still does.
+    assert apply_override(lead, {"quality": {"team": 0.9}, "score": 55.0}, thesis) is True
+    assert lead.score == 55.0
+
+
+def test_score_breakdown_manual_step_is_final() -> None:
+    thesis = make_thesis(weights={"bio_intent": 100.0})
+    lead = _override_lead()
+    steps = score_breakdown(lead, thesis, manual_score=42.0)
+    assert steps[-1] == ("manual score override (set by you)", 42.0)
+    # Without the argument the step is absent.
+    assert "manual" not in score_breakdown(lead, thesis)[-1][0]

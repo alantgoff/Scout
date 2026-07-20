@@ -114,3 +114,51 @@ def test_brief_template_fallback_needs_no_key() -> None:
     brief, is_ai = research_brief(lead, Thesis(), settings)
     assert is_ai is False
     assert "What they're building" in brief
+
+
+# --- the investment-memo agent (offline paths) ----------------------------------
+
+
+def _memo_lead():
+    from scout.models import Account, Lead, Signal
+
+    return Lead(
+        account=Account(id="1", handle="ada", name="Ada Lin",
+                        bio="ex-OpenAI, building evals", followers=2100,
+                        website="https://evalhq.ai"),
+        signals=[Signal(name="bio_intent", value=1.0, weight=20.0)],
+        llm=None,
+        score=61.0,
+    )
+
+
+def test_investment_memo_template_has_every_section_without_key() -> None:
+    from scout.agents import MEMO_SECTIONS, investment_memo
+    from scout.config import Settings
+
+    memo, is_ai = investment_memo(
+        _memo_lead(), Thesis(), Settings(anthropic_api_key=None, _env_file=None)
+    )
+    assert is_ai is False
+    for section in MEMO_SECTIONS:
+        assert f"## {section}" in memo, section
+
+
+def test_memo_context_carries_site_text_tweets_and_notes() -> None:
+    from datetime import datetime, timezone
+
+    from scout.agents import _memo_context
+    from scout.models import LLMVerdict, Tweet
+
+    lead = _memo_lead()
+    lead.llm = LLMVerdict(handle="ada", company_name="EvalHQ",
+                          product_summary="Evals for agent teams",
+                          grounding="website", thesis_fit=0.8, confidence=0.9)
+    tweets = [Tweet(id="1", account_id="1", text="We just launched EvalHQ!",
+                    created_at=datetime.now(timezone.utc), likes=120)]
+    ctx = _memo_context(lead, Thesis(), site_text="EvalHQ scores agent runs.",
+                        tweets=tweets, notes="met at the eval summit")
+    assert "EvalHQ scores agent runs." in ctx      # website capture
+    assert "We just launched EvalHQ!" in ctx       # tweets
+    assert "met at the eval summit" in ctx         # investor notes
+    assert "Evals for agent teams" in ctx          # grounded product summary

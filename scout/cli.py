@@ -958,7 +958,11 @@ def export(
     if pipeline:
         from scout.export import pipeline_rows, write_pipeline_csv
 
-        rows = pipeline_rows(store)
+        try:
+            thesis = load_thesis(Path("thesis.yaml"))
+        except OSError:
+            thesis = None
+        rows = pipeline_rows(store, thesis)
         if not rows:
             console.print("[yellow]Pipeline is empty — shortlist leads first.[/yellow]")
             raise typer.Exit()

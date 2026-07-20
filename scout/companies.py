@@ -70,6 +70,17 @@ def startup_identity(lead: Lead) -> tuple[str, bool] | None:
     return f"{possessive} {descriptor}", True
 
 
+def display_name(lead: Lead) -> str:
+    """The startup-first display name for toasts, memo titles, and filenames:
+    the company name, else the synthesized stealth identity ("Ada Lin's
+    stealth startup"), else the person/account. Never a bare handle when a
+    better name exists."""
+    identity = startup_identity(lead)
+    if identity:
+        return identity[0]
+    return (lead.account.name or f"@{lead.account.handle}").strip()
+
+
 def company_key(lead: Lead) -> str | None:
     """Normalized grouping key for the startup behind a lead (None = unknown).
 

@@ -2,20 +2,29 @@
 language (headline.com): warm cream paper, ink serif display, butter-yellow
 accents, uppercase tracked labels.
 
-Six surfaces, funnel-ordered:
+Six surfaces, funnel-ordered (session-state nav, so any action can route to
+any page — a card's Memo button lands on the Memos page):
 
   THESIS    — define how the scrape runs: the AI strategy agent, run controls,
               and (behind disclosure) every manual knob: query bank, watchlist,
               weights, prompt
   STARTUPS  — what sourcing found: the lead feed (latest run or the all-runs
-              ledger) plus a Database sub-page — the raw store, browsable:
-              any table, auto-generated filters, search, CSV, read-only SQL
+              ledger) plus a Database sub-page — every tracked startup as a
+              dossier table (select a row for the full record), with the raw
+              SQLite browser behind an expander
   LONGLIST  — the first cut: candidates worth a closer look, Claude's
               per-dimension scoring open on every card
   SHORTLIST — the working set: stage/notes tracking to allocation,
               per-dimension scoring, CRM-ready CSV export
-  MEMO      — pre-call memo and outreach draft, side by side, per startup
+  MEMOS     — the full investment memo per startup (overview, product,
+              tech, competition, market, acquisition dynamics,
+              recommendation): generate, edit in place, export .md/.pdf,
+              outreach draft alongside
   SETTINGS  — keys, budget, defaults
+
+Scoring is transparent and overridable: every card breaks the score into
+quality / fit / signals with per-dimension evidence, and an Adjust-scoring
+panel persists the investor's own numbers (store.score_overrides) on top.
 
 Edits write back to thesis.yaml / seeds.yaml / .env; deal-flow state lives in
 scout.db. The UI never stores secrets. Launch with `./scout-cli ui`.
@@ -23,10 +32,12 @@ scout.db. The UI never stores secrets. Launch with `./scout-cli ui`.
 
 from __future__ import annotations
 
+import asyncio
 import html
 import json
 import math
 import os
+import re
 import signal
 import subprocess
 import sys
@@ -46,7 +57,7 @@ import streamlit as st
 from scout.agents import (
     apply_strategy,
     generate_strategy,
-    research_brief,
+    investment_memo,
     suggest_weights,
     validate_watchlist,
 )
@@ -63,14 +74,20 @@ from scout.config import (
     save_seeds,
     save_thesis,
 )
-from scout.companies import group_by_company, startup_identity
-from scout.export import pipeline_rows, write_pipeline_csv
+from scout.companies import display_name, group_by_company, startup_identity
+from scout.export import memo_pdf_bytes, pipeline_rows, write_pipeline_csv
 from scout.insights import stats_prompt, triage_stats
 from scout.models import Lead, LedgerEntry, LLMVerdict
 from scout.outreach import CHANNELS, draft_outreach
-from scout.score import quality_score, score_breakdown, score_components
+from scout.score import (
+    apply_override,
+    quality_score,
+    score_breakdown,
+    score_components,
+)
 from scout.signals.llm import DEFAULT_PROMPT_TEMPLATE
 from scout.store import Store
+from scout.web import fetch_sites, normalize_site_url
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 THESIS_PATH = PROJECT_ROOT / "thesis.yaml"
@@ -218,6 +235,13 @@ def _inject_css() -> None:
           color:var(--ink); background:transparent; }
         .stButton>button[kind="primary"]:disabled:hover { background:var(--ink);
           border-color:var(--ink); color:var(--bg); }
+
+        /* Top-level nav — a segmented control styled exactly like the old
+           tab pills, centered. Session-state-driven so buttons anywhere in
+           the app can route to a page (card → Memos). */
+        .st-key-topnav [role="radiogroup"] { margin:1.4rem auto 1.6rem; }
+        .st-key-topnav [data-testid="stButtonGroup"] { display:flex;
+          justify-content:center; }
 
         /* Segmented controls → the same pill group as the tabs. The track is
            the inner radiogroup (the outer testid node also wraps the label). */
@@ -669,10 +693,25 @@ pipeline = store.all_pipeline()
 counts = store.pipeline_counts()
 # The ledger is the person-centric view: best-known state per handle across
 # ALL runs. It backs the "All runs" scope and — always — the Longlist,
-# Shortlist, and Memo pages, so a triaged lead never degrades just because
+# Shortlist, and Memos pages, so a triaged lead never degrades just because
 # it missed the latest run.
 latest_is_demo = bool(leads) and all(x.account.source == "demo" for x in leads)
 ledger = store.load_lead_ledger(include_demo=latest_is_demo)
+
+# The investor's manual scoring, layered on top of every loaded lead BEFORE
+# anything renders or ranks — adjusted dims/fit re-enter the score math, a
+# pinned score wins outright (score.apply_override).
+overrides = store.all_overrides()
+if overrides:
+    for _lead in leads:
+        apply_override(_lead, overrides.get(_lead.account.handle.lower()), thesis)
+    leads.sort(key=lambda x: -x.score)
+    for _entry in ledger:
+        apply_override(
+            _entry.lead, overrides.get(_entry.lead.account.handle.lower()), thesis
+        )
+    ledger.sort(key=lambda e: -e.lead.score)
+
 entry_by_handle = {e.lead.account.handle.lower(): e for e in ledger}
 lead_by_handle = {h: e.lead for h, e in entry_by_handle.items()}
 latest_handles = {x.account.handle.lower() for x in leads}
@@ -895,12 +934,101 @@ def _run_panel() -> None:
         with st.expander("Console log"):
             st.code(tail, language=None)
 
-tab_thesis, tab_startups, tab_long, tab_short, tab_memo, tab_settings = st.tabs(
-    ["Thesis", "Startups", "Longlist", "Shortlist", "Memo", "Settings"]
-)
+# Top-level navigation — session-state-driven (unlike st.tabs) so any button
+# can route to a page: set st.session_state["nav_target"] and rerun.
+PAGES = ["Thesis", "Startups", "Longlist", "Shortlist", "Memos", "Settings"]
+if (_nav_target := st.session_state.pop("nav_target", None)) in PAGES:
+    st.session_state["nav"] = _nav_target
+st.session_state.setdefault("nav", "Thesis")
+with st.container(key="topnav"):
+    nav = st.segmented_control("Page", PAGES, key="nav",
+                               label_visibility="collapsed")
+if nav is None:  # clicking the active pill deselects — snap back
+    st.session_state["nav_target"] = st.session_state.get("nav_last", "Thesis")
+    st.rerun()
+st.session_state["nav_last"] = nav
 
 
 # ============================================================ STARTUPS · feed
+
+
+def _override_editor(lead: Lead, ov: dict, key_ns: str) -> None:
+    """The manual-scoring form (inside a card's Adjust-scoring popover).
+
+    Sliders default to the CURRENT effective value; a dimension is persisted
+    only when it was already overridden or the slider moved — untouched
+    model scores are never frozen, so reclassification keeps updating them."""
+    handle_key = lead.account.handle.lower()
+    verdict = lead.llm
+    st.markdown(
+        '<div class="subtle">Your judgment on top of Claude\'s: adjusted dimensions '
+        're-enter the same score math (bars, chips, and steps update everywhere); '
+        'pinning the final score wins outright. Saved per startup, kept across '
+        'runs. Use <b>Clear</b> to return to Claude\'s scoring.</div>',
+        unsafe_allow_html=True,
+    )
+    existing_q = {k: float(v) for k, v in (ov.get("quality") or {}).items()}
+    new_quality: dict[str, float] = {}
+    fit_out: float | None = None
+    if verdict is not None:
+        st.markdown("**Quality dimensions**")
+        for dim, weight in thesis.quality_weights.items():
+            if weight <= 0:
+                continue
+            effective = verdict.quality.get(dim)
+            default = int(round((effective if effective is not None else 0.0) * 100))
+            suffix = "" if effective is not None else " (no evidence — was excluded)"
+            val = st.slider(
+                f"{QUALITY_DIM_LABEL.get(dim, dim)}{suffix}", 0, 100, default,
+                key=f"{key_ns}_ovq_{dim}_{handle_key}", format="%d%%",
+                help=QUALITY_DIMENSIONS.get(dim, ""),
+            )
+            if dim in existing_q or val != default:
+                new_quality[dim] = val / 100.0
+        st.markdown("**Thesis fit**")
+        fit_default = int(round((verdict.thesis_fit
+                                 if verdict.thesis_fit is not None else 0.0) * 100))
+        fit_val = st.slider("Thesis fit", 0, 100, fit_default,
+                            key=f"{key_ns}_ovf_{handle_key}", format="%d%%",
+                            label_visibility="collapsed",
+                            help="How squarely the product matches the thesis.")
+        if ov.get("fit") is not None or fit_val != fit_default:
+            fit_out = fit_val / 100.0
+    else:
+        st.markdown(
+            '<div class="subtle">No Claude verdict on this lead yet — only a '
+            'pinned final score applies here.</div>',
+            unsafe_allow_html=True,
+        )
+    pin = st.checkbox(
+        "Pin the final score", value=ov.get("score") is not None,
+        key=f"{key_ns}_ovp_{handle_key}",
+        help="Bypass the math entirely and set the 0–100 score yourself.",
+    )
+    pin_val = None
+    if pin:
+        pin_val = float(st.number_input(
+            "Pinned score", 0.0, 100.0,
+            float(ov["score"]) if ov.get("score") is not None else float(lead.score),
+            1.0, key=f"{key_ns}_ovs_{handle_key}", label_visibility="collapsed",
+        ))
+    note = st.text_input(
+        "Why (kept with the adjustment)", value=ov.get("note") or "",
+        key=f"{key_ns}_ovn_{handle_key}",
+        placeholder="e.g. spoke to a customer — traction is real",
+    )
+    c1, c2 = st.columns(2)
+    if c1.button("Save adjustments", type="primary",
+                 key=f"{key_ns}_ovsave_{handle_key}", use_container_width=True):
+        store.set_override(handle_key, quality=new_quality or None,
+                           fit=fit_out, score=pin_val, note=note)
+        st.session_state["toast"] = f"Scoring adjusted — {display_name(lead)}"
+        st.rerun()
+    if ov and c2.button("Clear", key=f"{key_ns}_ovclear_{handle_key}",
+                        use_container_width=True):
+        store.clear_override(handle_key)
+        st.session_state["toast"] = f"Back to Claude's scoring — {display_name(lead)}"
+        st.rerun()
 
 
 def _lead_card(
@@ -939,6 +1067,8 @@ def _lead_card(
         chips.append((f"{thesis.firm_name or 'Firm'} lift {verdict.value_add_fit:.0%}", "accent"))
     if status != "new":
         chips.append((STATUS_LABELS.get(status, status), "status"))
+    if overrides.get(handle_key):
+        chips.append(("Adjusted", "accent"))
     if entry and entry.is_new:
         chips.append(("New", "accent"))
     if entry and entry.score_delta is not None and abs(entry.score_delta) >= 1:
@@ -1095,49 +1225,119 @@ def _lead_card(
                     st.rerun()
 
         # Stateless expander: the `expanded` prop is re-applied only when its
-        # value CHANGES between reruns, so user toggles persist. Actions that
-        # must keep a card open (memo generation) set open_card before rerun.
-        with st.expander("Details", expanded=(details_open
-                                              or handle_key == st.session_state.get("open_card"))):
+        # value CHANGES between reruns, so user toggles persist.
+        with st.expander("Details", expanded=details_open):
+            ov = overrides.get(handle_key) or {}
+            params = thesis.signal_params
+            comps = score_components(lead, thesis)
             if verdict and verdict.why_interesting:
                 st.markdown(f'<div class="lead-summary">{_e(verdict.why_interesting)}</div>',
-                            unsafe_allow_html=True)
-            if verdict and verdict.fit_reason:
-                st.markdown(f'<div class="subtle" style="margin-top:6px">Fit — {_e(verdict.fit_reason)}</div>',
                             unsafe_allow_html=True)
             if verdict and verdict.verification_note:
                 st.markdown(f'<div class="subtle" style="margin-top:6px">Audit — {_e(verdict.verification_note)}</div>',
                             unsafe_allow_html=True)
-            # Company quality — per-dimension bars with the evidence citation
-            # each score rests on. Only evidence-backed dims render.
-            if verdict is not None and (q := quality_score(verdict, thesis)) is not None:
-                known = [(k, min(max(v, 0.0), 1.0))
-                         for k, v in verdict.quality.items()
-                         if thesis.quality_weights.get(k, 0) > 0]
-                n_total = sum(1 for w in thesis.quality_weights.values() if w > 0)
-                lens = CUSTOMER_TYPE_LABEL.get(verdict.customer_type or "", "")
-                lens_note = f" · {lens} lens" if lens else ""
+            if ov:
+                ov_note = f" — “{ov['note']}”" if ov.get("note") else ""
                 st.markdown(
-                    f'<div class="subtle" style="margin-top:8px">Quality '
-                    f'<b>{q:.0f}</b> — {len(known)} of {n_total} dims '
-                    f'evidence-backed{_e(lens_note)}</div>',
+                    f'<div class="subtle" style="margin-top:6px">✎ Manually adjusted'
+                    f'{_e(ov_note)} · your numbers are folded into everything below; '
+                    'revisit them in <b>Adjust scoring</b>.</div>',
                     unsafe_allow_html=True,
                 )
-                rows = "".join(
-                    f'<div class="sigrow"><div class="signame" title="{_e(QUALITY_DIMENSIONS.get(k, ""))}">{_e(QUALITY_DIM_LABEL.get(k, k))}</div>'
-                    f'<div class="sigtrack"><div class="sigfill" style="width:{100 * v:.0f}%"></div></div>'
-                    f'<div class="sigpts">{v:.0%}</div>'
-                    f'<div class="sigdetail" title="{_e(verdict.quality_reasons.get(k, ""))}">{_e(verdict.quality_reasons.get(k, ""))}</div></div>'
-                    for k, v in sorted(known, key=lambda kv: -kv[1])
+            # ---- Company quality (Q): the full rubric, dimension by
+            # dimension — hover a name for what it measures and its weight;
+            # the note is the evidence each score rests on. Dims Claude
+            # could NOT evidence show as excluded, never guessed.
+            if verdict is not None:
+                weighted_dims = [(k, w) for k, w in thesis.quality_weights.items() if w > 0]
+                wsum_q = sum(w for _, w in weighted_dims) or 1.0
+                q = quality_score(verdict, thesis)
+                if q is not None:
+                    lens = CUSTOMER_TYPE_LABEL.get(verdict.customer_type or "", "")
+                    known_n = sum(1 for k, _w in weighted_dims if k in verdict.quality)
+                    st.markdown(
+                        f'<div class="subtle" style="margin-top:10px">Company quality '
+                        f'<b>Q {q:.0f}</b> · {params.score_weight_quality:.0%} of the blend — '
+                        f'{known_n} of {len(weighted_dims)} dimensions evidence-backed'
+                        + (f", scored through the {_e(lens)} lens" if lens else "")
+                        + '. Hover a dimension for what it measures.</div>',
+                        unsafe_allow_html=True,
+                    )
+                    q_rows: list[str] = []
+                    for k, w in sorted(weighted_dims,
+                                       key=lambda kw: -(verdict.quality.get(kw[0], -1.0))):
+                        label = QUALITY_DIM_LABEL.get(k, k)
+                        tip = (f"{QUALITY_DIMENSIONS.get(k, '')} — "
+                               f"{100 * w / wsum_q:.0f}% of the quality score")
+                        value = verdict.quality.get(k)
+                        if value is None:
+                            q_rows.append(
+                                f'<div class="sigrow" style="opacity:0.55">'
+                                f'<div class="signame" title="{_e(tip)}">{_e(label)}</div>'
+                                f'<div class="sigtrack"></div>'
+                                f'<div class="sigpts">—</div>'
+                                f'<div class="sigdetail">no evidence — excluded, weight renormalizes</div></div>'
+                            )
+                        else:
+                            value = min(max(value, 0.0), 1.0)
+                            reason = verdict.quality_reasons.get(k, "")
+                            q_rows.append(
+                                f'<div class="sigrow"><div class="signame" title="{_e(tip)}">{_e(label)}</div>'
+                                f'<div class="sigtrack"><div class="sigfill" style="width:{100 * value:.0f}%"></div></div>'
+                                f'<div class="sigpts">{value:.0%}</div>'
+                                f'<div class="sigdetail" title="{_e(reason)}">{_e(reason)}</div></div>'
+                            )
+                    st.markdown(f'<div style="margin-top:4px">{"".join(q_rows)}</div>',
+                                unsafe_allow_html=True)
+                else:
+                    st.markdown(
+                        '<div class="subtle" style="margin-top:10px">No quality rubric on '
+                        'this verdict (older cache) — <b>Reclassify latest run</b> on the '
+                        'Thesis page scores it, or set the dimensions yourself in '
+                        '<b>Adjust scoring</b>.</div>',
+                        unsafe_allow_html=True,
+                    )
+                # ---- Thesis fit (F): one number, with Claude's reasoning.
+                if verdict.thesis_fit is not None:
+                    st.markdown(
+                        f'<div class="subtle" style="margin-top:10px">Thesis fit '
+                        f'<b>F {100 * min(max(verdict.thesis_fit, 0.0), 1.0):.0f}</b> · '
+                        f'{params.score_weight_fit:.0%} of the blend — '
+                        f'{_e(verdict.fit_reason or "no reasoning recorded")}</div>',
+                        unsafe_allow_html=True,
+                    )
+            # ---- X signals (S): the deterministic momentum score — every
+            # signal that fired, its weighted points, and the evidence.
+            hits = [s for s in lead.signals if s.value > 0]
+            if comps["signals"] is not None:
+                s_note = (f'{len(hits)} signal{"s" if len(hits) != 1 else ""} fired '
+                          f'of {len(thesis.weights)} tracked'
+                          if hits else "no signals fired")
+                st.markdown(
+                    f'<div class="subtle" style="margin-top:10px">X signals '
+                    f'<b>S {comps["signals"]:.0f}</b> · {params.score_weight_signals:.0%} '
+                    f'of the blend — {s_note}. Hover a signal for what it means; '
+                    'points = value × weight.</div>',
+                    unsafe_allow_html=True,
                 )
-                st.markdown(f'<div style="margin-top:4px">{rows}</div>', unsafe_allow_html=True)
+            if hits:
+                max_pts = max(s.contribution for s in hits) or 1.0
+                rows = "".join(
+                    f'<div class="sigrow"><div class="signame" title="{_e(SIGNAL_HELP.get(s.name, ""))}">{_e(s.name)}</div>'
+                    f'<div class="sigtrack"><div class="sigfill" style="width:{100 * s.contribution / max_pts:.0f}%"></div></div>'
+                    f'<div class="sigpts">{s.contribution:.1f}</div>'
+                    f'<div class="sigdetail" title="{_e(s.detail)}">{_e(s.detail)}</div></div>'
+                    for s in sorted(hits, key=lambda s: -s.contribution)
+                )
+                st.markdown(rows, unsafe_allow_html=True)
+
             # The value-add dimension: which of the firm's specific levers
             # would accelerate this startup, per the classifier.
             if verdict and verdict.value_add_fit is not None:
                 firm = thesis.firm_name or "Firm"
                 reason = f" — {verdict.value_add_reason}" if verdict.value_add_reason else ""
                 st.markdown(
-                    f'<div class="subtle" style="margin-top:6px">{_e(firm)} lift '
+                    f'<div class="subtle" style="margin-top:10px">{_e(firm)} lift '
                     f'{verdict.value_add_fit:.0%}{_e(reason)}</div>',
                     unsafe_allow_html=True,
                 )
@@ -1162,25 +1362,21 @@ def _lead_card(
                     + "</div>",
                     unsafe_allow_html=True,
                 )
-            st.write("")
 
-            hits = [s for s in lead.signals if s.value > 0]
-            if hits:
-                max_pts = max(s.contribution for s in hits) or 1.0
-                rows = "".join(
-                    f'<div class="sigrow"><div class="signame" title="{_e(SIGNAL_HELP.get(s.name, ""))}">{_e(s.name)}</div>'
-                    f'<div class="sigtrack"><div class="sigfill" style="width:{100 * s.contribution / max_pts:.0f}%"></div></div>'
-                    f'<div class="sigpts">{s.contribution:.1f}</div>'
-                    f'<div class="sigdetail" title="{_e(s.detail)}">{_e(s.detail)}</div></div>'
-                    for s in sorted(hits, key=lambda s: -s.contribution)
-                )
-                st.markdown(rows, unsafe_allow_html=True)
-
+            # ---- The score math, step by step: how Q, F, and S blend and
+            # which multipliers moved the number. The last line IS the score.
+            st.markdown(
+                '<div class="subtle" style="margin-top:10px">Score math — the blend '
+                'renormalizes over the components this lead actually evidences, '
+                'then trust multipliers apply:</div>',
+                unsafe_allow_html=True,
+            )
             steps = "".join(
                 f'<div class="math-step">{_e(desc)} → <b>{running:.1f}</b></div>'
-                for desc, running in score_breakdown(lead, thesis)
+                for desc, running in score_breakdown(
+                    lead, thesis, manual_score=ov.get("score"))
             )
-            st.markdown(f'<div style="margin-top:10px">{steps}</div>', unsafe_allow_html=True)
+            st.markdown(f'<div style="margin-top:2px">{steps}</div>', unsafe_allow_html=True)
 
             link_urls = list(lead.evidence_links)
             if company_url and company_url not in link_urls:
@@ -1196,24 +1392,16 @@ def _lead_card(
             st.write("")
 
             row = pipeline.get(handle_key, {})
-            b1, _sp = st.columns([1.4, 4.6])
-            if b1.button("Memo", key=f"{key_ns}_brief_{handle_key}"):
-                with st.spinner("Compiling memo…"):
-                    brief, is_ai = research_brief(lead, thesis, settings)
-                store.set_pipeline(account.handle, brief=brief)
-                st.session_state["open_card"] = handle_key  # keep this card open
-                st.session_state["toast"] = (
-                    f"Memo ready for @{account.handle}" if is_ai
-                    else "No Anthropic key — memo is data-only."
-                )
+            b1, b2, _sp = st.columns([1.4, 1.9, 2.7])
+            memo_label = "Open memo" if row.get("brief") else "Memo"
+            if b1.button(memo_label, key=f"{key_ns}_brief_{handle_key}",
+                         help="The full investment memo lives on the Memos page — "
+                              "this writes one (or opens the existing one) there."):
+                st.session_state["nav_target"] = "Memos"
+                st.session_state["memo_target"] = handle_key
                 st.rerun()
-
-            if row.get("brief"):
-                st.markdown("---")
-                if row.get("brief_at"):
-                    st.markdown(f'<div class="subtle">Generated {_ago(row["brief_at"])}</div>',
-                                unsafe_allow_html=True)
-                st.markdown(row["brief"])
+            with b2.popover("Adjust scoring"):
+                _override_editor(lead, ov, key_ns)
 
 
 def _render_startup_feed() -> None:
@@ -1441,6 +1629,8 @@ def _render_startup_feed() -> None:
             shown.sort(key=lambda p: (p[1].score_delta
                                       if p[1] and p[1].score_delta is not None
                                       else float("-inf")), reverse=True)
+        else:  # Score — explicit, so manual adjustments re-rank the view
+            shown.sort(key=lambda p: -p[0].score)
 
         # Startup-first in EVERY track: fold accounts attributed to the same
         # startup into one card; unnamed founders are singleton stealth
@@ -1545,7 +1735,7 @@ def _dimension_cards(handles: list[str], key_ns: str) -> None:
                    details_open=True, key_ns=key_ns)
 
 
-with tab_long:
+if nav == "Longlist":
     longlist = _ranked([h for h, p in pipeline.items()
                         if (p.get("status") or "") == "longlisted"])
     if not longlist:
@@ -1575,7 +1765,7 @@ with tab_long:
         _dimension_cards(longlist, key_ns="ll")
 
 
-with tab_short:
+if nav == "Shortlist":
     shortlist = _ranked([h for h, p in pipeline.items()
                          if (p.get("status") or "") in WIN_STAGES])
     if not shortlist:
@@ -1643,7 +1833,7 @@ with tab_short:
         _dimension_cards(shortlist, key_ns="sl")
 
         st.write("")
-        export_rows = pipeline_rows(store)
+        export_rows = pipeline_rows(store, thesis)
         if export_rows:
             export_path = write_pipeline_csv(export_rows, PROJECT_ROOT / settings.out_dir)
             st.download_button(
@@ -1655,59 +1845,187 @@ with tab_short:
 # ============================================================ MEMO
 
 
-with tab_memo:
-    memo_pool = _ranked([h for h, p in pipeline.items()
-                         if (p.get("status") or "") in FUNNEL_STAGES])
+def _slug(name: str) -> str:
+    """Filesystem-safe filename fragment from a startup name."""
+    return re.sub(r"[^A-Za-z0-9._-]+", "_", name).strip("_") or "memo"
+
+
+@st.cache_data(show_spinner=False)
+def _memo_pdf_cached(memo_md: str, title: str, subtitle: str) -> bytes:
+    return memo_pdf_bytes(memo_md, title, subtitle)
+
+
+def _generate_memo(handle: str) -> None:
+    """Assemble the evidence dossier (cached website text — fetched live if
+    missing — plus recent tweets and the investor's notes), run the memo
+    agent, store the result, and rerun with a startup-named toast."""
+    lead = lead_by_handle.get(handle)
+    if lead is None:
+        st.error("No lead data in the store for this startup — run discovery first.")
+        return
+    row = pipeline.get(handle, {})
+    verdict = lead.llm
+    site_text = ""
+    url = normalize_site_url(
+        ((verdict.company_url if verdict else None) or lead.account.website)
+    )
+    if url:
+        page = store.cached_site(url, settings.website_ttl_days)
+        if page is None:
+            try:
+                page = asyncio.run(fetch_sites([url], settings, store)).get(url)
+            except Exception:
+                page = None  # a dead site must never block the memo
+        if page is not None and page.usable:
+            site_text = page.text
+    tweets = store.get_tweets(lead.account.id, limit=12)
+    name = display_name(lead)
+    with st.spinner(f"Writing the investment memo for {name} — Claude is working "
+                    "through the full dossier (this takes a minute)…"):
+        memo, is_ai = investment_memo(
+            lead, thesis, settings, site_text=site_text, tweets=tweets,
+            notes=row.get("notes") or "",
+        )
+    store.set_pipeline(handle, brief=memo)
+    st.session_state["toast"] = (
+        f"Memo ready — {name}" if is_ai
+        else f"Data-only memo skeleton saved for {name} — add an Anthropic key "
+             "and regenerate for the full analysis."
+    )
+    st.rerun()
+
+
+if nav == "Memos":
+    # Arriving from a card's Memo button: select that startup here and, when
+    # it has no memo yet, write one on arrival.
+    memo_target = st.session_state.pop("memo_target", None)
+    if memo_target:
+        st.session_state["memo_pick"] = memo_target
+        st.session_state.pop("memo_editing", None)
+        if not pipeline.get(memo_target, {}).get("brief"):
+            st.session_state["memo_autogen"] = True
+
+    funnel_handles = [h for h, p in pipeline.items()
+                      if (p.get("status") or "") in FUNNEL_STAGES]
+    briefed = [h for h, p in pipeline.items() if p.get("brief")]
+    memo_pool = _ranked(list(dict.fromkeys(funnel_handles + briefed)))
+    if memo_target and memo_target not in memo_pool:
+        memo_pool.insert(0, memo_target)
+
     if not memo_pool:
         st.markdown(
-            '<div class="section-title">No startups to brief yet</div>'
-            '<div class="section-sub">Longlist or shortlist startups first — then draft the '
-            'pre-call memo and the outreach message here.</div>',
+            '<div class="section-title">No memos yet</div>'
+            '<div class="section-sub">Longlist or shortlist startups first — or hit '
+            '<b>Memo</b> on any card in the feed — and the full investment memo '
+            '(product, tech, competition, market, acquisition dynamics, '
+            'recommendation) gets written here.</div>',
             unsafe_allow_html=True,
         )
     else:
-        st.markdown('<div class="section-title">Memo</div>'
-                    '<div class="section-sub">A pre-call memo per startup — evidence, thesis fit, '
-                    'risks, questions to ask — with the outreach draft alongside.</div>',
-                    unsafe_allow_html=True)
+        n_briefed = len(briefed)
+        st.markdown(
+            '<div class="section-title">Investment memos</div>'
+            f'<div class="section-sub">{n_briefed or "No"} memo'
+            f'{"s" if n_briefed != 1 else ""} on file across {len(memo_pool)} '
+            'startups in the funnel. Generate, edit in place, export as PDF — '
+            'the outreach draft lives below the memo.</div>',
+            unsafe_allow_html=True,
+        )
+        if "memo_pick" in st.session_state and st.session_state["memo_pick"] not in memo_pool:
+            st.session_state["memo_pick"] = memo_pool[0]
         pick = st.selectbox("Startup", memo_pool, format_func=_pick_label,
-                            label_visibility="collapsed")
+                            key="memo_pick", label_visibility="collapsed")
         picked_lead = lead_by_handle.get(pick)
         picked_row = pipeline.get(pick, {})
+        picked_name = display_name(picked_lead) if picked_lead else f"@{pick}"
+
+        bits = []
         if picked_lead is not None:
             v = picked_lead.llm
-            bits = [f"score {picked_lead.score:.0f}"]
+            bits.append(f"score {picked_lead.score:.0f}")
             if v and v.thesis_fit is not None:
                 bits.append(f"thesis fit {v.thesis_fit:.0%}")
             bits.append(STATUS_LABELS.get(_status_of(picked_lead), ""))
+        if picked_row.get("brief_at"):
+            bits.append(f"generated {_ago(picked_row['brief_at'])}")
+        if picked_row.get("brief_edited_at"):
+            bits.append(f"edited {_ago(picked_row['brief_edited_at'])}")
+        if bits:
             st.markdown(f'<div class="subtle">{_e(" · ".join(b for b in bits if b))}</div>',
                         unsafe_allow_html=True)
 
-        col_memo, col_out = st.columns(2, gap="large")
-        with col_memo:
-            st.markdown("**Memo**")
-            if st.button("Generate memo", type="primary", disabled=picked_lead is None,
-                         key="memo_generate"):
-                with st.spinner("Compiling memo…"):
-                    brief, is_ai = research_brief(picked_lead, thesis, settings)
-                store.set_pipeline(pick, brief=brief)
-                if not is_ai:
-                    st.info("No Anthropic key — memo is data-only.")
+        if st.session_state.pop("memo_autogen", False) and not picked_row.get("brief"):
+            _generate_memo(pick)  # ends in st.rerun()
+
+        existing_memo = picked_row.get("brief") or ""
+        editing = st.session_state.get("memo_editing") == pick
+
+        a1, a2, a3, a4, _asp = st.columns([1.5, 0.9, 1.3, 1.05, 1.25])
+        regen_help = ("Regenerating rewrites the memo from the current evidence — "
+                      "your manual edits are overwritten." if existing_memo else None)
+        if a1.button("Regenerate memo" if existing_memo else "Generate memo",
+                     type="primary", disabled=picked_lead is None, help=regen_help,
+                     key="memo_generate"):
+            _generate_memo(pick)
+        if existing_memo and not editing:
+            if a2.button("Edit", key="memo_edit_btn"):
+                st.session_state["memo_editing"] = pick
                 st.rerun()
-            existing_brief = picked_row.get("brief")
-            if existing_brief:
-                if picked_row.get("brief_at"):
-                    st.markdown(f'<div class="subtle">Generated {_ago(picked_row["brief_at"])}</div>',
-                                unsafe_allow_html=True)
-                st.markdown(existing_brief)
-                st.download_button("Download memo (.md)", existing_brief.encode("utf-8"),
-                                   file_name=f"memo_{pick}.md")
-            else:
-                st.markdown('<div class="subtle">No memo yet — generate one for a pre-call brief: '
-                            'evidence, thesis fit, risks, and questions to ask.</div>',
-                            unsafe_allow_html=True)
-        with col_out:
-            st.markdown("**Outreach**")
+        if existing_memo:
+            a3.download_button("Markdown", existing_memo.encode("utf-8"),
+                               file_name=f"memo_{_slug(picked_name)}.md",
+                               key="memo_dl_md")
+            memo_date = (picked_row.get("brief_edited_at")
+                         or picked_row.get("brief_at") or "")
+            try:
+                date_label = datetime.fromisoformat(memo_date).strftime("%B %d, %Y")
+            except ValueError:
+                date_label = datetime.now().strftime("%B %d, %Y")
+            sub_bits = [f"{thesis.firm_name or 'Scout'} · {date_label}"]
+            if picked_lead is not None:
+                sub_bits.append(f"score {picked_lead.score:.0f}/100")
+            sub_bits.append(f"@{pick} · internal — confidential")
+            try:
+                a4.download_button(
+                    "PDF",
+                    _memo_pdf_cached(existing_memo,
+                                     f"{picked_name} — Investment memo",
+                                     " · ".join(sub_bits)),
+                    file_name=f"memo_{_slug(picked_name)}.pdf",
+                    mime="application/pdf", key="memo_dl_pdf",
+                )
+            except RuntimeError as exc:
+                a4.caption(str(exc))
+
+        if editing:
+            draft_md = st.text_area("Memo markdown", value=existing_memo, height=560,
+                                    key=f"memo_editor_{pick}",
+                                    label_visibility="collapsed")
+            e1, e2, _esp = st.columns([1, 0.9, 4.1])
+            if e1.button("Save memo", type="primary", key="memo_save"):
+                store.set_pipeline(pick, brief=draft_md, brief_edited=True)
+                st.session_state.pop("memo_editing", None)
+                st.session_state["toast"] = f"Memo saved — {picked_name}"
+                st.rerun()
+            if e2.button("Cancel", key="memo_cancel"):
+                st.session_state.pop("memo_editing", None)
+                st.rerun()
+        elif existing_memo:
+            st.write("")
+            with st.container(border=True):
+                st.markdown(f"### {picked_name}")
+                st.markdown(existing_memo)
+        else:
+            st.markdown(
+                '<div class="subtle" style="margin-top:8px">No memo yet for '
+                f'<b>{_e(picked_name)}</b> — generate the full investment memo: '
+                'overview, product &amp; differentiation, technology, competitive '
+                'landscape, market sizing, acquisition dynamics, recommendation.</div>',
+                unsafe_allow_html=True,
+            )
+
+        st.write("")
+        with st.expander("Outreach draft"):
             channel = st.selectbox("Channel", list(CHANNELS))
             if st.button("Draft with AI", disabled=picked_lead is None):
                 with st.spinner("Drafting…"):
@@ -1730,7 +2048,7 @@ with tab_memo:
 # ============================================================ THESIS
 
 
-with tab_thesis:
+if nav == "Thesis":
     # --- AI strategy designer -------------------------------------------------
     st.markdown('<div class="section-title">Define the thesis</div>'
                 '<div class="section-sub">Describe your thesis in plain language. The agent writes '
@@ -2196,6 +2514,157 @@ def _db_filter_meta(db, table: str, text_cols: list[str],
 
 
 def _render_database() -> None:
+    """The startup database: one dossier row per tracked startup — what it
+    does, how it scored (Q/F/S) and why, funnel status, history. Selecting a
+    row opens the full record. The raw SQLite browser lives behind an
+    expander at the bottom."""
+    st.markdown(
+        '<div class="section-title">Startup database</div>'
+        '<div class="section-sub">Every startup scout tracks, across all runs — the product, '
+        'the score and its quality / fit / signals components, funnel status, and history. '
+        'Select a row for the full dossier: evidence, per-dimension scoring with reasons, '
+        'the score math, and your manual adjustments.</div>',
+        unsafe_allow_html=True,
+    )
+    if not ledger:
+        st.markdown(
+            '<div class="subtle">Nothing tracked yet — run discovery on the '
+            '<b>Thesis</b> page, or <code>./scout-cli demo</code> for an offline '
+            'sample.</div>',
+            unsafe_allow_html=True,
+        )
+    else:
+        db_rows: list[dict] = []
+        for e in ledger:
+            lead = e.lead
+            v = lead.llm
+            handle = lead.account.handle.lower()
+            comps = score_components(lead, thesis)
+            status = pipeline.get(handle, {}).get("status") or "new"
+            what = ((v.product_summary if v else "")
+                    or (v.one_line_summary if v else "") or lead.account.bio or "")
+            db_rows.append({
+                "handle": handle,
+                "Startup": display_name(lead),
+                "Score": round(lead.score),
+                "Q": None if comps["quality"] is None else round(comps["quality"]),
+                "F": None if comps["fit"] is None else round(comps["fit"]),
+                "S": None if comps["signals"] is None else round(comps["signals"]),
+                "What they do": " ".join(what.split()),
+                "Stage": (STAGE_LABEL.get(v.stage, v.stage) if v and v.stage else ""),
+                "Sector": (" · ".join(x for x in [v.sector or "", v.subsector or ""] if x)
+                           if v else ""),
+                "Customers": (CUSTOMER_TYPE_LABEL.get(v.customer_type, "")
+                              if v and v.customer_type else ""),
+                "Status": (STATUS_LABELS.get(status, status) if status != "new" else ""),
+                "Adjusted": "✎" if overrides.get(handle) else "",
+                "Memo": "✓" if pipeline.get(handle, {}).get("brief") else "",
+                "Followers": lead.account.followers,
+                "First seen": (e.first_seen_at.date().isoformat()
+                               if e.first_seen_at else ""),
+                "Runs": e.times_seen,
+                "Profile": lead.account.url,
+            })
+
+        f1, f2, f3, f4 = st.columns([2.5, 1.35, 1.35, 1.1])
+        with f1:
+            db_search = st.text_input(
+                "Search startups", key="sdb_q", label_visibility="collapsed",
+                placeholder="Search startup, product, sector, status…")
+        with f2:
+            stage_pick = st.multiselect(
+                "Stage", [STAGE_LABEL[s] for s in STAGES], key="sdb_stage",
+                label_visibility="collapsed", placeholder="All stages")
+        with f3:
+            status_pick = st.multiselect(
+                "Status", list(STATUS_LABELS.values()), key="sdb_status",
+                label_visibility="collapsed", placeholder="All statuses")
+        with f4:
+            sdb_min = st.number_input("Min score", 0, 100, 0, 5, key="sdb_min",
+                                      label_visibility="collapsed",
+                                      help="Minimum score")
+
+        def _sdb_keep(r: dict) -> bool:
+            if stage_pick and r["Stage"] not in stage_pick:
+                return False
+            if status_pick and (r["Status"] or "New") not in status_pick:
+                return False
+            if r["Score"] < sdb_min:
+                return False
+            if db_search.strip():
+                hay = " ".join(str(x) for x in r.values()).lower()
+                if db_search.strip().lower() not in hay:
+                    return False
+            return True
+
+        view_rows = [r for r in db_rows if _sdb_keep(r)]
+        st.markdown(
+            f'<div class="subtle" style="margin:2px 0 8px">{len(view_rows)} of '
+            f'{len(db_rows)} startups · select a row for the full dossier</div>',
+            unsafe_allow_html=True,
+        )
+        df = pd.DataFrame(view_rows)
+        event = st.dataframe(
+            df, use_container_width=True, hide_index=True, key="sdb_table",
+            on_select="rerun", selection_mode="single-row",
+            height=min(560, 37 * (len(df) + 1) + 5),
+            column_order=["Startup", "Score", "Q", "F", "S", "What they do",
+                          "Stage", "Sector", "Customers", "Status", "Adjusted",
+                          "Memo", "Followers", "First seen", "Runs", "Profile"],
+            column_config={
+                "handle": None,
+                "Startup": st.column_config.TextColumn("Startup", width="medium",
+                                                       pinned=True),
+                "Score": st.column_config.ProgressColumn(
+                    "Score", min_value=0, max_value=100, format="%d", width="small",
+                    help="Final score — quality/fit/signals blend × trust multipliers"),
+                "Q": st.column_config.NumberColumn(
+                    "Q", width="small",
+                    help="Company quality 0–100 — Claude's evidence-backed rubric "
+                         "(team, tech, market, moat, traction, investors)"),
+                "F": st.column_config.NumberColumn(
+                    "F", width="small", help="Thesis fit 0–100"),
+                "S": st.column_config.NumberColumn(
+                    "S", width="small", help="X-signal momentum 0–100"),
+                "What they do": st.column_config.TextColumn("What they do",
+                                                            width="large"),
+                "Adjusted": st.column_config.TextColumn(
+                    "✎", width="small", help="Manually adjusted scoring"),
+                "Memo": st.column_config.TextColumn(
+                    "Memo", width="small", help="Investment memo on file"),
+                "Followers": st.column_config.NumberColumn("Followers",
+                                                           format="localized"),
+                "Profile": st.column_config.LinkColumn(
+                    "Profile", display_text=r"x\.com/(.+)", width="small"),
+            },
+        )
+        st.download_button(
+            f"Download view as CSV ({len(view_rows)} startups)",
+            df.drop(columns=["handle"]).to_csv(index=False).encode("utf-8")
+            if not df.empty else b"",
+            file_name="startups_view.csv", key="sdb_csv",
+        )
+
+        picked_rows = (event.selection.rows or []) if event is not None else []
+        if picked_rows and not df.empty:
+            sel_handle = str(df.iloc[picked_rows[0]]["handle"])
+            sel_lead = lead_by_handle.get(sel_handle)
+            if sel_lead is not None:
+                st.write("")
+                st.markdown('<div class="section-title" style="font-size:1.15rem">Dossier</div>',
+                            unsafe_allow_html=True)
+                _lead_card(sel_lead, entry_by_handle.get(sel_handle),
+                           fresh=sel_handle in latest_handles,
+                           details_open=True, key_ns="db")
+
+    st.write("")
+    # A toggle, not an expander — the raw browser has its own SQL expander
+    # inside, and Streamlit forbids nesting expanders.
+    if st.toggle("Raw tables — the underlying SQLite store", key="sdb_raw"):
+        _render_raw_tables()
+
+
+def _render_raw_tables() -> None:
     """The raw store, browsable: any table, auto-generated filters, full-text
     search, CSV export of the view, and a read-only SQL console."""
     db = store.db
@@ -2208,8 +2677,7 @@ def _render_database() -> None:
     db_file = Path(store.db_path)
 
     st.markdown(
-        '<div class="section-title">Database</div>'
-        f'<div class="section-sub">Everything scout knows, raw — <code>{_e(str(db_file))}</code>. '
+        f'<div class="subtle">Everything scout knows, raw — <code>{_e(str(db_file))}</code>. '
         'Browse any table, filter, search, export. Read-only.</div>',
         unsafe_allow_html=True,
     )
@@ -2346,8 +2814,8 @@ def _render_database() -> None:
                         st.error(f"{type(exc).__name__}: {exc}")
 
 
-# The Startups page: the sourcing feed + the raw database, as sub-pages.
-with tab_startups:
+# The Startups page: the sourcing feed + the startup database, as sub-pages.
+if nav == "Startups":
     sub_feed, sub_db = st.tabs(["Latest run", "Database"])
     with sub_feed:
         _render_startup_feed()
@@ -2358,7 +2826,7 @@ with tab_startups:
 # ============================================================ SETTINGS
 
 
-with tab_settings:
+if nav == "Settings":
     spent = store.xapi_spend_usd()
     cap = settings.xapi_spend_cap_usd
     s1, s2, s3 = st.columns(3)

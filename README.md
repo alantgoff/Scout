@@ -7,11 +7,13 @@ classified fine-grained (stage, sector/subsector, business model, **company
 name + URL**, tags, and an explicit 0–1 **thesis fit**), and presented as
 companies: a founder account and the startup's account fold into one entry.
 The secondary, completeness track is a **pre-launch watch**: people the
-signals say are about to leave a lab, go stealth, or launch. Two built-in
-agents do the heavy lifting — a **strategy agent** turns a plain-language
-thesis into the full sourcing configuration, and a **research-brief agent**
-writes a pre-call memo per lead. CLI + a Streamlit UI in Headline design
-language (headline.com). Internal tool — scrappy on purpose.
+signals say are about to leave a lab, go stealth, or launch. Built-in agents do
+the heavy lifting — a **strategy agent** turns a plain-language thesis into
+the full sourcing configuration, and an **investment-memo agent** writes a
+full multi-section memo per startup (product, tech, competition, market
+sizing, acquisition dynamics, recommendation), editable in the app and
+exportable as PDF. CLI + a Streamlit UI in Headline design language
+(headline.com). Internal tool — scrappy on purpose.
 
 > **Agents:** read [`AGENTS.md`](AGENTS.md) first — it's the fast map of the
 > codebase, data flow, invariants, and gotchas.
@@ -54,11 +56,13 @@ the last `--ttl-days` (default 7) are skipped, so re-running while you tune
 the thesis is fast and (in xapi mode) free. A legacy `./scout.db` in the
 working directory is migrated to the home location automatically on first run.
 
-## The workspace: Thesis · Startups · Longlist · Shortlist · Memo · Settings
+## The workspace: Thesis · Startups · Longlist · Shortlist · Memos · Settings
 
 The UI (`./scout-cli ui`) is a content-first workspace, ordered like the
 funnel — define the thesis, review what sourcing found, longlist, shortlist,
-write the memo:
+write the memo. Navigation is session-state-driven, so actions can route
+across pages (a card's **Memo** button lands on the Memos page with the memo
+being written):
 
 1. **Thesis** — how the scrape runs. The **strategy agent** front and center:
    describe the thesis in plain language, review the proposed targeting /
@@ -83,12 +87,22 @@ write the memo:
    **score-change arrows**, **New** chips, and a "seen N× since" history
    line); a strategy filter appears once runs group into more than one
    strategy. Cards carry the thesis-fit chip, taxonomy chips, and triage
-   buttons (**Longlist / Pass**) on the face; details expand to per-signal
-   bars, step-by-step score math, and a one-click **memo**. Search, sort,
-   and filters live in one toolbar; a quiet banner nudges you when the last
-   real run is >24h old. **Database** is the raw store, browsable: any table
-   (row counts inline), full-text search, auto-generated filters, a column
-   chooser, CSV export of the filtered view, and a read-only SQL console.
+   buttons (**Longlist / Pass**) on the face. Details break the score fully
+   open — **Company quality Q** (every rubric dimension with its blend share,
+   the evidence citation behind each score, and unevidenced dims shown as
+   excluded rather than guessed), **Thesis fit F** with Claude's reasoning,
+   **X signals S** with per-signal bars, then the step-by-step score math —
+   plus **Adjust scoring**: slide any quality dimension or the fit, pin the
+   final score outright, attach a note; adjustments persist per startup
+   (`score_overrides`), re-enter the same math everywhere (cards, ranks,
+   exports), and show an **Adjusted** chip until cleared. Search, sort, and
+   filters live in one toolbar; a quiet banner nudges you when the last real
+   run is >24h old. **Database** is the startup database: one dossier row per
+   tracked startup across all runs (product, score with Q/F/S components,
+   stage, sector, status, history) with search and filters — select a row for
+   the full dossier card; the raw SQLite browser (any table, full-text
+   search, auto filters, CSV, read-only SQL console) sits behind a toggle
+   below.
 3. **Longlist** — the first cut. Everything you longlisted, score-ranked,
    with Claude's per-dimension scoring **open on every card** (signal bars,
    score math, thesis fit, value-add levers). Promote the best to the
@@ -97,9 +111,16 @@ write the memo:
    (Shortlisted → Contacted → Meeting → Diligence → Allocated) with notes,
    the same per-dimension scoring cards, and a one-click **pipeline CSV
    export** (CRM-import-ready).
-5. **Memo** — pre-call memo per startup (evidence, thesis fit, risks,
-   questions to ask; downloadable as Markdown) with the **AI-drafted
-   outreach** message alongside, each stamped with freshness.
+5. **Memos** — the full investment memo per startup, written from the whole
+   evidence dossier (website capture, recent tweets, quality rubric, your
+   notes): **Overview · Product & differentiation · Technology &
+   architecture · Competitive landscape · Market sizing · Strategic capital
+   & acquisition dynamics (natural acquirers, tuck-in vs. platform, exit
+   sizing) · Recommendation** (PURSUE/TRACK/PASS with conviction and
+   first-call questions). Memos are **editable in place** (generation and
+   edit each timestamped), **named after the startup** (stealth identities
+   for unnamed ones), and export as **Markdown or a styled PDF**. The
+   **AI-drafted outreach** message lives below the memo.
 6. **Settings** — keys, the budget ledger, and defaults.
 
 Deal-flow state (longlist/shortlist status, notes, outreach, memos) persists
@@ -322,7 +343,7 @@ demo         $0 offline end-to-end test on built-in sample founders
 export       Re-export the last run from the cache DB (--format md|csv|both)
   --pipeline               export the deal flow (status, notes, outreach, briefs) instead
 budget       Cumulative X API spend vs. XAPI_SPEND_CAP_USD
-ui           Launch the Leads · Pipeline · Sourcing · Database · Settings workspace
+ui           Launch the Thesis · Startups · Longlist · Shortlist · Memos · Settings workspace
 ```
 
 **Efficiency:** free-source tweet fetches run concurrently

@@ -18,7 +18,8 @@ a synthesized "Ada Lin's stealth startup" placeholder when unnamed) and folds
 founder + company accounts into one entry, in every view and the report. It's
 a Python 3.12 package with a **Typer CLI** and a **Streamlit UI** (Headline design
 language, funnel-ordered: Thesis · Startups (Latest run / Database) · Longlist ·
-Shortlist · Memo · Settings), managed by **uv**. A thesis
+Shortlist · Memos · Settings; session-state nav, so buttons route across
+pages), managed by **uv**. A thesis
 (`thesis.yaml`) drives all targeting; nothing is hardcoded.
 
 The pipeline: **discover** candidate accounts (free) → run cheap deterministic
@@ -33,9 +34,17 @@ the store) → **adversarial verification** of the top `VERIFY_TOP_N` verdicts
 against their dossiers (corrections re-cached) → **score** 0–100 → **export**
 CSV/Markdown → **triage & pursue** in the UI. `scout reclassify` re-runs
 everything from classification down on the latest run's leads — cache-first,
-no discovery — the fast loop for thesis/prompt iteration. Two agents (`scout/agents.py`): the **strategy agent**
-(plain-language thesis → full thesis.yaml + seeds.yaml proposal) and the
-**research-brief agent** (per-lead pre-call memo, cached in the pipeline table).
+no discovery — the fast loop for thesis/prompt iteration. Agents (`scout/agents.py`): the **strategy agent**
+(plain-language thesis → full thesis.yaml + seeds.yaml proposal), the
+**research-brief agent** (compact pre-call brief), and the **investment-memo
+agent** (full multi-section memo — overview / product & differentiation /
+tech & architecture / competitive landscape / market sizing / strategic
+capital & acquisition dynamics / recommendation — grounded in website capture
++ tweets + the quality rubric; stored in the pipeline table, editable in the
+UI, exportable as Markdown or PDF via `export.memo_pdf_bytes`). Scoring is
+overridable: `score_overrides` (store) + `score.apply_override` layer the
+investor's manual quality/fit/pinned-score numbers into the same math at load
+time.
 
 ---
 
@@ -87,15 +96,21 @@ scout/
                     follow-edge/bio snapshots, unlinked leads, deal-flow pipeline,
                     llm_verdicts cache.
   score.py          Pure scoring. score_leads + score_breakdown (THE score math,
-                    single source of truth; UI renders its steps).
-  export.py         CSV + Markdown writers, rich terminal table.
-  outreach.py       Claude-drafted first-touch outreach (Memo page); template fallback.
+                    single source of truth; UI renders its steps) + apply_override
+                    (manual quality/fit/pinned-score overrides re-entering that math).
+  export.py         CSV + Markdown writers, rich terminal table, memo_pdf_bytes
+                    (markdown-pdf/PyMuPDF investment-memo PDF), override-aware
+                    pipeline_rows(store, thesis).
+  outreach.py       Claude-drafted first-touch outreach (Memos page); template fallback.
   agents.py         Strategy agent (generate_strategy/parse_strategy/apply_strategy),
-                    research-brief agent (research_brief), weight-tuning agent
-                    (suggest_weights/parse_weight_proposal), watchlist validation
-                    (validate_watchlist). Parse/apply helpers are pure. All Claude
-                    clients carry explicit timeouts (STRATEGY/BRIEF/WEIGHTS_TIMEOUT_S);
-                    timeouts are excluded from tenacity retry — fail fast in the UI.
+                    research-brief agent (research_brief), investment-memo agent
+                    (investment_memo + MEMO_SECTIONS; dossier = brief context +
+                    website text + tweets + notes; offline skeleton fallback),
+                    weight-tuning agent (suggest_weights/parse_weight_proposal),
+                    watchlist validation (validate_watchlist). Parse/apply helpers
+                    are pure. All Claude clients carry explicit timeouts
+                    (STRATEGY/BRIEF/WEIGHTS/MEMO_TIMEOUT_S); timeouts are excluded
+                    from tenacity retry — fail fast in the UI.
   insights.py       Pure triage analytics: triage_stats/stats_prompt contrast
                     shortlisted-vs-passed leads per signal/sector/stage/fit;
                     feeds the UI insights panel and the weight-tuning agent.
@@ -107,8 +122,12 @@ scout/
                     sharing a company into one entry (primary = highest score).
   demo_data.py      8 synthetic sample founders for `scout demo` (obviously fake handles).
   ui.py             Streamlit app: Thesis / Startups (Latest run + Database) /
-                    Longlist / Shortlist / Memo / Settings. Headline design
-                    language; lead cards; agent flows. ~1800 lines.
+                    Longlist / Shortlist / Memos / Settings. Session-state nav
+                    (nav_target routes across pages — the card Memo button lands
+                    on Memos and auto-generates); startup database with dossier
+                    row-select; per-card Q/F/S score breakout + Adjust-scoring
+                    popover; Memos page with in-place editing and .md/.pdf
+                    export. Headline design language. ~2600 lines.
   ingest/
     base.py         SourceAdapter ABC (X sources) + DiscoverySource ABC (github/hn).
     twscrape_src.py Primary free X adapter: query bank, bio search, list members,
@@ -261,7 +280,7 @@ partition key is `lower(handle)` (leads pk is case-sensitive, everything else is
 NOCASE); ordering is `(created_at, run_id)`, never run_id alone (rows in a run
 share one created_at; `verify-` > `demo-` lexicographically); `demo-` runs are
 excluded unless `include_demo`; `verify-` runs are always included (real
-re-scores). The UI's Longlist / Shortlist / Memo pages always resolve leads
+re-scores). The UI's Longlist / Shortlist / Memos pages always resolve leads
 through the ledger so a triaged lead missing from the latest run never degrades. `scout export` and
 `scout verify` deliberately keep latest-run semantics (verify is paid — never
 silently widen its input set to all-time).
@@ -335,10 +354,11 @@ silently widen its input set to all-time).
 ## 10. Current state / open threads
 
 - Fully working: demo, source (all strategies), the whole scored pipeline, the
-  Thesis/Startups/Longlist/Shortlist/Memo/Settings UI (Headline design
+  Thesis/Startups/Longlist/Shortlist/Memos/Settings UI (Headline design
   language, lead cards),
-  strategy agent (`scout strategy` + Thesis tab, validated live), research
-  briefs, verdict cache, paid probe + verify (validated live, ~$0.83 spent).
+  strategy agent (`scout strategy` + Thesis tab, validated live), investment
+  memos (multi-section, editable, PDF export — validated live), manual score
+  overrides, verdict cache, paid probe + verify (validated live, ~$0.83 spent).
 - v4 additions (all validated live): person-centric lead ledger with score
   deltas + strategy grouping (runs table), paid-run + precision-pass cost
   confirmation gates in the UI, watchlist handle validation, card-face triage

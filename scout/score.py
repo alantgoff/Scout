@@ -1,6 +1,10 @@
 """Three-component lead score → 0–100: company QUALITY + thesis FIT +
 X-signal momentum, blended, then a chain of trust multipliers.
 
+Manual overrides (`apply_override`) layer the investor's own scoring on top
+at load time: adjusted quality dims / thesis fit re-enter the same math, and
+a pinned final score wins outright.
+
 Pure: no I/O, no network. Covered by unit tests.
 """
 
@@ -80,14 +84,55 @@ def score_leads(leads: list[Lead], thesis: Thesis) -> list[Lead]:
     return ranked
 
 
-def score_breakdown(lead: Lead, thesis: Thesis) -> list[tuple[str, float]]:
+def apply_override(lead: Lead, override: dict | None, thesis: Thesis) -> bool:
+    """Layer one manual-score row (store.all_overrides) onto a loaded lead,
+    in place. Returns True when anything applied.
+
+    Adjusted quality dims and thesis fit are written into the verdict (with
+    "manual" reasons) and the score is recomputed through the normal math, so
+    bars, chips, and the step-by-step breakdown all reflect the investor's
+    numbers. A pinned `score` then wins outright. Dim/fit overrides need a
+    verdict to live on; without one only the pinned score applies."""
+    if not override:
+        return False
+    applied = False
+    verdict = lead.llm
+    note = (override.get("note") or "").strip()
+    reason = f"manual — {note}" if note else "manual override"
+    if verdict is not None:
+        for key, value in (override.get("quality") or {}).items():
+            verdict.quality[key] = min(max(float(value), 0.0), 1.0)
+            verdict.quality_reasons[key] = reason
+            applied = True
+        if override.get("fit") is not None:
+            verdict.thesis_fit = min(max(float(override["fit"]), 0.0), 1.0)
+            verdict.fit_reason = reason
+            applied = True
+    if applied:
+        lead.score = round(score_breakdown(lead, thesis)[-1][1], 1)
+    if override.get("score") is not None:
+        lead.score = round(min(max(float(override["score"]), 0.0), 100.0), 1)
+        applied = True
+    return applied
+
+
+def score_breakdown(
+    lead: Lead, thesis: Thesis, manual_score: float | None = None
+) -> list[tuple[str, float]]:
     """The score calculation as (step description, running score) pairs.
 
     Single source of truth for the math — score_leads applies it; the UI
     renders it so every sub-score is inspectable. The last step's value IS
     the final score. Component lines carry the component's own value; the
     blend line restores the running-score semantic. Also fills Signal.weight
-    as a side effect (idempotent)."""
+    as a side effect (idempotent). `manual_score` (a pinned override) appends
+    a final step so the displayed math ends at the displayed number."""
+    def _finish(steps: list[tuple[str, float]]) -> list[tuple[str, float]]:
+        if manual_score is not None:
+            steps.append(("manual score override (set by you)",
+                          min(max(float(manual_score), 0.0), 100.0)))
+        return steps
+
     parts = score_components(lead, thesis)
     signals_score = parts["signals"] if parts["signals"] is not None else 0.0
     steps: list[tuple[str, float]] = [
@@ -96,7 +141,7 @@ def score_breakdown(lead: Lead, thesis: Thesis) -> list[tuple[str, float]]:
     ]
     if lead.llm is None:
         # Demo / heuristics-only: signals are the whole story.
-        return steps
+        return _finish(steps)
     verdict = lead.llm
     params = thesis.signal_params
 
@@ -180,4 +225,4 @@ def score_breakdown(lead: Lead, thesis: Thesis) -> list[tuple[str, float]]:
         steps.append(
             (f"× {multiplier:g} (product unverified — {basis})", score)
         )
-    return steps
+    return _finish(steps)

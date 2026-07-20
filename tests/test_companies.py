@@ -93,3 +93,21 @@ def test_group_by_company_folds_and_keeps_highest_score_primary() -> None:
     # order preserved: EvalHQ group (first seen), then KiteCI, then the solo
     assert [g[0].account.handle for g in grouped] == ["ada_infra", "kite_ci", "no_co"]
     assert grouped[1][2] == [] and grouped[2][2] == []
+
+
+def test_display_name_prefers_company_then_identity_then_person() -> None:
+    from scout.companies import display_name
+
+    named = Lead(account=Account(id="1", handle="ada", name="Ada Lin"),
+                 llm=LLMVerdict(handle="ada", account_type="founder",
+                                is_founder=True, company_name="EvalHQ"))
+    assert display_name(named) == "EvalHQ"
+    stealth = Lead(account=Account(id="2", handle="nora", name="Nora Vale"),
+                   llm=LLMVerdict(handle="nora", account_type="founder",
+                                  is_founder=True, stage="stealth"))
+    assert display_name(stealth) == "Nora Vale's stealth startup"
+    other = Lead(account=Account(id="3", handle="vcpundit", name="VC Pundit"),
+                 llm=LLMVerdict(handle="vcpundit", account_type="other"))
+    assert display_name(other) == "VC Pundit"
+    bare = Lead(account=Account(id="4", handle="ghost"))
+    assert display_name(bare) == "@ghost"

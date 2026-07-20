@@ -9,8 +9,15 @@ Two agents:
   Thesis/Seeds objects (pure — callers persist the yaml).
 
 - **Research-brief agent** (`research_brief`): one scored lead in, a compact
-  diligence memo out (what they're building, evidence, thesis fit, risks,
+  pre-call brief out (what they're building, evidence, thesis fit, risks,
   questions for a first call). Cached by the caller in the pipeline table.
+
+- **Investment-memo agent** (`investment_memo`): one scored lead plus its
+  full evidence dossier (website text, recent tweets, quality rubric) in, a
+  multi-section internal investment memo out — overview, product &
+  differentiation, tech & architecture, competitive landscape, market
+  sizing, strategic capital & acquisition dynamics, recommendation. Stored
+  in the pipeline table; editable and PDF-exportable in the UI.
 
 - **Weight-tuning agent** (`suggest_weights`): triage statistics in
   (scout.insights), a reviewed-before-apply weight proposal out — the
@@ -112,6 +119,191 @@ Under 250 words. No preamble, no title. Section labels must be bold text
 STRATEGY_TIMEOUT_S = 120.0
 BRIEF_TIMEOUT_S = 60.0
 WEIGHTS_TIMEOUT_S = 60.0
+MEMO_TIMEOUT_S = 150.0
+
+# The memo's section contract — the agent, the offline fallback, and the UI
+# all follow it, so an edited or regenerated memo keeps the same skeleton.
+MEMO_SECTIONS = [
+    "Overview",
+    "Product & differentiation",
+    "Technology & architecture",
+    "Competitive landscape",
+    "Market sizing",
+    "Strategic capital & acquisition dynamics",
+    "Recommendation",
+]
+
+_MEMO_SYSTEM = """You are a venture analyst at {firm} writing an INTERNAL investment memo \
+on an early-stage startup sourced from X/Twitter. You get an evidence dossier: profile \
+data, scored signals, the classifier's verdict with a per-dimension quality rubric, \
+recent tweets, and text captured from the company's own website.
+
+Non-negotiable evidence rules:
+- Every FACT about the company must come from the dossier. Where the dossier is silent, \
+write "not in evidence" — never invent customers, revenue, funding, team size, or tech.
+- Your general market knowledge IS welcome for context: category dynamics, named likely \
+competitors, market-size arithmetic, plausible acquirers. Frame it as analyst judgment \
+("the category is crowded with X, Y", "a reasonable bottoms-up puts this at…"), clearly \
+distinct from observed evidence.
+- Be direct and specific. No filler, no hedging boilerplate. Write like a sharp associate \
+whose partner will read this in 3 minutes.
+
+Write EXACTLY these markdown sections, in order, each starting with the "## " heading:
+
+## Overview
+What the company is, one crisp paragraph: product, stage, founder(s) and their edge, \
+where it was found and why it surfaced. End with a one-line bull case and bear case.
+
+## Product & differentiation
+What the product actually does (cite the evidence source — website, pinned tweet, GitHub), \
+who the customer is, the wedge, and what is genuinely different vs. table stakes. Call out \
+anything that looks like positioning spin vs. demonstrated capability.
+
+## Technology & architecture
+What can be inferred about the technical approach from the evidence (site copy, GitHub, \
+founder background): stack hints, hard parts, whether the moat is engineering-deep or \
+thin-wrapper. Say "not in evidence" for what can't be known and list what a technical \
+diligence call must probe.
+
+## Competitive landscape
+Name the closest competitors and adjacent incumbents you know of in this category, how \
+this startup is positioned against them, and the axis on which it must win. Note where \
+the category's funding heat is.
+
+## Market sizing
+Order-of-magnitude TAM/SAM with your arithmetic shown (top-down AND a bottoms-up sketch: \
+buyers × plausible ACV, or users × monetization). State every assumption. Conclude \
+whether the market clears the bar for venture-scale outcomes.
+
+## Strategic capital & acquisition dynamics
+Two lenses: (1) who the natural acquirers are and WHY — which capability gap this fills, \
+whether it reads as a tuck-in (team/tech bolt-on) or a strategic platform buy, and \
+realistic exit sizing for each path; (2) whether strategic capital (corporate VCs, cloud \
+credits, design partners) would plausibly chase this. Be honest if tuck-in is the most \
+likely outcome — that caps fund-returner potential.
+
+## Recommendation
+A clear call: PURSUE / TRACK / PASS, with conviction (high/medium/low) and the 2-3 facts \
+that drive it. What single piece of new evidence would most change the call. Then 4-5 \
+sharp first-call diligence questions.
+
+Total length 700-1000 words. No preamble before the first section, no title line, no \
+closing sign-off. The fund's thesis and the firm's value-add levers are in the dossier — \
+judge fit against them where relevant."""
+
+
+def _memo_context(
+    lead: Lead,
+    thesis: Thesis,
+    site_text: str = "",
+    tweets: list | None = None,
+    notes: str = "",
+) -> str:
+    """The full evidence dossier for the memo agent: the brief context plus
+    website capture, recent tweets, and the investor's own notes."""
+    lines = [_brief_context(lead, thesis)]
+    verdict = lead.llm
+    if verdict and verdict.product_summary:
+        lines.append(f"Product summary (grounded): {verdict.product_summary}")
+    if verdict and verdict.grounding:
+        lines.append(f"Product evidence source: {verdict.grounding}")
+    if notes.strip():
+        lines.append(f"Investor notes: {notes.strip()}")
+    if tweets:
+        lines.append("\nRecent tweets (newest first):")
+        for tweet in tweets[:12]:
+            text = " ".join(tweet.text.split())[:280]
+            lines.append(f"- [{tweet.engagement} eng] {text}")
+    if site_text.strip():
+        lines.append(
+            "\nCompany website text (captured by scout — the primary product "
+            "evidence):\n" + site_text.strip()[:5000]
+        )
+    return "\n".join(lines)
+
+
+def _memo_template(lead: Lead, thesis: Thesis) -> str:
+    """Offline fallback memo — same section skeleton, data-only, honest about
+    every gap. Editable in the UI like the AI version."""
+    account = lead.account
+    verdict = lead.llm
+    what = ((verdict.product_summary if verdict else "")
+            or (verdict.one_line_summary if verdict else "")
+            or account.bio or "not in evidence")
+    hits = ", ".join(s.name for s in lead.signals if s.value > 0) or "none"
+    fit = (f"{verdict.thesis_fit:.0%} — {verdict.fit_reason or 'no reason recorded'}"
+           if verdict and verdict.thesis_fit is not None else "not scored")
+    quality = ""
+    if verdict and verdict.quality:
+        quality = "\n".join(
+            f"- {k}: {v:.0%}" + (f" — {verdict.quality_reasons[k]}"
+                                 if verdict.quality_reasons.get(k) else "")
+            for k, v in sorted(verdict.quality.items(), key=lambda kv: -kv[1])
+        )
+    stage = (verdict.stage if verdict else None) or "unknown"
+    sector = " / ".join(x for x in [(verdict.sector if verdict else ""),
+                                    (verdict.subsector if verdict else "")] if x) or "unknown"
+    return f"""## Overview
+{what}
+
+Stage: {stage} · Sector: {sector} · Score {lead.score:.0f}/100 · @{account.handle}, {account.followers:,} followers. Signals hit: {hits}.
+
+*(No ANTHROPIC_API_KEY configured — this is a data-only skeleton. Add a key and regenerate for the full analysis.)*
+
+## Product & differentiation
+Evidence on file: {what}
+Differentiation: not in evidence — probe on the first call.
+
+## Technology & architecture
+{'GitHub evidence: ' + account.github_repo if account.github_repo else 'Not in evidence.'}
+
+## Competitive landscape
+Not in evidence — requires analyst research.
+
+## Market sizing
+Not in evidence — requires analyst research.
+
+## Strategic capital & acquisition dynamics
+Not in evidence — requires analyst judgment on acquirer fit and tuck-in vs. platform potential.
+
+## Recommendation
+TRACK (low conviction — automated skeleton).
+
+Thesis fit: {fit}
+
+Quality rubric (evidence-backed dimensions):
+{quality or '- none scored'}
+
+First-call questions: What are you building and why now? What's the unique advantage? Who is the first customer? What would make this a venture-scale outcome?"""
+
+
+def investment_memo(
+    lead: Lead,
+    thesis: Thesis,
+    settings: Settings,
+    *,
+    site_text: str = "",
+    tweets: list | None = None,
+    notes: str = "",
+) -> tuple[str, bool]:
+    """Return (markdown_memo, is_ai) — the full multi-section investment memo.
+
+    Falls back to the data-only skeleton when no Anthropic key is configured
+    or the API call fails; raises nothing (the UI shows what it gets)."""
+    if not settings.anthropic_api_key:
+        return _memo_template(lead, thesis), False
+    try:
+        client = _client(settings, MEMO_TIMEOUT_S)
+        memo = _call(
+            client,
+            settings.claude_model,
+            _MEMO_SYSTEM.format(firm=thesis.firm_name or "the fund"),
+            _memo_context(lead, thesis, site_text=site_text, tweets=tweets, notes=notes),
+            max_tokens=4000,
+        )
+        return memo, True
+    except anthropic.APIError:
+        return _memo_template(lead, thesis), False
 
 
 def _client(settings: Settings, timeout: float) -> anthropic.Anthropic:

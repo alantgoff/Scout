@@ -326,3 +326,44 @@ def test_site_cache_failures_expire_after_one_day(tmp_path: Path) -> None:
     cached = store.cached_site("https://down.io/", ttl_days=7)
     assert cached is not None
     assert not cached.usable
+
+
+def test_score_override_roundtrip_and_clear(tmp_path: Path) -> None:
+    store = Store(tmp_path / "t.db")
+    store.set_override("Ada", quality={"traction": 0.9}, fit=0.5, note="saw the demo")
+    row = store.all_overrides()["ada"]  # handle lowercased
+    assert row["quality"] == {"traction": 0.9}
+    assert row["fit"] == 0.5
+    assert row["score"] is None
+    assert row["note"] == "saw the demo"
+    # Replacing with a pinned score only
+    store.set_override("ada", score=88.0)
+    row = store.all_overrides()["ada"]
+    assert row["score"] == 88.0 and row["quality"] == {} and row["fit"] is None
+    store.clear_override("@Ada")
+    assert store.all_overrides() == {}
+
+
+def test_set_override_with_nothing_clears_the_row(tmp_path: Path) -> None:
+    store = Store(tmp_path / "t.db")
+    store.set_override("ada", score=50.0)
+    store.set_override("ada")  # everything None/empty -> row removed
+    assert store.all_overrides() == {}
+    store.clear_override("never_existed")  # no-op, no table -> must not raise
+
+
+def test_pipeline_brief_edit_stamps(tmp_path: Path) -> None:
+    store = Store(tmp_path / "t.db")
+    store.set_pipeline("ada", brief="v1 generated")
+    row = store.get_pipeline("ada")
+    assert row["brief_at"] and row.get("brief_edited_at") is None
+    generated_at = row["brief_at"]
+    store.set_pipeline("ada", brief="v2 hand-edited", brief_edited=True)
+    row = store.get_pipeline("ada")
+    assert row["brief"] == "v2 hand-edited"
+    assert row["brief_at"] == generated_at  # generation stamp preserved
+    assert row["brief_edited_at"]
+    # A regeneration resets the edit stamp.
+    store.set_pipeline("ada", brief="v3 regenerated")
+    row = store.get_pipeline("ada")
+    assert row["brief_edited_at"] is None

@@ -16,6 +16,7 @@ dependencies = [
     "pyyaml>=6.0",
     "streamlit>=1.59.2",
     "beautifulsoup4>=4.12",
+    "markdown-pdf>=1.7",
 ]
 
 [project.scripts]

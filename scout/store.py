@@ -538,9 +538,15 @@ class Store:
         outreach: str | None = None,
         channel: str | None = None,
         brief: str | None = None,
+        brief_edited: bool = False,
     ) -> None:
         """Upsert deal-flow state for one lead (read-merge-write so partial
-        updates never clobber the other fields)."""
+        updates never clobber the other fields).
+
+        `brief` holds the investment memo markdown. A generation
+        (brief_edited=False) stamps brief_at and clears brief_edited_at; a
+        manual edit (brief_edited=True) stamps brief_edited_at and keeps the
+        original generation time."""
         handle = handle.lstrip("@").lower()
         row = {"handle": handle}
         if self.db["pipeline"].exists():
@@ -559,7 +565,11 @@ class Store:
             row["channel"] = channel
         if brief is not None:
             row["brief"] = brief
-            row["brief_at"] = now
+            if brief_edited:
+                row["brief_edited_at"] = now
+            else:
+                row["brief_at"] = now
+                row["brief_edited_at"] = None
         row["updated_at"] = datetime.now(timezone.utc).isoformat()
         self.db["pipeline"].upsert(row, pk="handle", alter=True)
 
@@ -583,6 +593,68 @@ class Store:
             status = row.get("status") or "new"
             counts[status] = counts.get(status, 0) + 1
         return counts
+
+    # --------------------------------------------------------- score overrides
+
+    def set_override(
+        self,
+        handle: str,
+        *,
+        quality: dict[str, float] | None = None,
+        fit: float | None = None,
+        score: float | None = None,
+        note: str = "",
+    ) -> None:
+        """Persist the investor's manual scoring for one lead.
+
+        `quality` maps dimension key → 0..1 (only the dims the investor
+        actually adjusted); `fit` overrides thesis_fit (0..1); `score` pins
+        the FINAL score outright (0..100). Passing all three as None/empty
+        clears the row — an override that overrides nothing shouldn't linger.
+        Values replace the whole row (the UI form always submits its full
+        current state)."""
+        handle = handle.lstrip("@").lower()
+        if not quality and fit is None and score is None:
+            self.clear_override(handle)
+            return
+        self.db["score_overrides"].upsert(
+            {
+                "handle": handle,
+                "quality_json": json.dumps(quality or {}),
+                "fit": fit,
+                "score": score,
+                "note": note,
+                "updated_at": datetime.now(timezone.utc).isoformat(),
+            },
+            pk="handle",
+            alter=True,
+            # Explicit REAL affinity: a None on the first write would
+            # otherwise type these TEXT and hand back "88.0" strings.
+            columns={"fit": float, "score": float},
+        )
+
+    def clear_override(self, handle: str) -> None:
+        handle = handle.lstrip("@").lower()
+        if self.db["score_overrides"].exists():
+            self.db.execute("delete from score_overrides where handle = ?", [handle])
+            self.db.conn.commit()
+
+    def all_overrides(self) -> dict[str, dict]:
+        """All manual-score rows keyed by lowercased handle; quality_json is
+        decoded into `quality` for callers."""
+        if not self.db["score_overrides"].exists():
+            return {}
+        out: dict[str, dict] = {}
+        for r in self.db["score_overrides"].rows:
+            row = dict(r)
+            row["quality"] = json.loads(row.get("quality_json") or "{}")
+            # Defensive float coercion — rows written before the explicit
+            # column typing may carry TEXT values.
+            for key in ("fit", "score"):
+                row[key] = (float(row[key])
+                            if row.get(key) not in (None, "") else None)
+            out[row["handle"]] = row
+        return out
 
     # ------------------------------------------------------------- scan status
 
