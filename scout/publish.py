@@ -18,9 +18,11 @@ import zlib
 from datetime import datetime, timezone
 from pathlib import Path
 
+from scout import rubric
 from scout.companies import group_by_company, startup_identity
 from scout.config import Thesis
 from scout.models import Lead, LedgerEntry
+from scout.score import scorecard_score
 from scout.store import Store
 
 LAUNCHED = {"launched", "scaling"}
@@ -54,11 +56,17 @@ def _is_prelaunch(lead: Lead) -> bool:
 
 
 def _chips(lead: Lead, entry: LedgerEntry | None, status: str | None,
-           firm: str = "") -> str:
+           firm: str = "", thesis: Thesis | None = None) -> str:
     verdict = lead.llm
     chips: list[tuple[str, str]] = []
     if verdict and verdict.thesis_fit is not None:
         chips.append((f"Fit {verdict.thesis_fit:.0%}", "accent"))
+    if thesis is not None:
+        scorecard = scorecard_score(verdict, thesis)
+        if scorecard is not None:
+            result = scorecard[0]
+            chips.append((f"{rubric.BAND_LABELS[result.band]} {result.total:.0f}",
+                          "accent" if result.band == "strong" else ""))
     if verdict and verdict.value_add_fit is not None:
         chips.append((f"{firm or 'Firm'} lift {verdict.value_add_fit:.0%}", "accent"))
     if status:
@@ -82,7 +90,8 @@ def _chips(lead: Lead, entry: LedgerEntry | None, status: str | None,
 
 
 def _card(primary: Lead, entry: LedgerEntry | None, secondaries: list[Lead],
-          pipeline_row: dict, startup: bool, firm: str = "") -> str:
+          pipeline_row: dict, startup: bool, firm: str = "",
+          thesis: Thesis | None = None) -> str:
     account, verdict = primary.account, primary.llm
     # Startup-first titling, same system as the app: real company name, or the
     # synthesized stealth identity tied to the founder.
@@ -114,7 +123,7 @@ def _card(primary: Lead, entry: LedgerEntry | None, secondaries: list[Lead],
     <div class="grow">
       <div class="name">{title_html} <span class="sub">{_e(subtitle)}</span></div>
       <div class="summary">{_e(summary)}</div>
-      {_chips(primary, entry, status if status and status != "new" else None, firm)}
+      {_chips(primary, entry, status if status and status != "new" else None, firm, thesis)}
       {f'<div class="why">{_e(why)}</div>' if why else ''}
       {also}
       {brief_html}
@@ -141,11 +150,13 @@ def build_digest(store: Store, thesis: Thesis, out_dir: Path) -> Path:
         return pipeline.get(lead.account.handle.lower(), {})
 
     startup_cards = "\n".join(
-        _card(p, e, secs, row_for(p), startup=True, firm=thesis.firm_name)
+        _card(p, e, secs, row_for(p), startup=True, firm=thesis.firm_name,
+              thesis=thesis)
         for p, e, secs in startups
     )
     watch_cards = "\n".join(
-        _card(x, e, [], row_for(x), startup=False, firm=thesis.firm_name)
+        _card(x, e, [], row_for(x), startup=False, firm=thesis.firm_name,
+              thesis=thesis)
         for x, e in watch
     )
     updated = datetime.now(timezone.utc).strftime("%b %d, %H:%M UTC")

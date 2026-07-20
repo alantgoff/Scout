@@ -728,26 +728,29 @@ class Store:
         handle: str,
         *,
         quality: dict[str, float] | None = None,
+        sections: dict[str, float] | None = None,
         fit: float | None = None,
         score: float | None = None,
         note: str = "",
     ) -> None:
         """Persist the investor's manual scoring for one lead.
 
-        `quality` maps dimension key → 0..1 (only the dims the investor
-        actually adjusted); `fit` overrides thesis_fit (0..1); `score` pins
-        the FINAL score outright (0..100). Passing all three as None/empty
-        clears the row — an override that overrides nothing shouldn't linger.
-        Values replace the whole row (the UI form always submits its full
-        current state)."""
+        `sections` maps scorecard section key → 0..100 (only the sections
+        the investor actually adjusted); `quality` is the legacy dim → 0..1
+        shape, applied only to pre-scorecard verdicts; `fit` overrides
+        thesis_fit (0..1); `score` pins the FINAL score outright (0..100).
+        Passing everything as None/empty clears the row — an override that
+        overrides nothing shouldn't linger. Values replace the whole row
+        (the UI form always submits its full current state)."""
         handle = handle.lstrip("@").lower()
-        if not quality and fit is None and score is None:
+        if not quality and not sections and fit is None and score is None:
             self.clear_override(handle)
             return
         self.db["score_overrides"].upsert(
             {
                 "handle": handle,
                 "quality_json": json.dumps(quality or {}),
+                "sections_json": json.dumps(sections or {}),
                 "fit": fit,
                 "score": score,
                 "note": note,
@@ -767,14 +770,15 @@ class Store:
             self.db.conn.commit()
 
     def all_overrides(self) -> dict[str, dict]:
-        """All manual-score rows keyed by lowercased handle; quality_json is
-        decoded into `quality` for callers."""
+        """All manual-score rows keyed by lowercased handle; quality_json /
+        sections_json are decoded into `quality` / `sections` for callers."""
         if not self.db["score_overrides"].exists():
             return {}
         out: dict[str, dict] = {}
         for r in self.db["score_overrides"].rows:
             row = dict(r)
             row["quality"] = json.loads(row.get("quality_json") or "{}")
+            row["sections"] = json.loads(row.get("sections_json") or "{}")
             # Defensive float coercion — rows written before the explicit
             # column typing may carry TEXT values.
             for key in ("fit", "score"):

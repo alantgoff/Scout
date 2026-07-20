@@ -24,6 +24,11 @@ CSV_COLUMNS = [
     "score",
     "customer_type",
     "quality_score",
+    "scorecard_rubric",
+    "scorecard_band",
+    "scorecard_sections",
+    "scorecard",
+    "scorecard_reasons",
     "quality",
     "quality_reasons",
     "product_summary",
@@ -61,9 +66,11 @@ def _oneline(text: str, width: int = 140) -> str:
 
 
 def write_csv(leads: list[Lead], out_dir: Path, thesis: Thesis | None = None) -> Path:
-    """`thesis` supplies quality_weights for the deterministic quality_score
-    column; None (legacy callers) leaves the column blank."""
-    from scout.score import quality_score  # local import — score imports models only
+    """`thesis` supplies the rubric weights for the deterministic
+    quality_score / scorecard columns; None (legacy callers) leaves them
+    blank."""
+    # Local import — score imports models only.
+    from scout.score import company_quality, scorecard_score
 
     out_dir.mkdir(parents=True, exist_ok=True)
     path = out_dir / f"leads_{_stamp()}.csv"
@@ -72,7 +79,9 @@ def write_csv(leads: list[Lead], out_dir: Path, thesis: Thesis | None = None) ->
         writer.writeheader()
         for lead in leads:
             llm = lead.llm
-            q_score = quality_score(llm, thesis) if thesis is not None else None
+            q_score = company_quality(llm, thesis) if thesis is not None else None
+            scorecard = scorecard_score(llm, thesis) if thesis is not None else None
+            sc_result, sc_sections = scorecard if scorecard is not None else (None, [])
             identity = startup_identity(lead)
             writer.writerow(
                 {
@@ -86,6 +95,22 @@ def write_csv(leads: list[Lead], out_dir: Path, thesis: Thesis | None = None) ->
                     "score": lead.score,
                     "customer_type": (llm.customer_type or "") if llm else "",
                     "quality_score": f"{q_score:.0f}" if q_score is not None else "",
+                    "scorecard_rubric": sc_result.rubric_key if sc_result else "",
+                    "scorecard_band": sc_result.band if sc_result else "",
+                    "scorecard_sections": ";".join(
+                        f"{s.key}={s.score:.0f}"
+                        for s in sc_sections if s.score is not None
+                    ),
+                    "scorecard": (
+                        ";".join(f"{k}={v:.0f}" for k, v in
+                                 sorted(llm.scorecard.items(), key=lambda kv: -kv[1]))
+                        if llm else ""
+                    ),
+                    "scorecard_reasons": (
+                        " | ".join(f"{k}: {r}" for k, r in
+                                   sorted(llm.scorecard_reasons.items()))
+                        if llm else ""
+                    ),
                     "quality": (
                         ";".join(f"{k}={v:.2f}" for k, v in
                                  sorted(llm.quality.items(), key=lambda kv: -kv[1]))

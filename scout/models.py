@@ -155,6 +155,19 @@ class LLMVerdict(BaseModel):
     customer_type: str | None = None
     quality: dict[str, float] = Field(default_factory=dict)
     quality_reasons: dict[str, str] = Field(default_factory=dict)  # dim → ≤15-word citation
+    # v8 — readiness scorecard (scout.rubric). customer_type routes the
+    # rubric (b2c → consumer; b2b/b2b2c/mixed/None → enterprise). scorecard
+    # holds criterion key → 1..3 for ONLY the criteria the evidence supports
+    # (omit, never guess); scorecard_reasons a ≤12-word citation per scored
+    # criterion. Section/total/band math is computed OUR side
+    # (score.scorecard_score). quality/quality_reasons above are the legacy
+    # v7 flat rubric — old cached verdicts still validate; new verdicts
+    # leave them empty.
+    scorecard: dict[str, float] = Field(default_factory=dict)
+    scorecard_reasons: dict[str, str] = Field(default_factory=dict)
+    # Section-level manual overrides (section key → 0..100) — written only
+    # by score.apply_override at load time, never by the classifier.
+    scorecard_manual: dict[str, float] = Field(default_factory=dict)
 
     @field_validator("customer_type", mode="before")
     @classmethod

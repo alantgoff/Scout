@@ -6,7 +6,14 @@ import pytest
 
 from scout.config import SignalParams, Thesis
 from scout.models import Account, Lead, LLMVerdict, Signal
-from scout.score import quality_score, score_breakdown, score_leads
+from scout.score import (
+    apply_override,
+    company_quality,
+    quality_score,
+    score_breakdown,
+    score_leads,
+    scorecard_score,
+)
 
 # Spec §3 defaults: total weight 100, so contributions read as points.
 DEFAULT_WEIGHTS: dict[str, float] = {
@@ -455,3 +462,207 @@ def test_score_breakdown_manual_step_is_final() -> None:
     assert steps[-1] == ("manual score override (set by you)", 42.0)
     # Without the argument the step is absent.
     assert "manual" not in score_breakdown(lead, thesis)[-1][0]
+
+
+# --- the readiness scorecard ----------------------------------------------------
+
+
+def make_scorecard_verdict(**overrides) -> LLMVerdict:
+    base = dict(
+        handle="sc", account_type="founder", is_founder=True, stage="launched",
+        grounding="website", confidence=1.0, customer_type="b2b",
+        # One criterion in each B2B section, so every section is present.
+        scorecard={
+            "prev_founder_experience": 3, "problem_urgency": 2,
+            "tech_moat_ip": 3, "product_maturity": 1, "commercial_traction": 2,
+        },
+        scorecard_reasons={"prev_founder_experience": "sold DevCo"},
+    )
+    base.update(overrides)
+    return LLMVerdict(**base)
+
+
+def test_scorecard_single_criterion_maps_1_to_3_onto_0_to_100() -> None:
+    thesis = make_thesis()
+    for value, expected in [(1, 0.0), (2, 50.0), (3, 100.0)]:
+        verdict = make_scorecard_verdict(
+            scorecard={"prev_founder_experience": value})
+        result, sections = scorecard_score(verdict, thesis)
+        # Only one section present, so the total equals that section's score.
+        assert result.total == pytest.approx(expected)
+        founders = next(s for s in sections if s.key == "founders_captable")
+        assert founders.score == pytest.approx(expected)
+        assert founders.n_present == 1
+
+
+def test_scorecard_all_threes_is_100_all_ones_is_0() -> None:
+    from scout import rubric
+
+    thesis = make_thesis()
+    all_keys = [c.key for c in rubric.B2B_RUBRIC.criteria]
+    hi = make_scorecard_verdict(scorecard={k: 3 for k in all_keys})
+    lo = make_scorecard_verdict(scorecard={k: 1 for k in all_keys})
+    assert scorecard_score(hi, thesis)[0].total == pytest.approx(100.0)
+    assert scorecard_score(lo, thesis)[0].total == pytest.approx(0.0)
+
+
+def test_scorecard_within_section_renormalizes_over_present_criteria() -> None:
+    thesis = make_thesis()
+    # founders: prev_founder_experience (w .20, score 3) + cap_table_risk
+    # (w .10, score 1). avg = (3×.2 + 1×.1)/(.3) = 0.7/0.3 ≈ 2.333 → 66.7
+    verdict = make_scorecard_verdict(
+        scorecard={"prev_founder_experience": 3, "cap_table_risk": 1})
+    _result, sections = scorecard_score(verdict, thesis)
+    founders = next(s for s in sections if s.key == "founders_captable")
+    assert founders.score == pytest.approx(100 * ((0.7 / 0.3) - 1) / 2)
+    assert founders.n_present == 2 and founders.n_total == 6
+
+
+def test_scorecard_renormalizes_over_present_sections() -> None:
+    thesis = make_thesis()
+    # Only two sections present: founders (weight 18, score 100) and market
+    # (weight 23, score 50). total = (18×100 + 23×50)/(41).
+    verdict = make_scorecard_verdict(
+        scorecard={"prev_founder_experience": 3, "problem_urgency": 2})
+    result, _sections = scorecard_score(verdict, thesis)
+    assert result.total == pytest.approx((18 * 100 + 23 * 50) / 41)
+    assert result.n_present_sections == 2
+    assert result.n_sections == 5
+
+
+def test_scorecard_thesis_section_weight_override() -> None:
+    thesis = make_thesis()
+    thesis.scorecard_weights["b2b"]["market"] = 0.0  # zero out market
+    verdict = make_scorecard_verdict(
+        scorecard={"prev_founder_experience": 3, "problem_urgency": 1})
+    result, _ = scorecard_score(verdict, thesis)
+    # market's weight is 0 → only founders (score 100) counts.
+    assert result.total == pytest.approx(100.0)
+    assert result.n_present_sections == 1
+
+
+def test_scorecard_ignores_unknown_and_cross_rubric_keys() -> None:
+    thesis = make_thesis()
+    verdict = make_scorecard_verdict(
+        customer_type="b2b",
+        scorecard={"prev_founder_experience": 3,
+                   "made_up_key": 3,        # not in any rubric
+                   "retention_mechanics": 1})  # a B2C-only key
+    result, sections = scorecard_score(verdict, thesis)
+    founders = next(s for s in sections if s.key == "founders_captable")
+    assert founders.n_present == 1  # only prev_founder_experience counted
+    assert result.total == pytest.approx(100.0)
+
+
+def test_scorecard_routing_b2c_uses_consumer_rubric() -> None:
+    thesis = make_thesis()
+    verdict = make_scorecard_verdict(
+        customer_type="b2c",
+        scorecard={"user_growth": 3, "retention_mechanics": 3})
+    result, _ = scorecard_score(verdict, thesis)
+    assert result.rubric_key == "b2c"
+    assert result.rubric_label == "Consumer readiness"
+
+
+def test_scorecard_none_customer_type_routes_to_b2b() -> None:
+    thesis = make_thesis()
+    verdict = make_scorecard_verdict(
+        customer_type=None, scorecard={"prev_founder_experience": 3})
+    result, _ = scorecard_score(verdict, thesis)
+    assert result.rubric_key == "b2b"
+
+
+def test_scorecard_band_assignment() -> None:
+    thesis = make_thesis()
+    # all-3 founders → 100 → strong
+    strong = make_scorecard_verdict(scorecard={"prev_founder_experience": 3})
+    assert scorecard_score(strong, thesis)[0].band == "strong"
+    # avg 2 → 50 → weak
+    weak = make_scorecard_verdict(scorecard={"prev_founder_experience": 2})
+    assert scorecard_score(weak, thesis)[0].band == "weak"
+
+
+def test_scorecard_none_for_empty_and_legacy_verdicts() -> None:
+    thesis = make_thesis()
+    assert scorecard_score(None, thesis) is None
+    assert scorecard_score(make_scorecard_verdict(scorecard={}), thesis) is None
+    legacy = make_quality_verdict()  # flat quality dims, no scorecard
+    assert scorecard_score(legacy, thesis) is None
+
+
+def test_company_quality_dispatch_scorecard_beats_legacy() -> None:
+    thesis = make_thesis()
+    # A verdict carrying BOTH shapes: scorecard wins.
+    verdict = make_scorecard_verdict(
+        scorecard={"prev_founder_experience": 3},   # → 100
+        quality={"team": 0.2}, quality_reasons={"team": "x"})
+    assert company_quality(verdict, thesis) == pytest.approx(100.0)
+    # Legacy-only verdict falls back to quality_score.
+    legacy = make_quality_verdict()
+    assert company_quality(legacy, thesis) == pytest.approx(quality_score(legacy, thesis))
+    assert company_quality(None, thesis) is None
+
+
+def test_blend_uses_scorecard_as_quality_component() -> None:
+    thesis = make_thesis(weights={"bio_intent": 100.0})
+    lead = make_lead(
+        "a", signals=[Signal(name="bio_intent", value=1.0)],  # S = 100
+        llm=make_scorecard_verdict(
+            scorecard={"prev_founder_experience": 3},  # Q = 100
+            thesis_fit=0.5),  # F = 50
+    )
+    # (0.45×100 + 0.35×50 + 0.20×100) / 1.0 = 45 + 17.5 + 20 = 82.5
+    assert final(lead, thesis) == pytest.approx(82.5)
+
+
+def test_score_breakdown_shows_scorecard_step() -> None:
+    thesis = make_thesis(weights={"bio_intent": 100.0})
+    lead = make_lead(
+        "a", signals=[Signal(name="bio_intent", value=1.0)],
+        llm=make_scorecard_verdict(scorecard={"prev_founder_experience": 3}),
+    )
+    descs = [d for d, _ in score_breakdown(lead, thesis)]
+    assert any("scorecard:" in d and "Enterprise readiness" in d for d in descs)
+    assert not any("dims evidence-backed" in d for d in descs)
+
+
+def test_apply_override_sections_recompute_and_flag_manual() -> None:
+    thesis = make_thesis(weights={"bio_intent": 100.0})
+    lead = make_lead(
+        "ada", signals=[Signal(name="bio_intent", value=1.0)],
+        llm=make_scorecard_verdict(scorecard={"prev_founder_experience": 1}),  # Q≈0
+    )
+    base = score_breakdown(lead, thesis)[-1][1]
+    assert apply_override(lead, {"sections": {"founders_captable": 90}}, thesis) is True
+    assert lead.llm.scorecard_manual["founders_captable"] == 90.0
+    _result, sections = scorecard_score(lead.llm, thesis)
+    founders = next(s for s in sections if s.key == "founders_captable")
+    assert founders.manual is True and founders.score == pytest.approx(90.0)
+    assert lead.score > base
+
+
+def test_apply_override_section_can_add_absent_section() -> None:
+    thesis = make_thesis(weights={"bio_intent": 100.0})
+    # A verdict with only founders scored; market has no evidence.
+    lead = make_lead(
+        "ada", signals=[Signal(name="bio_intent", value=1.0)],
+        llm=make_scorecard_verdict(scorecard={"prev_founder_experience": 2}),
+    )
+    apply_override(lead, {"sections": {"market": 80}}, thesis)
+    _result, sections = scorecard_score(lead.llm, thesis)
+    market = next(s for s in sections if s.key == "market")
+    assert market.manual is True and market.score == pytest.approx(80.0)
+
+
+def test_apply_override_legacy_quality_inert_on_scorecard_verdict() -> None:
+    thesis = make_thesis(weights={"bio_intent": 100.0})
+    verdict = make_scorecard_verdict(scorecard={"prev_founder_experience": 3})
+    lead = make_lead("ada", signals=[Signal(name="bio_intent", value=1.0)],
+                     llm=verdict)
+    q_before = company_quality(verdict, thesis)
+    # Legacy dim override does NOT touch a scorecard verdict's quality…
+    apply_override(lead, {"quality": {"team": 0.1}}, thesis)
+    assert company_quality(lead.llm, thesis) == pytest.approx(q_before)
+    # …but a section override does.
+    apply_override(lead, {"sections": {"founders_captable": 10}}, thesis)
+    assert company_quality(lead.llm, thesis) < q_before

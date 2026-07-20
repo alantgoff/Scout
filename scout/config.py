@@ -13,6 +13,8 @@ import yaml
 from pydantic import BaseModel, Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+from scout import rubric
+
 # The budget ledger + cache DB lives in the user's home dir so the $25 spend
 # guard is enforced no matter which directory scout is run from. Override
 # with DB_PATH in .env / the environment.
@@ -59,9 +61,10 @@ CURATED_USE_CASES = [
 ]
 CURATED_PRIORITIES = ["High", "Medium", "Low"]
 
-# The fixed quality-rubric dimensions: key → help text (shown on the UI
-# sliders). The keys are the contract between the classifier prompt,
-# LLMVerdict.quality, and thesis.quality_weights.
+# LEGACY (v7) flat quality-rubric dimensions — superseded by the scorecard
+# rubrics in scout.rubric. Kept so pre-scorecard cached verdicts (which carry
+# these keys in LLMVerdict.quality) still render and score via the legacy
+# path in score.quality_score.
 QUALITY_DIMENSIONS: dict[str, str] = {
     "team": "Founder/team strength as builders of THIS company — exits, "
             "senior domain experience, notable shipped work",
@@ -202,11 +205,19 @@ class Thesis(BaseModel):
     sectors: list[str] = Field(default_factory=list)
     disqualifiers: list[str] = Field(default_factory=list)
     weights: dict[str, float] = Field(default_factory=dict)
-    # Per-dimension weights behind the deterministic quality_score
-    # (score.quality_score) — relative, renormalized over the dims a verdict
-    # actually evidences. UI-editable in Signals & scoring.
+    # LEGACY (v7) per-dimension weights behind score.quality_score — still
+    # applied to pre-scorecard cached verdicts; new verdicts score via
+    # scorecard_weights below.
     quality_weights: dict[str, float] = Field(
         default_factory=lambda: dict(DEFAULT_QUALITY_WEIGHTS)
+    )
+    # Section weights behind the scorecard quality component
+    # (score.scorecard_score) — {"b2b": {section: weight}, "b2c": {...}},
+    # relative, renormalized over the sections a verdict actually evidences.
+    # UI-editable in Signals & scoring; criterion sub-weights are code-owned
+    # in scout.rubric.
+    scorecard_weights: dict[str, dict[str, float]] = Field(
+        default_factory=rubric.default_section_weights
     )
     launch_phrases: list[str] = Field(
         default_factory=lambda: list(DEFAULT_LAUNCH_PHRASES)

@@ -86,15 +86,28 @@ from scout.dbfields import (
     editor_changes,
     slugify_key,
 )
+
+# Pure helpers live in scout.dbfields (importable without executing this
+# Streamlit script) — aliased to the underscore names used throughout. Bound
+# here at import time so the page-rendering blocks below (Longlist / Shortlist
+# / Memos, which call _lead_card → _attr_display) see them regardless of which
+# nav page runs.
+_slugify_key = slugify_key
+_editor_changes = editor_changes
+_attr_display = attr_display
+_DB_COMPUTED_LABELS = DB_COMPUTED_LABELS
 from scout.export import memo_pdf_bytes, pipeline_rows, write_pipeline_csv
 from scout.insights import stats_prompt, triage_stats
 from scout.models import Lead, LedgerEntry, LLMVerdict
 from scout.outreach import CHANNELS, draft_outreach
+from scout import rubric as rubric_mod
 from scout.score import (
     apply_override,
+    company_quality,
     quality_score,
     score_breakdown,
     score_components,
+    scorecard_score,
 )
 from scout.signals.llm import DEFAULT_PROMPT_TEMPLATE
 from scout.store import Store
@@ -139,6 +152,8 @@ QUALITY_DIM_LABEL = {
     "team": "Team", "tech_product": "Tech & product", "market": "Market",
     "defensibility": "Defensibility", "traction": "Traction", "investors": "Investors",
 }
+# Scorecard interpretation bands (rubric.band_for over the 0-100 total).
+BAND_LABELS = rubric_mod.BAND_LABELS
 
 GROUNDED_SOURCES = {"website", "pinned_tweet", "tweets", "github"}
 
@@ -1016,17 +1031,20 @@ def _override_editor(lead: Lead, ov: dict, key_ns: str) -> None:
     handle_key = lead.account.handle.lower()
     verdict = lead.llm
     st.markdown(
-        '<div class="subtle">Your judgment on top of Claude\'s: adjusted dimensions '
+        '<div class="subtle">Your judgment on top of Claude\'s: adjusted sections '
         're-enter the same score math (bars, chips, and steps update everywhere); '
         'pinning the final score wins outright. Saved per startup, kept across '
         'runs. Use <b>Clear</b> to return to Claude\'s scoring.</div>',
         unsafe_allow_html=True,
     )
     existing_q = {k: float(v) for k, v in (ov.get("quality") or {}).items()}
+    existing_s = {k: float(v) for k, v in (ov.get("sections") or {}).items()}
     new_quality: dict[str, float] = {}
+    new_sections: dict[str, float] = {}
     fit_out: float | None = None
-    if verdict is not None:
-        st.markdown("**Quality dimensions**")
+    if verdict is not None and verdict.quality and not verdict.scorecard:
+        # LEGACY verdict (pre-scorecard cache): the flat v7 dim sliders.
+        st.markdown("**Quality dimensions** (legacy rubric)")
         for dim, weight in thesis.quality_weights.items():
             if weight <= 0:
                 continue
@@ -1040,6 +1058,33 @@ def _override_editor(lead: Lead, ov: dict, key_ns: str) -> None:
             )
             if dim in existing_q or val != default:
                 new_quality[dim] = val / 100.0
+    elif verdict is not None:
+        # Scorecard verdict (or no rubric at all): section-level 0–100
+        # sliders. An adjusted section replaces its computed score inside
+        # the rollup — and can add a section that had no evidence.
+        rb = rubric_mod.rubric_for(verdict.customer_type)
+        sc = scorecard_score(verdict, thesis)
+        computed = {s.key: s for s in (sc[1] if sc is not None else [])}
+        st.markdown(f"**Scorecard sections — {rb.label}**")
+        if existing_q:
+            st.markdown(
+                '<div class="subtle">Adjustments saved on the old flat rubric no '
+                'longer apply to this verdict — <b>Clear</b> removes them.</div>',
+                unsafe_allow_html=True,
+            )
+        for section in rb.sections:
+            s = computed.get(section.key)
+            score_now = s.score if s is not None else None
+            default = int(round(score_now)) if score_now is not None else 0
+            suffix = "" if score_now is not None else " (no evidence — was excluded)"
+            val = st.slider(
+                f"{section.label}{suffix}", 0, 100, default,
+                key=f"{key_ns}_ovsec_{section.key}_{handle_key}",
+                help="Criteria: " + ", ".join(c.label for c in section.criteria),
+            )
+            if section.key in existing_s or val != default:
+                new_sections[section.key] = float(val)
+    if verdict is not None:
         st.markdown("**Thesis fit**")
         fit_default = int(round((verdict.thesis_fit
                                  if verdict.thesis_fit is not None else 0.0) * 100))
@@ -1076,6 +1121,7 @@ def _override_editor(lead: Lead, ov: dict, key_ns: str) -> None:
     if c1.button("Save adjustments", type="primary",
                  key=f"{key_ns}_ovsave_{handle_key}", use_container_width=True):
         store.set_override(handle_key, quality=new_quality or None,
+                           sections=new_sections or None,
                            fit=fit_out, score=pin_val, note=note)
         st.session_state["toast"] = f"Scoring adjusted — {display_name(lead)}"
         st.rerun()
@@ -1109,6 +1155,9 @@ def _lead_card(
     handle_key = account.handle.lower()
     status = _status_of(lead)
     secondary = secondary or []
+    # One components pass per card — the face caption, band chip, and the
+    # Details expander all read from it.
+    comps = score_components(lead, thesis)
 
     chips: list[tuple[str, str]] = []
     if verdict and verdict.thesis_fit is not None:
@@ -1118,6 +1167,10 @@ def _lead_card(
     if verdict and verdict.customer_type:
         chips.append((CUSTOMER_TYPE_LABEL.get(verdict.customer_type,
                                               verdict.customer_type), ""))
+    if comps["scorecard"] is not None:
+        band = comps["scorecard"][0].band
+        chips.append((f"{BAND_LABELS[band]} {comps['scorecard'][0].total:.0f}",
+                      "accent" if band == "strong" else ""))
     if verdict and verdict.value_add_fit is not None:
         chips.append((f"{thesis.firm_name or 'Firm'} lift {verdict.value_add_fit:.0%}", "accent"))
     if status != "new":
@@ -1218,7 +1271,6 @@ def _lead_card(
             # is made of (present components only).
             comp_html = ""
             if verdict is not None:
-                comps = score_components(lead, thesis)
                 bits = [f"{tag} {value:.0f}"
                         for tag, value in (("Q", comps["quality"]),
                                            ("F", comps["fit"]),
@@ -1284,7 +1336,6 @@ def _lead_card(
         with st.expander("Details", expanded=details_open):
             ov = overrides.get(handle_key) or {}
             params = thesis.signal_params
-            comps = score_components(lead, thesis)
             if verdict and verdict.why_interesting:
                 st.markdown(f'<div class="lead-summary">{_e(verdict.why_interesting)}</div>',
                             unsafe_allow_html=True)
@@ -1299,11 +1350,78 @@ def _lead_card(
                     'revisit them in <b>Adjust scoring</b>.</div>',
                     unsafe_allow_html=True,
                 )
-            # ---- Company quality (Q): the full rubric, dimension by
-            # dimension — hover a name for what it measures and its weight;
-            # the note is the evidence each score rests on. Dims Claude
-            # could NOT evidence show as excluded, never guessed.
-            if verdict is not None:
+            # ---- Company quality (Q): the readiness scorecard, section by
+            # section with the 1–3 criteria under each — hover a name for
+            # what it measures; the note is the evidence each score rests
+            # on. Sections/criteria Claude could NOT evidence show as
+            # excluded, never guessed. Legacy verdicts fall back to the
+            # flat v7 rubric below.
+            if verdict is not None and comps["scorecard"] is not None:
+                result, sections = comps["scorecard"]
+                st.markdown(
+                    f'<div class="subtle" style="margin-top:10px">Scorecard '
+                    f'<b>Q {result.total:.0f} · {_e(BAND_LABELS[result.band])}</b> · '
+                    f'{params.score_weight_quality:.0%} of the blend — '
+                    f'{_e(result.rubric_label)} rubric, {result.n_present_sections} of '
+                    f'{result.n_sections} sections evidence-backed. Criteria are scored '
+                    '1–3 (● = point) from cited evidence only; unscored criteria are '
+                    'excluded and their weight renormalizes. Hover a row for what it '
+                    'measures.</div>',
+                    unsafe_allow_html=True,
+                )
+                wsum_s = sum(s.weight for s in sections) or 1.0
+                sc_rows: list[str] = []
+                for s in sections:
+                    tip = f"{100 * s.weight / wsum_s:.0f}% of the scorecard"
+                    if s.score is None:
+                        sc_rows.append(
+                            f'<div class="sigrow" style="opacity:0.55">'
+                            f'<div class="signame" title="{_e(tip)}"><b>{_e(s.label)}</b></div>'
+                            f'<div class="sigtrack"></div>'
+                            f'<div class="sigpts">—</div>'
+                            f'<div class="sigdetail">no evidence — excluded, weight renormalizes</div></div>'
+                        )
+                        continue
+                    note = ("manual override — your number" if s.manual
+                            else f"{s.n_present}/{s.n_total} criteria scored")
+                    sc_rows.append(
+                        f'<div class="sigrow"><div class="signame" title="{_e(tip)}"><b>{_e(s.label)}</b></div>'
+                        f'<div class="sigtrack"><div class="sigfill" style="width:{s.score:.0f}%"></div></div>'
+                        f'<div class="sigpts">{s.score:.0f}</div>'
+                        f'<div class="sigdetail">{_e(note)}</div></div>'
+                    )
+                    for c in s.criteria:
+                        if c.value is None:
+                            continue
+                        pips = "●" * int(round(c.value)) + "○" * (3 - int(round(c.value)))
+                        sc_rows.append(
+                            f'<div class="sigrow" style="margin-left:16px">'
+                            f'<div class="signame" title="{_e(c.purpose)}">{_e(c.label)}</div>'
+                            f'<div class="sigtrack"><div class="sigfill" style="width:{50 * (c.value - 1):.0f}%"></div></div>'
+                            f'<div class="sigpts">{pips}</div>'
+                            f'<div class="sigdetail" title="{_e(c.reason)}">{_e(c.reason)}</div></div>'
+                        )
+                    missing = [c.label for c in s.criteria if c.value is None]
+                    if missing and s.n_present:
+                        sc_rows.append(
+                            f'<div class="sigrow" style="margin-left:16px;opacity:0.55">'
+                            f'<div class="signame">not scored</div>'
+                            f'<div class="sigtrack"></div><div class="sigpts">—</div>'
+                            f'<div class="sigdetail" title="{_e(", ".join(missing))}">'
+                            f'no evidence: {_e(", ".join(missing))}</div></div>'
+                        )
+                st.markdown(f'<div style="margin-top:4px">{"".join(sc_rows)}</div>',
+                            unsafe_allow_html=True)
+                # ---- Thesis fit (F): one number, with Claude's reasoning.
+                if verdict.thesis_fit is not None:
+                    st.markdown(
+                        f'<div class="subtle" style="margin-top:10px">Thesis fit '
+                        f'<b>F {100 * min(max(verdict.thesis_fit, 0.0), 1.0):.0f}</b> · '
+                        f'{params.score_weight_fit:.0%} of the blend — '
+                        f'{_e(verdict.fit_reason or "no reasoning recorded")}</div>',
+                        unsafe_allow_html=True,
+                    )
+            elif verdict is not None:
                 weighted_dims = [(k, w) for k, w in thesis.quality_weights.items() if w > 0]
                 wsum_q = sum(w for _, w in weighted_dims) or 1.0
                 q = quality_score(verdict, thesis)
@@ -1313,9 +1431,12 @@ def _lead_card(
                     st.markdown(
                         f'<div class="subtle" style="margin-top:10px">Company quality '
                         f'<b>Q {q:.0f}</b> · {params.score_weight_quality:.0%} of the blend — '
-                        f'{known_n} of {len(weighted_dims)} dimensions evidence-backed'
+                        f'legacy flat rubric, {known_n} of {len(weighted_dims)} dimensions '
+                        'evidence-backed'
                         + (f", scored through the {_e(lens)} lens" if lens else "")
-                        + '. Hover a dimension for what it measures.</div>',
+                        + '. <b>Reclassify latest run</b> on the Thesis page re-scores it '
+                        'on the new readiness scorecard. Hover a dimension for what it '
+                        'measures.</div>',
                         unsafe_allow_html=True,
                     )
                     q_rows: list[str] = []
@@ -1346,10 +1467,10 @@ def _lead_card(
                                 unsafe_allow_html=True)
                 else:
                     st.markdown(
-                        '<div class="subtle" style="margin-top:10px">No quality rubric on '
+                        '<div class="subtle" style="margin-top:10px">No scorecard on '
                         'this verdict (older cache) — <b>Reclassify latest run</b> on the '
-                        'Thesis page scores it, or set the dimensions yourself in '
-                        '<b>Adjust scoring</b>.</div>',
+                        'Thesis page scores it on the readiness scorecard, or set the '
+                        'section scores yourself in <b>Adjust scoring</b>.</div>',
                         unsafe_allow_html=True,
                     )
                 # ---- Thesis fit (F): one number, with Claude's reasoning.
@@ -1682,7 +1803,7 @@ def _render_startup_feed() -> None:
             shown.sort(key=lambda p: -(p[0].llm.thesis_fit
                                        if p[0].llm and p[0].llm.thesis_fit is not None else -1))
         elif sort_by == "Quality":
-            shown.sort(key=lambda p: -(qs if (qs := quality_score(p[0].llm, thesis)) is not None
+            shown.sort(key=lambda p: -(qs if (qs := company_quality(p[0].llm, thesis)) is not None
                                        else -1.0))
         elif sort_by == lift_sort:
             shown.sort(key=lambda p: -(p[0].llm.value_add_fit
@@ -2599,11 +2720,13 @@ if nav == "Thesis":
                     st.session_state.pop("weight_proposal", None)
                     st.rerun()
         st.markdown("---")
-        st.markdown('<div class="subtle">Score = blend of <b>company quality</b> (evidence-backed '
-                    'rubric), <b>thesis fit</b>, and <b>X signals</b> — weighted 45/35/20 by '
-                    'default, renormalized over what each lead evidences — then × Claude '
-                    'confidence, × 0.2 if not-a-founder, × stage multiplier, × value-add '
-                    'multiplier (off by default), × ungrounded multiplier. All editable.</div>',
+        st.markdown('<div class="subtle">Score = blend of <b>company quality</b> (the readiness '
+                    'scorecard — enterprise rubric for B2B, consumer for B2C, criteria scored '
+                    '1–3 from evidence), <b>thesis fit</b>, and <b>X signals</b> — weighted '
+                    '45/35/20 by default, renormalized over what each lead evidences — then '
+                    '× Claude confidence, × 0.2 if not-a-founder, × stage multiplier, '
+                    '× value-add multiplier (off by default), × ungrounded multiplier. '
+                    'All editable.</div>',
                     unsafe_allow_html=True)
         with st.form("signals_form"):
             names = list(SIGNAL_HELP) + [n for n in thesis.weights if n not in SIGNAL_HELP]
@@ -2622,8 +2745,9 @@ if nav == "Thesis":
             with b1:
                 wq = st.number_input("Company quality weight", 0.0, 1.0,
                                      float(params.score_weight_quality), 0.05,
-                                     help="Claude's evidence-backed quality rubric "
-                                          "(team, tech, market, moat, traction, investors).")
+                                     help="The readiness scorecard — enterprise (B2B) or "
+                                          "consumer (B2C) rubric, evidence-backed criteria "
+                                          "rolled up through weighted sections.")
             with b2:
                 wf = st.number_input("Thesis fit weight", 0.0, 1.0,
                                      float(params.score_weight_fit), 0.05,
@@ -2633,15 +2757,26 @@ if nav == "Thesis":
                                      float(params.score_weight_signals), 0.05,
                                      help="Momentum: smart-money follows, launch traction, "
                                           "departures — the deterministic signal score.")
-            st.markdown("**Quality dimensions** — relative weights inside the quality component")
-            new_quality_weights: dict[str, float] = {}
-            qcols = st.columns(3)
-            for i, (dim_key, dim_help) in enumerate(QUALITY_DIMENSIONS.items()):
-                with qcols[i % 3]:
-                    new_quality_weights[dim_key] = float(st.slider(
-                        dim_key.replace("_", " & ") if dim_key == "tech_product" else dim_key,
-                        0, 50, int(thesis.quality_weights.get(dim_key, 0)),
-                        help=dim_help, key=f"qw_{dim_key}"))
+            st.markdown("**Scorecard section weights** — relative weights inside the "
+                        "quality component, per rubric. Criterion sub-weights are "
+                        "code-owned in `scout/rubric.py`; sections a lead can't "
+                        "evidence are excluded and the rest renormalize.")
+            new_scorecard_weights: dict[str, dict[str, float]] = {}
+            for rb in rubric_mod.RUBRICS.values():
+                st.markdown(f"*{rb.label} — applied to "
+                            f"{'B2B / B2B2C / mixed' if rb.key == 'b2b' else 'B2C'} leads*")
+                current = thesis.scorecard_weights.get(rb.key, {})
+                rb_weights: dict[str, float] = {}
+                scols = st.columns(3)
+                for i, section in enumerate(rb.sections):
+                    with scols[i % 3]:
+                        rb_weights[section.key] = float(st.slider(
+                            section.label, 0, 50,
+                            int(current.get(section.key, section.weight)),
+                            key=f"scw_{rb.key}_{section.key}",
+                            help="Criteria: " + ", ".join(
+                                c.label for c in section.criteria)))
+                new_scorecard_weights[rb.key] = rb_weights
             st.divider()
             q1, q2, q3 = st.columns(3)
             with q1:
@@ -2665,14 +2800,21 @@ if nav == "Thesis":
                                           "show it.")
             st.divider()
             st.markdown("**Classifier prompt** — placeholders `{thesis}` `{sectors}` `{stages}` "
-                        "`{firm}` `{value_add}`")
+                        "`{firm}` `{value_add}` `{scorecard}`")
+            if thesis.llm_prompt.strip() and "{scorecard}" not in thesis.llm_prompt:
+                st.warning(
+                    "Your custom prompt predates the readiness scorecard — it will keep "
+                    "emitting legacy flat-rubric verdicts. Reset it to the default (clear "
+                    "the box and save) or add the `{scorecard}` placeholder.",
+                    icon="⚠️",
+                )
             llm_prompt = st.text_area("Prompt", thesis.llm_prompt or DEFAULT_PROMPT_TEMPLATE,
                                       height=260, label_visibility="collapsed")
             if st.form_submit_button("Save signals", type="primary"):
                 new_prompt = "" if llm_prompt.strip() == DEFAULT_PROMPT_TEMPLATE.strip() else llm_prompt
                 save_thesis(thesis.model_copy(update={
                     "weights": {k: float(v) for k, v in new_weights.items()},
-                    "quality_weights": new_quality_weights,
+                    "scorecard_weights": new_scorecard_weights,
                     # Every param must be listed — a missing one silently
                     # resets to its default on save.
                     "signal_params": SignalParams(
@@ -2760,12 +2902,6 @@ def _db_filter_meta(db, table: str, text_cols: list[str],
     return value_filters, range_filters
 
 
-# Pure helpers live in scout.dbfields (importable without executing this
-# Streamlit script) — aliased to the underscore names used throughout.
-_slugify_key = slugify_key
-_editor_changes = editor_changes
-_attr_display = attr_display
-_DB_COMPUTED_LABELS = DB_COMPUTED_LABELS
 
 
 def _render_column_manager() -> None:
@@ -3027,6 +3163,8 @@ def _render_database() -> None:
                 "Q": None if comps["quality"] is None else round(comps["quality"]),
                 "F": None if comps["fit"] is None else round(comps["fit"]),
                 "S": None if comps["signals"] is None else round(comps["signals"]),
+                "Band": (BAND_LABELS[comps["scorecard"][0].band]
+                         if comps["scorecard"] else ""),
                 "What they do": summary_by_handle[handle],
                 "Stage": (STAGE_LABEL.get(v.stage, v.stage) if v and v.stage else ""),
                 "Sector": (" · ".join(x for x in [v.sector or "", v.subsector or ""] if x)
@@ -3122,10 +3260,10 @@ def _render_database() -> None:
                 df, use_container_width=True, hide_index=True, key="sdb_table",
                 on_select="rerun", selection_mode="single-row",
                 height=min(560, 37 * (len(df) + 1) + 5),
-                column_order=["Startup", "Score", "Q", "F", "S", "What they do",
-                              "Stage", "Sector", "Customers", "Status",
-                              *attr_labels, "Adjusted", "Memo", "Followers",
-                              "First seen", "Runs", "Profile"],
+                column_order=["Startup", "Score", "Q", "F", "S", "Band",
+                              "What they do", "Stage", "Sector", "Customers",
+                              "Status", *attr_labels, "Adjusted", "Memo",
+                              "Followers", "First seen", "Runs", "Profile"],
                 column_config={
                     "handle": None,
                     "Startup": st.column_config.TextColumn("Startup", width="medium",
@@ -3135,12 +3273,15 @@ def _render_database() -> None:
                         help="Final score — quality/fit/signals blend × trust multipliers"),
                     "Q": st.column_config.NumberColumn(
                         "Q", width="small",
-                        help="Company quality 0–100 — Claude's evidence-backed rubric "
-                             "(team, tech, market, moat, traction, investors)"),
+                        help="Company quality 0–100 — the readiness scorecard "
+                             "(B2B: enterprise · B2C: consumer), evidence-backed "
+                             "criteria rolled up through weighted sections"),
                     "F": st.column_config.NumberColumn(
                         "F", width="small", help="Thesis fit 0–100"),
                     "S": st.column_config.NumberColumn(
                         "S", width="small", help="X-signal momentum 0–100"),
+                    "Band": st.column_config.TextColumn(
+                        "Band", width="small", help=rubric_mod.BAND_HELP),
                     "What they do": st.column_config.TextColumn("What they do",
                                                                 width="large"),
                     "Adjusted": st.column_config.TextColumn(
