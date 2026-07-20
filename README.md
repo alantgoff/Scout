@@ -97,12 +97,23 @@ being written):
    (`score_overrides`), re-enter the same math everywhere (cards, ranks,
    exports), and show an **Adjusted** chip until cleared. Search, sort, and
    filters live in one toolbar; a quiet banner nudges you when the last real
-   run is >24h old. **Database** is the startup database: one dossier row per
-   tracked startup across all runs (product, score with Q/F/S components,
-   stage, sector, status, history) with search and filters — select a row for
-   the full dossier card; the raw SQLite browser (any table, full-text
-   search, auto filters, CSV, read-only SQL console) sits behind a toggle
-   below.
+   run is >24h old. **Database** is a working startup
+   CRM: one row per tracked startup across all runs (product, score with
+   Q/F/S components, stage, sector, status, history) in two modes —
+   **Browse** (row-select opens the full dossier card) and **Edit** (fill
+   Status, Notes, and your own fields inline; changes save on the spot).
+   Every startup carries **user-owned columns**: curated **Vertical**,
+   **Use case**, and **Priority** seeds (option lists editable) plus any
+   custom column you add — single/multi select, text, number, or checkbox —
+   managed (add/delete/edit options) from the **Columns** popover.
+   **Filters** cover stage, status, score, and every select column;
+   **Categorize** fills the empty AI-fillable cells for the filtered view
+   with Claude, strictly from your option lists (judgment columns like
+   Priority are manual-only; hand-set values are never touched;
+   ≈$0.05–0.15 per 100 startups). Your categorization shows as chips on
+   every card, rides into the view CSV, the pipeline CSV, and the memo
+   dossier. The raw SQLite browser (any table, full-text search, auto
+   filters, CSV, read-only SQL console) sits behind a toggle below.
 3. **Longlist** — the first cut. Everything you longlisted, score-ranked,
    with Claude's per-dimension scoring **open on every card** (signal bars,
    score math, thesis fit, value-add levers). Promote the best to the
@@ -249,6 +260,10 @@ a verdict is attached: `× confidence`, `× 0.2` if classified not-a-founder,
 (weight defaults to **0** — informational unless opted in), and
 `× signal_params.ungrounded_multiplier` (default 0.6) when the product claim
 never traced to real evidence — speculation sinks, verified leads don't.
+And the last word is yours: **Adjust scoring** on any card persists your own
+numbers per startup (slide quality dimensions or fit back into the same math,
+or pin the final score outright, with a note) — an **Adjusted** chip shows
+until you clear it, and rankings and CSV exports follow your numbers.
 
 **Grounded classification.** The classifier doesn't take the bio's word for
 anything: each candidate's **company website is fetched** (cached in the
@@ -351,7 +366,7 @@ verify       Hydrate the current shortlist with FRESH paid X API data and re-sco
 probe        One-time ~$0.50 empirical check of X API capabilities on your tier
 demo         $0 offline end-to-end test on built-in sample founders
 export       Re-export the last run from the cache DB (--format md|csv|both)
-  --pipeline               export the deal flow (status, notes, outreach, briefs) instead
+  --pipeline               export the deal flow (status, notes, outreach, memos, your database columns) instead
 budget       Cumulative X API spend vs. XAPI_SPEND_CAP_USD
 ui           Launch the Thesis · Startups · Longlist · Shortlist · Memos · Settings workspace
 ```
@@ -393,7 +408,9 @@ Deliberate single-user, single-machine assumptions — fine for an internal
 tool, worth knowing about:
 
 - **Storage is one SQLite file** (`~/.scout/scout.db`): caches, the lead
-  ledger, deal flow, and the spend ledger. Back it up if the history matters.
+  ledger, deal flow, your memos, manual score adjustments, database columns +
+  categorization, and the spend ledger. Back it up — the hand-entered layer
+  (memos, overrides, attrs) is not reproducible from a re-run.
 - **The spend ledger is per-machine, not per-token** — running scout on a
   second machine starts a fresh ledger against the same X API budget.
 - **Secrets live in `.env`** in the project root, never in the DB or UI.
@@ -401,7 +418,10 @@ tool, worth knowing about:
   Streamlit pins its native widgets to a single theme once one is configured,
   so scout ships one deterministic look rather than a half-themed dark mode.
 - **Agent calls run inline in the UI** with hard timeouts (strategy 120s,
-  briefs/weights 60s); Streamlit's stop button is the cancel path.
+  briefs/weights 60s, auto-categorize 90s, memos 90s/150s/300s per request by
+  depth — a deep memo may chain a few requests); transient API errors retry
+  with backoff, timeouts fail fast, and a failed generation never overwrites
+  a stored memo. Streamlit's stop button is the cancel path.
 - **Runs record provenance** (`runs` table: strategy fingerprint of
   thesis+seeds) — identical settings group as one strategy in the Leads view.
 
@@ -432,7 +452,9 @@ tool, worth knowing about:
 - **LLM is optional:** no `ANTHROPIC_API_KEY` → heuristics-only mode
   (scout says so at runtime). You lose stage/sector/summary/account-type
   enrichment and the confidence multiplier, but ranking still works. Outreach
-  drafting also falls back to a fill-in template without a key.
+  drafting falls back to a fill-in template, memos fall back to a data-only
+  skeleton (never overwriting a real memo), and auto-categorize is
+  unavailable without a key.
 - **Bio/people search is twscrape-only:** the paid X API has no bio-search
   endpoint (`/2/users/search` returned 403 on our tier — see `scout probe`),
   so `bio_searches` and the follow-graph only run under `--source twscrape`.

@@ -272,10 +272,12 @@ def _memo_context(
     notes: str = "",
     site_note: str = "",
     focus: str = "",
+    attrs: dict | None = None,
 ) -> str:
     """The full evidence dossier for the memo agent: the brief context plus
     the labeled website capture (with a provenance note saying WHOSE pages
-    these are), recent tweets, the investor's notes, and their focus ask."""
+    these are), recent tweets, the investor's notes, their hand-curated
+    database categorization (`attrs`, label-keyed), and their focus ask."""
     lines = [_brief_context(lead, thesis)]
     verdict = lead.llm
     if verdict and verdict.product_summary:
@@ -284,6 +286,13 @@ def _memo_context(
         lines.append(f"Product evidence source: {verdict.grounding}")
     if notes.strip():
         lines.append(f"Investor notes: {notes.strip()}")
+    if attrs:
+        labeled = ", ".join(
+            f"{label}: {', '.join(value) if isinstance(value, list) else value}"
+            for label, value in attrs.items() if value not in (None, "", [])
+        )
+        if labeled:
+            lines.append(f"Analyst categorization (hand-curated): {labeled}")
     if focus.strip():
         lines.append(
             "Analyst focus request — weight the memo toward this: "
@@ -544,6 +553,7 @@ def investment_memo(
     site_note: str = "",
     depth: str = "standard",
     focus: str = "",
+    attrs: dict | None = None,
     on_event=None,
 ) -> tuple[str, bool, dict]:
     """Return (markdown_memo, is_ai, meta) — the full multi-section memo.
@@ -564,7 +574,7 @@ def investment_memo(
     system = _memo_system(thesis, deep=deep)
     context = _memo_context(
         lead, thesis, site_text=site_text, tweets=tweets, notes=notes,
-        site_note=site_note, focus=focus,
+        site_note=site_note, focus=focus, attrs=attrs,
     )
     try:
         client = _client(settings, MEMO_TIMEOUTS_S.get(depth, 150.0))
@@ -582,8 +592,11 @@ def investment_memo(
         meta["sources"] = (_harvest_sources(response.content)
                            or _sources_from_text(memo))[:MEMO_MAX_SOURCES]
         # Honesty flags — the UI warns instead of silently storing a memo
-        # that was cut off or never finished its research.
-        missing = [s for s in MEMO_SECTIONS if f"## {s}" not in memo]
+        # that was cut off or never finished its research. Case-insensitive:
+        # the model may title-case headings ("Product & Differentiation").
+        memo_lower = memo.lower()
+        missing = [s for s in MEMO_SECTIONS
+                   if f"## {s.lower()}" not in memo_lower]
         if missing:
             meta["missing_sections"] = missing
         if response.stop_reason == "max_tokens":
@@ -782,6 +795,124 @@ def validate_watchlist(
     keep = [h for h, status in results if status in ("found", "error")]
     invalid = [h for h, status in results if status == "missing"]
     return keep, invalid, True
+
+
+# ------------------------------------------------- startup categorization
+
+CATEGORIZE_TIMEOUT_S = 90.0
+
+_CATEGORIZE_SYSTEM = """You are tagging startups for a venture fund's database. For each \
+startup you get a handle and a one-line description. Assign values for each field below \
+STRICTLY from its allowed options — never invent an option, never rename one. Skip a \
+field entirely when no option fits confidently; skip a startup entirely when its \
+description is too thin to classify.
+
+Fields:
+{fields_block}
+
+Respond with ONLY a JSON object mapping handle (without @) to an object of field values:
+- single-choice fields take ONE option string
+- multi-choice fields take a LIST of 1-3 option strings
+No prose, no markdown fences. Example: {{"somehandle": {{"vertical": "Fintech"}}}}"""
+
+
+def parse_categorization(
+    text: str, columns: list[dict], known_handles: set[str]
+) -> dict[str, dict]:
+    """Parse + strictly validate the agent's JSON. Pure — unit-testable.
+
+    Off-list options are dropped, unknown handles ignored, single/multi
+    shapes coerced (a lone string for a multiselect becomes a 1-list, a list
+    for a select takes its first valid entry), multiselects capped at 3."""
+    data = json.loads(_strip_code_fences(text))
+    if not isinstance(data, dict):
+        raise ValueError("expected a JSON object")
+    col_by_key = {c["key"]: c for c in columns}
+    out: dict[str, dict] = {}
+    for handle, values in data.items():
+        key = str(handle).lstrip("@").lower()
+        if key not in known_handles or not isinstance(values, dict):
+            continue
+        clean: dict = {}
+        for field, value in values.items():
+            column = col_by_key.get(field)
+            if column is None:
+                continue
+            options = column.get("options") or []
+            if column["type"] == "select":
+                if isinstance(value, list) and value:
+                    value = value[0]
+                if isinstance(value, str) and value in options:
+                    clean[field] = value
+            elif column["type"] == "multiselect":
+                if isinstance(value, str):
+                    value = [value]
+                if isinstance(value, list):
+                    picked = [v for v in value
+                              if isinstance(v, str) and v in options]
+                    if picked:
+                        clean[field] = picked[:3]
+        if clean:
+            out[key] = clean
+    return out
+
+
+def categorize_startups(
+    rows: list[dict],
+    columns: list[dict],
+    settings: Settings,
+    batch_size: int = 40,
+    on_progress=None,
+) -> dict[str, dict]:
+    """Bulk-tag startups against the database's curated columns.
+
+    `rows`: [{"handle", "summary"}]; `columns`: store.list_columns() entries
+    (only select/multiselect with options participate). Returns handle →
+    {column key: value}, strictly on-list. Batched to keep responses well
+    inside one JSON object; `on_progress(done, total)` after each batch.
+    Raises RuntimeError without an Anthropic key or on unparseable output."""
+    if not settings.anthropic_api_key:
+        raise RuntimeError(
+            "ANTHROPIC_API_KEY is not set — auto-categorize needs Claude."
+        )
+    columns = [c for c in columns
+               if c.get("type") in ("select", "multiselect") and c.get("options")]
+    rows = [r for r in rows if (r.get("summary") or "").strip()]
+    if not columns or not rows:
+        return {}
+    fields_block = "\n".join(
+        f'- {c["key"]} ({"one of" if c["type"] == "select" else "1-3 of"}): '
+        + "; ".join(c["options"])
+        for c in columns
+    )
+    system = _CATEGORIZE_SYSTEM.format(fields_block=fields_block)
+    client = _client(settings, CATEGORIZE_TIMEOUT_S)
+    out: dict[str, dict] = {}
+    for start in range(0, len(rows), batch_size):
+        batch = rows[start:start + batch_size]
+        known = {r["handle"].lstrip("@").lower() for r in batch}
+        context = "\n".join(
+            f"@{r['handle'].lstrip('@')}: {' '.join(r['summary'].split())[:220]}"
+            for r in batch
+        )
+        prompt = context
+        last_error: Exception | None = None
+        for _ in range(PARSE_ATTEMPTS):
+            text = _call(client, settings.claude_model, system, prompt,
+                         max_tokens=3000)
+            try:
+                out.update(parse_categorization(text, columns, known))
+                break
+            except (json.JSONDecodeError, ValueError) as exc:
+                last_error = exc
+                prompt = context + _CORRECTIVE_NOTE
+        else:
+            raise RuntimeError(
+                f"categorization agent returned unparseable output: {last_error}"
+            )
+        if on_progress is not None:
+            on_progress(min(start + batch_size, len(rows)), len(rows))
+    return out
 
 
 def _brief_context(lead: Lead, thesis: Thesis) -> str:

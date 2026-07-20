@@ -60,7 +60,7 @@ time.
 ## 2. Run it / test it — always via `./scout-cli` or `uv run`
 
 ```bash
-uv run pytest -q                 # ~115 tests, ~3s, no network (incl. an AppTest UI smoke test)
+uv run pytest -q                 # ~205 tests, ~4s, no network (incl. AppTest UI smoke tests)
 ./scout-cli demo                 # $0 offline end-to-end run on sample founders — best smoke test
 ./scout-cli source --strategy github,hn   # free live discovery, no scoring
 ./scout-cli ui                   # Streamlit workspace on :8501
@@ -103,7 +103,14 @@ scout/
                     Account, Tweet, Signal, LLMVerdict, Lead, UnlinkedLead.
   store.py          SQLite (sqlite-utils) — cache, dedupe, TTL, budget ledger,
                     follow-edge/bio snapshots, unlinked leads, deal-flow pipeline,
-                    llm_verdicts cache.
+                    llm_verdicts cache, score_overrides, and the user-owned
+                    startup data layer: startup_columns (schema: select/
+                    multiselect/text/number/checkbox, options, ai_fill flag,
+                    seed-once ensure_default_columns) + startup_attrs
+                    (values_json merge store).
+  dbfields.py       Pure grid helpers for the Database CRM: slugify_key,
+                    canon, editor_changes (data_editor diffing), attr_display.
+                    Kept out of ui.py so they unit-test without Streamlit.
   score.py          Pure scoring. score_leads + score_breakdown (THE score math,
                     single source of truth; UI renders its steps) + apply_override
                     (manual quality/fit/pinned-score overrides re-entering that math).
@@ -116,10 +123,13 @@ scout/
                     (investment_memo + MEMO_SECTIONS; dossier = brief context +
                     website text + tweets + notes; offline skeleton fallback),
                     weight-tuning agent (suggest_weights/parse_weight_proposal),
-                    watchlist validation (validate_watchlist). Parse/apply helpers
-                    are pure. All Claude clients carry explicit timeouts
-                    (STRATEGY/BRIEF/WEIGHTS/MEMO_TIMEOUT_S); timeouts are excluded
-                    from tenacity retry — fail fast in the UI.
+                    watchlist validation (validate_watchlist), categorization agent
+                    (categorize_startups + parse_categorization — batched,
+                    strictly on-list, ai_fill-aware via the UI). Parse/apply
+                    helpers are pure. All Claude clients carry explicit timeouts
+                    (STRATEGY/BRIEF/WEIGHTS/CATEGORIZE_TIMEOUT_S + the per-depth
+                    MEMO_TIMEOUTS_S map); timeouts are excluded from retry —
+                    fail fast in the UI.
   insights.py       Pure triage analytics: triage_stats/stats_prompt contrast
                     shortlisted-vs-passed leads per signal/sector/stage/fit;
                     feeds the UI insights panel and the weight-tuning agent.
@@ -130,6 +140,9 @@ scout/
                     signals); company_key/group_by_company fold accounts
                     sharing a company into one entry (primary = highest score).
   demo_data.py      8 synthetic sample founders for `scout demo` (obviously fake handles).
+  publish.py        Phone digest: renders the ledger to docs/index.html (mobile
+                    page for GitHub Pages in the separate public DIGEST_REPO
+                    checkout); `scout publish [--push]`.
   ui.py             Streamlit app: Thesis / Startups (Latest run + Database) /
                     Longlist / Shortlist / Memos / Settings. Session-state nav
                     (nav_target routes across pages — the card Memo button lands
@@ -160,8 +173,15 @@ scout/
                     fan-out, cache-first, negative caching), and the memo
                     crawl — bundle_urls/bundle_text (pure) + fetch_site_bundle
                     (root + about/product/pricing/… + extra candidate roots).
-tests/              pytest — test_heuristics, test_score, test_store,
-                    test_sourcing_v2, test_web, test_grounding.
+tests/              pytest, no network — test_agents (incl. mocked memo
+                    stream/pause_turn/retry loop + categorization), test_score
+                    (incl. apply_override), test_store (incl. columns/attrs/
+                    overrides), test_dbfields, test_memo_export (PDF bytes +
+                    attr columns), test_ui_smoke (AppTest: nav, memo flow,
+                    overwrite guard, database modes), test_web (incl. site
+                    bundle), test_heuristics, test_grounding, test_sourcing_v2,
+                    test_companies, test_insights, test_value_add, test_publish,
+                    test_cli_helpers.
 thesis.yaml         Targeting + weights + signal_params + firm value-add levers
                     + llm_prompt. User-owned.
 seeds.yaml          Query bank, bio_searches, watchlist, github_topics. User-owned.
@@ -260,6 +280,14 @@ from store history, not by adapters — `recent_followed_by`, `bio_changed`,
 `signal_params` (traction floor/saturation/window, convergence threshold, stage
 multiplier) are UI-editable, read by the heuristics — do not re-hardcode them.
 
+**Manual overrides** layer on top at load time, not at run time:
+`store.score_overrides` rows (per-handle quality dims / thesis fit / pinned
+score + note) are applied by `score.apply_override` in ui.py and in
+`export.pipeline_rows(store, thesis)` — adjusted dims/fit are written into the
+verdict (with "manual" reasons) and re-enter `score_breakdown`; a pinned score
+wins outright and shows as a final "manual score override" step. Stored leads
+in the DB keep the model's numbers; overrides live only in their own table.
+
 ---
 
 ## 6. Store tables (`~/.scout/scout.db`)
@@ -273,7 +301,10 @@ multiplier) are UI-editable, read by the heuristics — do not re-hardcode them.
 | follow_edges, follow_meta | investor follow-graph snapshots + per-watcher baseline |
 | bio_snapshots | bio history for bio_change detection |
 | unlinked_leads | github/hn founders with no X handle (manual lookup) |
-| pipeline | deal-flow state: status, notes, outreach, channel, brief |
+| pipeline | deal-flow state: status, notes, outreach, channel, brief (the investment memo) + brief_at / brief_edited_at / brief_meta_json (depth, sources, searches, honesty flags) |
+| score_overrides | the investor's manual scoring per handle (quality dims / fit / pinned score + note) — applied at load by `score.apply_override` |
+| startup_columns | the Database CRM's user-owned column schema: key, label, type (select/multiselect/text/number/checkbox), options_json, builtin, ai_fill, position. Seeded ONCE by `ensure_default_columns` (table existence suppresses re-seeding, so deleting a builtin sticks) |
+| startup_attrs | per-startup values for those columns (values_json merge store; None deletes a key) |
 | llm_verdicts | **verdict cache** — Claude verdict per handle, keyed by an input fingerprint (bio + tweets + rendered prompt + model + website URL + site-text hash + github + pinned); TTL `VERDICT_TTL_DAYS`. The audit pass re-records corrected verdicts under the same fingerprint |
 | websites | **site cache** — extracted company-site text per normalized root URL; TTL `WEBSITE_TTL_DAYS` (7d), failures expire after 1 day |
 | xapi_usage | **budget ledger** — every paid call, cumulative spend |
@@ -359,6 +390,14 @@ silently widen its input set to all-time).
   the UI's step display) flows from it.
 - **Add a stage behavior:** edit the `STAGE_SEARCH_CATEGORIES` /
   `STAGE_DISCOVERY_SOURCES` / `STAGE_BIO_GRAPH` maps in config.py.
+- **Add a database column type:** extend `dbfields.ATTR_TYPE_LABELS`, the
+  per-type branches in ui.py's `_render_db_editor` (column_config) and
+  `_render_column_manager`, and `dbfields.canon`/`attr_display` if the value
+  shape is new. Curated seed lists live in `config.CURATED_*`.
+- **Change the memo:** the section contract is `agents.MEMO_SECTIONS` + the
+  `_MEMO_SYSTEM` prompt; depths/timeouts in `MEMO_DEPTHS`/`MEMO_TIMEOUTS_S`;
+  research budgets in `MEMO_MAX_SEARCHES/_FETCHES/_CONTINUATIONS`. The UI's
+  verdict chip greps `VERDICT: (PURSUE|TRACK|PASS)`; keep that line format.
 
 ---
 
@@ -366,10 +405,13 @@ silently widen its input set to all-time).
 
 - Fully working: demo, source (all strategies), the whole scored pipeline, the
   Thesis/Startups/Longlist/Shortlist/Memos/Settings UI (Headline design
-  language, lead cards),
-  strategy agent (`scout strategy` + Thesis tab, validated live), investment
-  memos (multi-section, editable, PDF export — validated live), manual score
-  overrides, verdict cache, paid probe + verify (validated live, ~$0.83 spent).
+  language, lead cards), strategy agent (`scout strategy` + Thesis tab,
+  validated live), investment memos v2 (three depths, live web research with
+  cited sources, in-place editing, PDF export, hardened stream loop — deep
+  runs validated live on Walden Robotics and Cosmic Labs), manual score
+  overrides, the Database CRM (Browse/Edit modes, curated + custom columns,
+  per-field filters, AI auto-categorize with ai_fill guard — validated live),
+  verdict cache, paid probe + verify (validated live, ~$0.83 X spend).
 - v4 additions (all validated live): person-centric lead ledger with score
   deltas + strategy grouping (runs table), paid-run + precision-pass cost
   confirmation gates in the UI, watchlist handle validation, card-face triage

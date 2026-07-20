@@ -534,3 +534,98 @@ def test_sources_from_text_parses_the_sources_section() -> None:
         "https://www.waldenrobotics.com/company",
     ]
     assert _sources_from_text("no sources here") == []
+
+
+# --- startup categorization -----------------------------------------------------
+
+
+_CAT_COLUMNS = [
+    {"key": "vertical", "label": "Vertical", "type": "select",
+     "options": ["Fintech", "Security"]},
+    {"key": "use_case", "label": "Use case", "type": "multiselect",
+     "options": ["Payments / banking", "Agent infrastructure"]},
+]
+
+
+def test_parse_categorization_validates_strictly() -> None:
+    from scout.agents import parse_categorization
+
+    text = json.dumps({
+        "ada": {"vertical": "Fintech", "use_case": ["Payments / banking", "Yachts"]},
+        "@BO": {"vertical": ["Security", "Fintech"]},      # list → first valid
+        "ada2": {"vertical": "Crypto"},                    # off-list → dropped
+        "ghost": {"vertical": "Fintech"},                  # unknown handle
+        "casey": {"use_case": "Agent infrastructure"},     # str → 1-list
+        "dana": "not an object",
+    })
+    out = parse_categorization(text, _CAT_COLUMNS, {"ada", "bo", "ada2", "casey", "dana"})
+    assert out == {
+        "ada": {"vertical": "Fintech", "use_case": ["Payments / banking"]},
+        "bo": {"vertical": "Security"},
+        "casey": {"use_case": ["Agent infrastructure"]},
+    }
+
+
+def test_categorize_startups_batches_and_retries(monkeypatch) -> None:
+    from scout import agents
+    from scout.config import Settings
+
+    calls: list[str] = []
+    replies = iter([
+        "not json at all",                                   # batch 1, attempt 1
+        json.dumps({"h0": {"vertical": "Fintech"}}),         # batch 1, attempt 2
+        json.dumps({"h2": {"vertical": "Security"}}),        # batch 2
+    ])
+
+    def fake_call(client, model, system, user, max_tokens=4096):
+        calls.append(user)
+        return next(replies)
+
+    monkeypatch.setattr(agents, "_client", lambda settings, timeout: object())
+    monkeypatch.setattr(agents, "_call", fake_call)
+
+    rows = [{"handle": f"h{i}", "summary": f"startup {i}"} for i in range(3)]
+    out = agents.categorize_startups(
+        rows, _CAT_COLUMNS, Settings(anthropic_api_key="k", _env_file=None),
+        batch_size=2,
+    )
+    assert out == {"h0": {"vertical": "Fintech"}, "h2": {"vertical": "Security"}}
+    assert len(calls) == 3                       # 2 batches + 1 corrective retry
+    assert "could not be parsed" in calls[1]     # corrective note appended
+
+
+def test_categorize_startups_requires_key_and_skips_thin_rows() -> None:
+    import pytest as _pytest
+
+    from scout.agents import categorize_startups
+    from scout.config import Settings
+
+    with _pytest.raises(RuntimeError):
+        categorize_startups([{"handle": "a", "summary": "x"}], _CAT_COLUMNS,
+                            Settings(anthropic_api_key=None, _env_file=None))
+    # No summaries / no select columns → no-op without a client call.
+    assert categorize_startups([{"handle": "a", "summary": "  "}], _CAT_COLUMNS,
+                               Settings(anthropic_api_key="k", _env_file=None)) == {}
+    assert categorize_startups([{"handle": "a", "summary": "x"}], [],
+                               Settings(anthropic_api_key="k", _env_file=None)) == {}
+
+
+def test_memo_section_check_is_case_insensitive(monkeypatch) -> None:
+    """Title-cased headings ("Product & Differentiation") must not be
+    flagged missing — the Cosmic Labs false-incomplete regression."""
+    from scout import agents
+    from scout.config import Settings
+
+    text = "**TL;DR**\n- x\n\n" + "\n\n".join(
+        f"## {s.title()}\nbody" for s in agents.MEMO_SECTIONS)
+    final = _NS(stop_reason="end_turn",
+                content=[_NS(type="text", text=text, citations=None)])
+    fake = _FakeClient([([], final)])
+    monkeypatch.setattr(agents, "_client", lambda settings, timeout: fake)
+
+    _memo, is_ai, meta = agents.investment_memo(
+        _memo_lead(), Thesis(), Settings(anthropic_api_key="k", _env_file=None),
+        depth="standard",
+    )
+    assert is_ai is True
+    assert "missing_sections" not in meta

@@ -39,3 +39,32 @@ def test_pipeline_rows_apply_manual_overrides_with_thesis(tmp_path: Path) -> Non
     assert with_overrides[0]["score"] == 91.0
     # Without a thesis the raw stored score is exported (legacy callers).
     assert pipeline_rows(store)[0]["score"] == 40.0
+
+
+def test_pipeline_rows_and_csv_carry_attr_columns(tmp_path: Path) -> None:
+    from scout.export import write_pipeline_csv
+
+    store = Store(tmp_path / "t.db")
+    lead = Lead(
+        account=Account(id="1", handle="ada", name="Ada Lin"),
+        signals=[Signal(name="bio_intent", value=1.0, weight=20.0)],
+        llm=LLMVerdict(handle="ada", account_type="founder", is_founder=True,
+                       stage="launched", company_name="EvalHQ",
+                       thesis_fit=0.4, confidence=1.0, grounding="website"),
+        score=40.0, rank=1,
+    )
+    store.save_leads("run-1", [lead])
+    store.set_pipeline("ada", status="shortlisted")
+    store.save_column("vertical", "Vertical", "select", options=["Fintech"])
+    store.save_column("use_case", "Use case", "multiselect", options=["A", "B"])
+    store.save_column("warm_intro", "Warm intro", "checkbox")
+    store.set_attrs("ada", {"vertical": "Fintech", "use_case": ["A", "B"],
+                            "warm_intro": True})
+
+    rows = pipeline_rows(store)
+    assert rows[0]["Vertical"] == "Fintech"
+    assert rows[0]["Use case"] == "A;B"
+    assert rows[0]["Warm intro"] == "yes"
+    path = write_pipeline_csv(rows, tmp_path)
+    header = path.read_text(encoding="utf-8").splitlines()[0]
+    assert "Vertical" in header and "Use case" in header and "Warm intro" in header

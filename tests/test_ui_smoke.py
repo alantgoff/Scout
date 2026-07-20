@@ -109,9 +109,17 @@ def test_ui_renders_without_exceptions(tmp_path, monkeypatch) -> None:
     assert "12 logos" in page_text
     assert "no evidence — excluded" in page_text
     assert "Score math" in page_text
-    # The startup database sub-page renders the dossier table…
+    # The startup database sub-page renders the dossier table with the
+    # seeded user columns and their filter/manager plumbing…
     assert "Startup database" in page_text
     assert "select a row for the full dossier" in page_text
+    assert at.session_state["sdb_mode"] in (None, "Browse")
+    manager_text = page_text
+    assert "Vertical" in manager_text          # seeded builtin columns
+    assert "Use case" in manager_text
+    assert "Priority" in manager_text
+    assert "Add a column" in manager_text      # column manager renders
+    assert "Fills the" in manager_text         # categorizer popover renders
     # …and the raw store browser behind the toggle
     assert "On disk" in page_text
     assert "matching rows" in page_text
@@ -175,6 +183,27 @@ def test_memo_button_routes_and_generates_named_by_startup(tmp_path, monkeypatch
     toasts = " ".join(t.value for t in at.toast)
     assert "SmokeCo" in toasts  # named by startup…
     assert "smoke_founder" not in toasts  # …never by the raw handle
+
+
+def test_database_edit_mode_renders_editor_with_user_columns(tmp_path, monkeypatch) -> None:
+    """Edit mode: the data_editor renders with seeded + stored attribute
+    values and no exceptions (actual edit persistence is covered by the
+    pure editor_changes tests — AppTest can't simulate editor edits)."""
+    db = tmp_path / "smoke.db"
+    at = _app(tmp_path, monkeypatch)
+    store = Store(db)
+    store.set_attrs("smoke_founder", {"vertical": "AI infrastructure",
+                                      "use_case": ["Evals / observability"]})
+    at.session_state["nav"] = "Startups"
+    at.session_state["sdb_mode"] = "Edit"
+    at.run()
+    assert not at.exception, at.exception[0].message if at.exception else ""
+    page_text = _page_text(at)
+    assert "changes save on the spot" in page_text
+    # Back in Browse mode the page still renders cleanly with stored attrs.
+    at.session_state["sdb_mode"] = "Browse"
+    at.run()
+    assert not at.exception, at.exception[0].message if at.exception else ""
 
 
 def test_regenerate_without_key_never_clobbers_existing_memo(tmp_path, monkeypatch) -> None:

@@ -382,3 +382,48 @@ def test_pipeline_brief_meta_roundtrip(tmp_path: Path) -> None:
     # Rows without meta decode to an empty dict, not a crash.
     store.set_pipeline("noone", status="longlisted")
     assert store.all_pipeline()["noone"]["brief_meta"] == {}
+
+
+def test_startup_columns_crud_and_seed_only_once(tmp_path: Path) -> None:
+    store = Store(tmp_path / "t.db")
+    defaults = [
+        {"key": "vertical", "label": "Vertical", "type": "select",
+         "options": ["Fintech", "Security"]},
+        {"key": "priority", "label": "Priority", "type": "select",
+         "options": ["High", "Low"]},
+    ]
+    store.ensure_default_columns(defaults)
+    cols = store.list_columns()
+    assert [c["key"] for c in cols] == ["vertical", "priority"]
+    assert cols[0]["options"] == ["Fintech", "Security"]
+    assert cols[0]["builtin"] is True
+    # Deleting a builtin sticks — re-seeding must not resurrect it.
+    store.delete_column("priority")
+    store.ensure_default_columns(defaults)
+    assert [c["key"] for c in store.list_columns()] == ["vertical"]
+    # Custom columns append at the end; option edits keep position.
+    store.save_column("warm_intro", "Warm intro", "checkbox")
+    store.save_column("vertical", "Vertical", "select",
+                      options=["Fintech", "Climate"], builtin=True, position=0)
+    cols = store.list_columns()
+    assert [c["key"] for c in cols] == ["vertical", "warm_intro"]
+    assert cols[0]["options"] == ["Fintech", "Climate"]
+    assert cols[1]["builtin"] is False
+    # Judgment columns can be excluded from auto-categorization.
+    store.save_column("conviction", "Conviction", "select",
+                      options=["High", "Low"], ai_fill=False)
+    by_key = {c["key"]: c for c in store.list_columns()}
+    assert by_key["conviction"]["ai_fill"] is False
+    assert by_key["vertical"]["ai_fill"] is True
+
+
+def test_startup_attrs_merge_delete_and_types(tmp_path: Path) -> None:
+    store = Store(tmp_path / "t.db")
+    store.set_attrs("@Ada", {"vertical": "Fintech",
+                             "use_case": ["Payments", "Risk"],
+                             "warm_intro": True, "round_size": 2.5})
+    store.set_attrs("ada", {"vertical": "Security", "warm_intro": None})
+    attrs = store.all_attrs()["ada"]  # lowercased, @-stripped
+    assert attrs == {"vertical": "Security",
+                     "use_case": ["Payments", "Risk"], "round_size": 2.5}
+    assert store.all_attrs().get("nobody") is None

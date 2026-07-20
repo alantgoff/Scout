@@ -39,6 +39,26 @@ STAGES = ("idea", "stealth", "launched", "scaling")
 # and backs the UI's customer-type filter.
 CUSTOMER_TYPES = ("b2b", "b2c", "b2b2c", "mixed")
 
+# Curated taxonomy defaults for the startup database's user-owned columns
+# (store.ensure_default_columns seeds them once; afterwards the option lists
+# are edited in the UI's column manager — these are just the starting sets).
+CURATED_VERTICALS = [
+    "AI infrastructure", "Developer tools", "Fintech", "Healthcare / bio",
+    "Robotics / hardware", "Security", "Commerce / marketplaces", "Consumer",
+    "Enterprise SaaS", "Data / analytics", "Climate / energy", "Industrial",
+    "Media / creative", "Education", "Real estate / proptech",
+    "Legal / compliance", "Gov / defense", "Logistics / supply chain",
+]
+CURATED_USE_CASES = [
+    "Agent infrastructure", "Evals / observability", "Inference / serving",
+    "Model training / silicon", "Data infrastructure", "Search / retrieval",
+    "Copilots / assistants", "Workflow automation", "Vertical SaaS",
+    "API platform", "Developer productivity", "Edge / on-device",
+    "Networking / orchestration", "Physical automation", "Consumer app",
+    "Marketplace", "Payments / banking", "Risk / underwriting",
+]
+CURATED_PRIORITIES = ["High", "Medium", "Low"]
+
 # The fixed quality-rubric dimensions: key → help text (shown on the UI
 # sliders). The keys are the contract between the classifier prompt,
 # LLMVerdict.quality, and thesis.quality_weights.

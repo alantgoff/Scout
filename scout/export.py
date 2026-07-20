@@ -156,6 +156,9 @@ def pipeline_rows(store, thesis: Thesis | None = None) -> list[dict]:
         overrides = store.all_overrides()
         for handle, lead in ledger.items():
             apply_override(lead, overrides.get(handle), thesis)
+    # The user-owned database columns ride along as extra CSV columns.
+    attr_columns = store.list_columns()
+    attrs = store.all_attrs()
     rows: list[dict] = []
     for handle, entry in sorted(store.all_pipeline().items()):
         status = entry.get("status") or "new"
@@ -164,7 +167,18 @@ def pipeline_rows(store, thesis: Thesis | None = None) -> list[dict]:
         lead = ledger.get(handle)
         verdict = lead.llm if lead else None
         identity = startup_identity(lead) if lead else None
+        attr_cells = {}
+        for column in attr_columns:
+            value = (attrs.get(handle) or {}).get(column["key"])
+            if isinstance(value, list):
+                value = ";".join(str(v) for v in value)
+            elif value is True:
+                value = "yes"
+            elif value in (None, False):
+                value = ""
+            attr_cells[column["label"]] = value
         rows.append({
+            **attr_cells,
             "startup": identity[0] if identity else "",
             "handle": handle,
             "name": lead.account.name if lead else "",
@@ -189,11 +203,14 @@ def pipeline_rows(store, thesis: Thesis | None = None) -> list[dict]:
 
 
 def write_pipeline_csv(rows: list[dict], out_dir: Path) -> Path:
-    """Deal-flow export (status, notes, outreach, briefs) — CRM-import-ready."""
+    """Deal-flow export (status, notes, outreach, briefs) — CRM-import-ready.
+    User-defined database columns present in the rows are appended after the
+    fixed columns."""
     out_dir.mkdir(parents=True, exist_ok=True)
     path = out_dir / f"pipeline_{_stamp()}.csv"
+    extra = [k for k in (rows[0] if rows else {}) if k not in PIPELINE_COLUMNS]
     with open(path, "w", newline="", encoding="utf-8") as f:
-        writer = csv.DictWriter(f, fieldnames=PIPELINE_COLUMNS)
+        writer = csv.DictWriter(f, fieldnames=PIPELINE_COLUMNS + extra)
         writer.writeheader()
         writer.writerows(rows)
     return path

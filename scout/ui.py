@@ -56,12 +56,16 @@ import streamlit as st
 
 from scout.agents import (
     apply_strategy,
+    categorize_startups,
     generate_strategy,
     investment_memo,
     suggest_weights,
     validate_watchlist,
 )
 from scout.config import (
+    CURATED_PRIORITIES,
+    CURATED_USE_CASES,
+    CURATED_VERTICALS,
     CUSTOMER_TYPES,
     QUALITY_DIMENSIONS,
     STAGES,
@@ -75,6 +79,13 @@ from scout.config import (
     save_thesis,
 )
 from scout.companies import display_name, group_by_company, startup_identity
+from scout.dbfields import (
+    ATTR_TYPE_LABELS,
+    DB_COMPUTED_LABELS,
+    attr_display,
+    editor_changes,
+    slugify_key,
+)
 from scout.export import memo_pdf_bytes, pipeline_rows, write_pipeline_csv
 from scout.insights import stats_prompt, triage_stats
 from scout.models import Lead, LedgerEntry, LLMVerdict
@@ -743,6 +754,22 @@ if overrides:
 entry_by_handle = {e.lead.account.handle.lower(): e for e in ledger}
 lead_by_handle = {h: e.lead for h, e in entry_by_handle.items()}
 latest_handles = {x.account.handle.lower() for x in leads}
+
+# The user-owned data layer behind the startup database: a column schema
+# (curated selects seeded once; user-managed afterwards) + per-startup
+# values. Deleting a builtin column sticks — seeding only ever runs when
+# the schema table has never existed.
+store.ensure_default_columns([
+    {"key": "vertical", "label": "Vertical", "type": "select",
+     "options": CURATED_VERTICALS},
+    {"key": "use_case", "label": "Use case", "type": "multiselect",
+     "options": CURATED_USE_CASES},
+    # Priority is the fund's judgment — auto-categorize must never fill it.
+    {"key": "priority", "label": "Priority", "type": "select",
+     "options": CURATED_PRIORITIES, "ai_fill": False},
+])
+db_columns = store.list_columns()
+attrs_by_handle = store.all_attrs()
 
 
 def _status_of(lead: Lead) -> str:
@@ -1417,6 +1444,15 @@ def _lead_card(
                         unsafe_allow_html=True)
             if detail_chips:
                 st.markdown(_chips(detail_chips), unsafe_allow_html=True)
+            # The investor's own categorization (Database columns).
+            attr_chips = [
+                (f'{col["label"]}: {text}', "")
+                for col in db_columns
+                if (text := _attr_display(
+                    (attrs_by_handle.get(handle_key) or {}).get(col["key"])))
+            ]
+            if attr_chips:
+                st.markdown(_chips(attr_chips), unsafe_allow_html=True)
             st.write("")
 
             row = pipeline.get(handle_key, {})
@@ -1970,8 +2006,15 @@ def _generate_memo(handle: str) -> None:
         _site_evidence(lead, depth) if settings.anthropic_api_key else ("", "")
     )
     tweets = store.get_tweets(lead.account.id, limit=12)
+    # The investor's hand-curated categorization is high-signal memo context.
+    memo_attrs = {
+        col["label"]: value for col in db_columns
+        if (value := (attrs_by_handle.get(handle) or {}).get(col["key"]))
+        not in (None, "", [], False)
+    }
     kwargs = dict(site_text=site_text, site_note=site_note, tweets=tweets,
-                  notes=row.get("notes") or "", depth=depth, focus=focus)
+                  notes=row.get("notes") or "", depth=depth, focus=focus,
+                  attrs=memo_attrs or None)
 
     existing_brief = (row.get("brief") or "").strip()
     try:
@@ -2658,7 +2701,8 @@ if nav == "Thesis":
 
 # Friendly presentation order + one-liners; unknown tables still appear after.
 DB_TABLE_ORDER = [
-    "leads", "accounts", "tweets", "llm_verdicts", "pipeline", "runs",
+    "leads", "accounts", "tweets", "llm_verdicts", "pipeline",
+    "startup_columns", "startup_attrs", "score_overrides", "websites", "runs",
     "unlinked_leads", "follow_edges", "follow_meta", "bio_snapshots",
     "searches", "xapi_usage", "scan", "scan_history",
 ]
@@ -2667,7 +2711,11 @@ DB_TABLE_HELP = {
     "accounts": "The fetch cache: every X account scout has seen.",
     "tweets": "Cached tweets per account.",
     "llm_verdicts": "Claude classification cache, keyed by input fingerprint.",
-    "pipeline": "Deal-flow state: status, notes, outreach, briefs.",
+    "pipeline": "Deal-flow state: status, notes, outreach, memos (+ memo meta).",
+    "startup_columns": "Your database column schema — curated + custom fields.",
+    "startup_attrs": "Your per-startup values for those columns.",
+    "score_overrides": "Your manual scoring adjustments (dims, fit, pinned score).",
+    "websites": "Company-site text cache (memo + classifier evidence).",
     "runs": "Run provenance — source, strategy hash, config snapshot.",
     "unlinked_leads": "GitHub/HN founders with no X handle (manual lookup).",
     "follow_edges": "Investor follow-graph snapshots (the smart-money signals).",
@@ -2712,17 +2760,245 @@ def _db_filter_meta(db, table: str, text_cols: list[str],
     return value_filters, range_filters
 
 
+# Pure helpers live in scout.dbfields (importable without executing this
+# Streamlit script) — aliased to the underscore names used throughout.
+_slugify_key = slugify_key
+_editor_changes = editor_changes
+_attr_display = attr_display
+_DB_COMPUTED_LABELS = DB_COMPUTED_LABELS
+
+
+def _render_column_manager() -> None:
+    """Inside the Columns popover: list/delete columns, edit select-column
+    option lists, add new columns (label collisions rejected)."""
+    st.markdown(
+        '<div class="subtle">Your fields on every startup. Deleting a column '
+        'keeps its stored values — re-adding one with the same name restores '
+        'them.</div>',
+        unsafe_allow_html=True,
+    )
+    for col in db_columns:
+        c1, c2 = st.columns([3.3, 1.0])
+        tag = ATTR_TYPE_LABELS.get(col["type"], col["type"])
+        if col["builtin"]:
+            tag += " · built-in"
+        if (col["type"] in ("select", "multiselect")
+                and not col.get("ai_fill", True)):
+            tag += " · manual-only"
+        c1.markdown(f'**{_e(col["label"])}** <span class="subtle">· {_e(tag)}</span>',
+                    unsafe_allow_html=True)
+        if c2.button("Delete", key=f"sdb_coldel_{col['key']}"):
+            store.delete_column(col["key"])
+            st.session_state["toast"] = f"Deleted column “{col['label']}”."
+            st.rerun()
+
+    select_cols = [c for c in db_columns if c["type"] in ("select", "multiselect")]
+    if select_cols:
+        st.divider()
+        edit_col = st.selectbox("Edit options for", select_cols,
+                                format_func=lambda c: c["label"], key="sdb_optcol")
+        options_text = st.text_area(
+            "Options (one per line)", _to_lines(edit_col["options"]),
+            height=130, key=f"sdb_opts_{edit_col['key']}")
+        if st.button("Save options", key="sdb_optsave"):
+            options = _from_lines(options_text)
+            if not options:
+                st.error("A select column needs at least one option.")
+            else:
+                store.save_column(edit_col["key"], edit_col["label"],
+                                  edit_col["type"], options=options,
+                                  builtin=edit_col["builtin"],
+                                  position=edit_col["position"])
+                st.session_state["toast"] = f"Options saved — “{edit_col['label']}”."
+                st.rerun()
+
+    st.divider()
+    with st.form("sdb_addcol", clear_on_submit=True):
+        st.markdown("**Add a column**")
+        new_label = st.text_input("Name",
+                                  placeholder="e.g. Warm intro, Round size, Owner")
+        new_type = st.selectbox("Type", list(ATTR_TYPE_LABELS),
+                                format_func=lambda t: ATTR_TYPE_LABELS[t])
+        new_options = st.text_area("Options (one per line — select types only)",
+                                   height=90)
+        new_ai_fill = st.checkbox(
+            "Categorize may auto-fill this column", value=True,
+            help="Untick for judgment columns (like Priority) that only a "
+                 "human should set.")
+        if st.form_submit_button("Add column", type="primary"):
+            label = new_label.strip()
+            taken = ({c.lower() for c in _DB_COMPUTED_LABELS}
+                     | {c["label"].lower() for c in db_columns})
+            options = _from_lines(new_options)
+            if not label:
+                st.error("Give the column a name.")
+            elif label.lower() in taken:
+                st.error(f"“{label}” collides with an existing column name.")
+            elif new_type in ("select", "multiselect") and not options:
+                st.error("Select columns need options — one per line.")
+            else:
+                store.save_column(
+                    _slugify_key(label, {c["key"] for c in db_columns}),
+                    label, new_type, options=options, ai_fill=new_ai_fill)
+                st.session_state["toast"] = f"Added column “{label}”."
+                st.rerun()
+
+
+def _render_db_editor(view_rows: list[dict]) -> None:
+    """The Edit grid: Status, Notes, and every user column editable inline;
+    computed columns locked. Diffs persist immediately (the Shortlist
+    editor's read-diff-write pattern), then rerun."""
+    ed_rows: list[dict] = []
+    for r in view_rows:
+        handle = r["handle"]
+        values = attrs_by_handle.get(handle) or {}
+        row: dict = {
+            "handle": handle,
+            "Startup": r["Startup"],
+            "Score": r["Score"],
+            "Status": r["Status"] or "New",
+        }
+        for col in db_columns:
+            raw = values.get(col["key"])
+            if col["type"] == "multiselect":
+                raw = (list(raw) if isinstance(raw, (list, tuple))
+                       else ([] if raw in (None, "") else [str(raw)]))
+            elif col["type"] == "checkbox":
+                raw = bool(raw)
+            elif col["type"] == "number":
+                raw = float(raw) if raw is not None else None
+            row[col["label"]] = raw
+        row["Notes"] = pipeline.get(handle, {}).get("notes") or ""
+        row["What they do"] = r["What they do"]
+        ed_rows.append(row)
+
+    config: dict = {
+        "handle": None,
+        "Startup": st.column_config.TextColumn("Startup", width="medium",
+                                               pinned=True),
+        "Score": st.column_config.ProgressColumn(
+            "Score", min_value=0, max_value=100, format="%d", width="small"),
+        "Status": st.column_config.SelectboxColumn(
+            "Status", options=list(STATUS_LABELS.values()), required=True,
+            width="small"),
+        "Notes": st.column_config.TextColumn("Notes", width="medium"),
+        "What they do": st.column_config.TextColumn("What they do",
+                                                    width="large"),
+    }
+    for col in db_columns:
+        label = col["label"]
+        if col["type"] == "select":
+            config[label] = st.column_config.SelectboxColumn(
+                label, options=col["options"], width="small")
+        elif col["type"] == "multiselect":
+            config[label] = st.column_config.MultiselectColumn(
+                label, options=col["options"], width="medium")
+        elif col["type"] == "number":
+            config[label] = st.column_config.NumberColumn(label, width="small")
+        elif col["type"] == "checkbox":
+            config[label] = st.column_config.CheckboxColumn(label, width="small")
+        else:
+            config[label] = st.column_config.TextColumn(label, width="medium")
+
+    edited = st.data_editor(
+        ed_rows, hide_index=True, use_container_width=True, key="sdb_editor",
+        height=min(560, 37 * (len(ed_rows) + 1) + 5),
+        disabled=["Startup", "Score", "What they do"],
+        column_config=config,
+    )
+    editable = ["Status", "Notes"] + [c["label"] for c in db_columns]
+    changes = _editor_changes(ed_rows, edited, editable)
+    if not changes:
+        return
+    label_to_col = {c["label"]: c for c in db_columns}
+    for handle, label, value in changes:
+        if label == "Status":
+            store.set_pipeline(handle, status=LABEL_TO_STATUS.get(value, "new"))
+        elif label == "Notes":
+            store.set_pipeline(handle, notes=value if isinstance(value, str) else "")
+        else:
+            store.set_attrs(handle, {label_to_col[label]["key"]: value})
+    st.session_state["toast"] = (
+        f"Saved {len(changes)} change{'s' if len(changes) != 1 else ''}.")
+    st.rerun()
+
+
+def _render_categorizer(view_rows: list[dict],
+                        summary_by_handle: dict[str, str]) -> None:
+    """Inside the Categorize popover: fill EMPTY select/multiselect cells for
+    the current filtered view with Claude — strictly on-list options only,
+    hand-set values never touched, rerun is a no-op."""
+    cat_cols = [c for c in db_columns
+                if c["type"] in ("select", "multiselect") and c["options"]
+                and c.get("ai_fill", True)]
+    if not cat_cols:
+        st.markdown(
+            '<div class="subtle">No AI-fillable select columns to categorize '
+            'into — add one in <b>Columns</b> first (judgment columns like '
+            'Priority are manual-only by design).</div>',
+            unsafe_allow_html=True)
+        return
+    todo = [r["handle"] for r in view_rows
+            if summary_by_handle.get(r["handle"], "").strip()
+            and any((attrs_by_handle.get(r["handle"]) or {}).get(c["key"])
+                    in (None, "", []) for c in cat_cols)]
+    names = " + ".join(c["label"] for c in cat_cols)
+    st.markdown(
+        f'<div class="subtle">Fills the <b>empty</b> {_e(names)} cells for '
+        f'the <b>{len(todo)}</b> startups in the current view (of '
+        f'{len(view_rows)} shown), using each startup\'s product summary. '
+        'Values come strictly from your option lists; hand-set cells are '
+        'never touched. ≈ $0.05–0.15 per 100 startups.</div>',
+        unsafe_allow_html=True,
+    )
+    if not todo:
+        st.markdown('<div class="subtle">Nothing to do — every startup in '
+                    'view is already categorized.</div>',
+                    unsafe_allow_html=True)
+        return
+    if st.button(f"Categorize {len(todo)} startups", type="primary",
+                 key="sdb_cat_go"):
+        payload = [{"handle": h, "summary": summary_by_handle[h]} for h in todo]
+        progress = st.progress(0.0, text="Categorizing…")
+        try:
+            result = categorize_startups(
+                payload, cat_cols, settings,
+                on_progress=lambda done, total: progress.progress(
+                    done / total, text=f"Categorizing… {done}/{total}"),
+            )
+        except Exception as exc:
+            progress.empty()
+            st.error(f"Auto-categorize failed: {exc}")
+            return
+        progress.empty()
+        wrote = 0
+        for handle, values in result.items():
+            current = attrs_by_handle.get(handle) or {}
+            changes = {k: v for k, v in values.items()
+                       if current.get(k) in (None, "", [])}
+            if changes:
+                store.set_attrs(handle, changes)
+                wrote += 1
+        st.session_state["toast"] = (
+            f"Categorized {wrote} of {len(todo)} startups"
+            + ("." if wrote == len(todo)
+               else " — the rest were too thin to classify.")
+        )
+        st.rerun()
+
+
 def _render_database() -> None:
-    """The startup database: one dossier row per tracked startup — what it
-    does, how it scored (Q/F/S) and why, funnel status, history. Selecting a
-    row opens the full record. The raw SQLite browser lives behind an
-    expander at the bottom."""
+    """The startup database — a working CRM over every tracked startup:
+    Browse (row-select → full dossier) and Edit (inline field editing) modes,
+    user-owned columns (curated Vertical/Use case/Priority seeds + custom
+    fields), per-field filters, and AI auto-categorization of the filtered
+    view. The raw SQLite browser lives behind a toggle at the bottom."""
     st.markdown(
         '<div class="section-title">Startup database</div>'
-        '<div class="section-sub">Every startup scout tracks, across all runs — the product, '
-        'the score and its quality / fit / signals components, funnel status, and history. '
-        'Select a row for the full dossier: evidence, per-dimension scoring with reasons, '
-        'the score math, and your manual adjustments.</div>',
+        '<div class="section-sub">Every startup scout tracks, across all runs — browse with '
+        'row-select dossiers, or switch to <b>Edit</b> to fill fields inline. Your own '
+        'columns (Vertical, Use case, Priority + any you add) live on every startup; '
+        '<b>Categorize</b> below the table fills the empty ones with AI.</div>',
         unsafe_allow_html=True,
     )
     if not ledger:
@@ -2734,6 +3010,7 @@ def _render_database() -> None:
         )
     else:
         db_rows: list[dict] = []
+        summary_by_handle: dict[str, str] = {}
         for e in ledger:
             lead = e.lead
             v = lead.llm
@@ -2742,14 +3019,15 @@ def _render_database() -> None:
             status = pipeline.get(handle, {}).get("status") or "new"
             what = ((v.product_summary if v else "")
                     or (v.one_line_summary if v else "") or lead.account.bio or "")
-            db_rows.append({
+            summary_by_handle[handle] = " ".join(what.split())
+            row = {
                 "handle": handle,
                 "Startup": display_name(lead),
                 "Score": round(lead.score),
                 "Q": None if comps["quality"] is None else round(comps["quality"]),
                 "F": None if comps["fit"] is None else round(comps["fit"]),
                 "S": None if comps["signals"] is None else round(comps["signals"]),
-                "What they do": " ".join(what.split()),
+                "What they do": summary_by_handle[handle],
                 "Stage": (STAGE_LABEL.get(v.stage, v.stage) if v and v.stage else ""),
                 "Sector": (" · ".join(x for x in [v.sector or "", v.subsector or ""] if x)
                            if v else ""),
@@ -2763,25 +3041,45 @@ def _render_database() -> None:
                                if e.first_seen_at else ""),
                 "Runs": e.times_seen,
                 "Profile": lead.account.url,
-            })
+            }
+            for col in db_columns:  # read-only attr rendering for Browse
+                row[col["label"]] = _attr_display(
+                    (attrs_by_handle.get(handle) or {}).get(col["key"]))
+            db_rows.append(row)
 
-        f1, f2, f3, f4 = st.columns([2.5, 1.35, 1.35, 1.1])
-        with f1:
+        # ---- toolbar: search · filters · mode · column manager
+        t1, t2, t3, t4 = st.columns([2.6, 0.95, 1.5, 0.95])
+        with t1:
             db_search = st.text_input(
                 "Search startups", key="sdb_q", label_visibility="collapsed",
                 placeholder="Search startup, product, sector, status…")
-        with f2:
-            stage_pick = st.multiselect(
-                "Stage", [STAGE_LABEL[s] for s in STAGES], key="sdb_stage",
-                label_visibility="collapsed", placeholder="All stages")
-        with f3:
-            status_pick = st.multiselect(
-                "Status", list(STATUS_LABELS.values()), key="sdb_status",
-                label_visibility="collapsed", placeholder="All statuses")
-        with f4:
-            sdb_min = st.number_input("Min score", 0, 100, 0, 5, key="sdb_min",
-                                      label_visibility="collapsed",
-                                      help="Minimum score")
+        with t2:
+            attr_filters: dict[str, tuple[str, set]] = {}
+            n_field_filters = 0
+            with st.popover("Filters"):
+                stage_pick = st.multiselect(
+                    "Stage", [STAGE_LABEL[s] for s in STAGES], key="sdb_stage",
+                    placeholder="All stages")
+                status_pick = st.multiselect(
+                    "Status", list(STATUS_LABELS.values()), key="sdb_status",
+                    placeholder="All statuses")
+                sdb_min = st.slider("Minimum score", 0, 100, 0, key="sdb_min")
+                for col in db_columns:
+                    if col["type"] in ("select", "multiselect") and col["options"]:
+                        picks = st.multiselect(
+                            col["label"], col["options"],
+                            key=f"sdbf_{col['key']}", placeholder="Any")
+                        if picks:
+                            attr_filters[col["key"]] = (col["type"], set(picks))
+                            n_field_filters += 1
+        with t3:
+            st.session_state.setdefault("sdb_mode", "Browse")
+            sdb_mode = st.segmented_control(
+                "Mode", ["Browse", "Edit"], key="sdb_mode",
+                label_visibility="collapsed") or "Browse"
+        with t4:
+            with st.popover("Columns"):
+                _render_column_manager()
 
         def _sdb_keep(r: dict) -> bool:
             if stage_pick and r["Stage"] not in stage_pick:
@@ -2790,6 +3088,13 @@ def _render_database() -> None:
                 return False
             if r["Score"] < sdb_min:
                 return False
+            for key, (ctype, picks) in attr_filters.items():
+                value = (attrs_by_handle.get(r["handle"]) or {}).get(key)
+                if ctype == "select":
+                    if value not in picks:
+                        return False
+                elif not (isinstance(value, list) and picks & set(value)):
+                    return False
             if db_search.strip():
                 hay = " ".join(str(x) for x in r.values()).lower()
                 if db_search.strip().lower() not in hay:
@@ -2797,66 +3102,81 @@ def _render_database() -> None:
             return True
 
         view_rows = [r for r in db_rows if _sdb_keep(r)]
+        attr_labels = [c["label"] for c in db_columns]
+        filters_note = (f" · {n_field_filters} field filter"
+                        f"{'s' if n_field_filters != 1 else ''} on"
+                        if n_field_filters else "")
+        hint = ("select a row for the full dossier" if sdb_mode == "Browse"
+                else "edit Status, Notes, and your columns directly — changes save on the spot")
         st.markdown(
             f'<div class="subtle" style="margin:2px 0 8px">{len(view_rows)} of '
-            f'{len(db_rows)} startups · select a row for the full dossier</div>',
+            f'{len(db_rows)} startups{filters_note} · {hint}</div>',
             unsafe_allow_html=True,
         )
-        df = pd.DataFrame(view_rows)
-        event = st.dataframe(
-            df, use_container_width=True, hide_index=True, key="sdb_table",
-            on_select="rerun", selection_mode="single-row",
-            height=min(560, 37 * (len(df) + 1) + 5),
-            column_order=["Startup", "Score", "Q", "F", "S", "What they do",
-                          "Stage", "Sector", "Customers", "Status", "Adjusted",
-                          "Memo", "Followers", "First seen", "Runs", "Profile"],
-            column_config={
-                "handle": None,
-                "Startup": st.column_config.TextColumn("Startup", width="medium",
-                                                       pinned=True),
-                "Score": st.column_config.ProgressColumn(
-                    "Score", min_value=0, max_value=100, format="%d", width="small",
-                    help="Final score — quality/fit/signals blend × trust multipliers"),
-                "Q": st.column_config.NumberColumn(
-                    "Q", width="small",
-                    help="Company quality 0–100 — Claude's evidence-backed rubric "
-                         "(team, tech, market, moat, traction, investors)"),
-                "F": st.column_config.NumberColumn(
-                    "F", width="small", help="Thesis fit 0–100"),
-                "S": st.column_config.NumberColumn(
-                    "S", width="small", help="X-signal momentum 0–100"),
-                "What they do": st.column_config.TextColumn("What they do",
-                                                            width="large"),
-                "Adjusted": st.column_config.TextColumn(
-                    "✎", width="small", help="Manually adjusted scoring"),
-                "Memo": st.column_config.TextColumn(
-                    "Memo", width="small", help="Investment memo on file"),
-                "Followers": st.column_config.NumberColumn("Followers",
-                                                           format="localized"),
-                "Profile": st.column_config.LinkColumn(
-                    "Profile", display_text=r"x\.com/(.+)", width="small"),
-            },
-        )
-        st.download_button(
+
+        if sdb_mode == "Edit":
+            _render_db_editor(view_rows)
+        else:
+            df = pd.DataFrame(view_rows)
+            event = st.dataframe(
+                df, use_container_width=True, hide_index=True, key="sdb_table",
+                on_select="rerun", selection_mode="single-row",
+                height=min(560, 37 * (len(df) + 1) + 5),
+                column_order=["Startup", "Score", "Q", "F", "S", "What they do",
+                              "Stage", "Sector", "Customers", "Status",
+                              *attr_labels, "Adjusted", "Memo", "Followers",
+                              "First seen", "Runs", "Profile"],
+                column_config={
+                    "handle": None,
+                    "Startup": st.column_config.TextColumn("Startup", width="medium",
+                                                           pinned=True),
+                    "Score": st.column_config.ProgressColumn(
+                        "Score", min_value=0, max_value=100, format="%d", width="small",
+                        help="Final score — quality/fit/signals blend × trust multipliers"),
+                    "Q": st.column_config.NumberColumn(
+                        "Q", width="small",
+                        help="Company quality 0–100 — Claude's evidence-backed rubric "
+                             "(team, tech, market, moat, traction, investors)"),
+                    "F": st.column_config.NumberColumn(
+                        "F", width="small", help="Thesis fit 0–100"),
+                    "S": st.column_config.NumberColumn(
+                        "S", width="small", help="X-signal momentum 0–100"),
+                    "What they do": st.column_config.TextColumn("What they do",
+                                                                width="large"),
+                    "Adjusted": st.column_config.TextColumn(
+                        "✎", width="small", help="Manually adjusted scoring"),
+                    "Memo": st.column_config.TextColumn(
+                        "Memo", width="small", help="Investment memo on file"),
+                    "Followers": st.column_config.NumberColumn("Followers",
+                                                               format="localized"),
+                    "Profile": st.column_config.LinkColumn(
+                        "Profile", display_text=r"x\.com/(.+)", width="small"),
+                },
+            )
+            picked_rows = (event.selection.rows or []) if event is not None else []
+            # Bounds check: a selection made before a filter change can
+            # outlive the rows it pointed at.
+            if picked_rows and not df.empty and picked_rows[0] < len(df):
+                sel_handle = str(df.iloc[picked_rows[0]]["handle"])
+                sel_lead = lead_by_handle.get(sel_handle)
+                if sel_lead is not None:
+                    st.write("")
+                    st.markdown('<div class="section-title" style="font-size:1.15rem">Dossier</div>',
+                                unsafe_allow_html=True)
+                    _lead_card(sel_lead, entry_by_handle.get(sel_handle),
+                               fresh=sel_handle in latest_handles,
+                               details_open=True, key_ns="db")
+
+        fcsv, fcat, _fsp = st.columns([1.9, 1.05, 3.05])
+        view_df = pd.DataFrame(view_rows)
+        fcsv.download_button(
             f"Download view as CSV ({len(view_rows)} startups)",
-            df.drop(columns=["handle"]).to_csv(index=False).encode("utf-8")
-            if not df.empty else b"",
+            view_df.drop(columns=["handle"]).to_csv(index=False).encode("utf-8")
+            if not view_df.empty else b"",
             file_name="startups_view.csv", key="sdb_csv",
         )
-
-        picked_rows = (event.selection.rows or []) if event is not None else []
-        # Bounds check: a selection made before a filter change can outlive
-        # the rows it pointed at.
-        if picked_rows and not df.empty and picked_rows[0] < len(df):
-            sel_handle = str(df.iloc[picked_rows[0]]["handle"])
-            sel_lead = lead_by_handle.get(sel_handle)
-            if sel_lead is not None:
-                st.write("")
-                st.markdown('<div class="section-title" style="font-size:1.15rem">Dossier</div>',
-                            unsafe_allow_html=True)
-                _lead_card(sel_lead, entry_by_handle.get(sel_handle),
-                           fresh=sel_handle in latest_handles,
-                           details_open=True, key_ns="db")
+        with fcat.popover("Categorize"):
+            _render_categorizer(view_rows, summary_by_handle)
 
     st.write("")
     # A toggle, not an expander — the raw browser has its own SQL expander

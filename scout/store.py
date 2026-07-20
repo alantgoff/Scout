@@ -605,6 +605,122 @@ class Store:
             counts[status] = counts.get(status, 0) + 1
         return counts
 
+    # ------------------------------------------- startup columns & attributes
+
+    # The user-owned data layer behind the Database page: a column schema the
+    # user controls (curated selects, custom fields) + per-startup values.
+    # Types: select | multiselect | text | number | checkbox.
+
+    def ensure_default_columns(self, defaults: list[dict]) -> None:
+        """Seed the schema ONCE — only when the table has never existed.
+
+        Deleting a builtin column must stick, so presence of the table (even
+        emptied) suppresses re-seeding. `defaults`: [{key, label, type,
+        options}] in display order."""
+        if self.db["startup_columns"].exists():
+            return
+        for position, column in enumerate(defaults):
+            self.save_column(
+                column["key"], column["label"], column["type"],
+                options=column.get("options") or [],
+                builtin=True, position=position,
+                ai_fill=column.get("ai_fill", True),
+            )
+
+    def save_column(
+        self,
+        key: str,
+        label: str,
+        col_type: str,
+        *,
+        options: list[str] | None = None,
+        builtin: bool = False,
+        position: int | None = None,
+        ai_fill: bool = True,
+    ) -> None:
+        """Create or update one schema column (updating = editing options or
+        label; the key is stable). Position defaults to end-of-list.
+        `ai_fill=False` marks judgment columns (e.g. Priority) that
+        auto-categorization must never fill."""
+        key = key.strip()
+        if not key:
+            raise ValueError("column key must be non-empty")
+        if position is None:
+            existing = [c["position"] for c in self.list_columns()]
+            position = (max(existing) + 1) if existing else 0
+        self.db["startup_columns"].upsert(
+            {
+                "key": key,
+                "label": label.strip() or key,
+                "type": col_type,
+                "options_json": json.dumps(options or []),
+                "builtin": 1 if builtin else 0,
+                "position": int(position),
+                "ai_fill": 1 if ai_fill else 0,
+                "created_at": datetime.now(timezone.utc).isoformat(),
+            },
+            pk="key",
+            alter=True,
+            columns={"builtin": int, "position": int, "ai_fill": int},
+        )
+
+    def delete_column(self, key: str) -> None:
+        """Drop a column from the schema. Values under the key are left in
+        startup_attrs and simply never rendered again (harmless; a re-added
+        column with the same key would resurface them)."""
+        if self.db["startup_columns"].exists():
+            self.db.execute("delete from startup_columns where key = ?", [key])
+            self.db.conn.commit()
+
+    def list_columns(self) -> list[dict]:
+        """Schema columns in display order, options decoded."""
+        if not self.db["startup_columns"].exists():
+            return []
+        rows = []
+        for r in self.db["startup_columns"].rows_where(
+                order_by="position, created_at"):
+            row = dict(r)
+            row["options"] = json.loads(row.get("options_json") or "[]")
+            row["builtin"] = bool(row.get("builtin"))
+            # Rows written before the flag existed default to AI-fillable.
+            row["ai_fill"] = bool(row["ai_fill"]) if "ai_fill" in row else True
+            rows.append(row)
+        return rows
+
+    def set_attrs(self, handle: str, changes: dict) -> None:
+        """Merge per-startup attribute values (column key → value). A None
+        value deletes the key. Read-merge-write, like set_pipeline."""
+        handle = handle.lstrip("@").lower()
+        values: dict = {}
+        if self.db["startup_attrs"].exists():
+            rows = list(self.db["startup_attrs"].rows_where(
+                "handle = ?", [handle], limit=1))
+            if rows:
+                values = json.loads(rows[0].get("values_json") or "{}")
+        for key, value in changes.items():
+            if value is None:
+                values.pop(key, None)
+            else:
+                values[key] = value
+        self.db["startup_attrs"].upsert(
+            {
+                "handle": handle,
+                "values_json": json.dumps(values),
+                "updated_at": datetime.now(timezone.utc).isoformat(),
+            },
+            pk="handle",
+            alter=True,
+        )
+
+    def all_attrs(self) -> dict[str, dict]:
+        """Every startup's attribute values, keyed by lowercased handle."""
+        if not self.db["startup_attrs"].exists():
+            return {}
+        return {
+            r["handle"]: json.loads(r.get("values_json") or "{}")
+            for r in self.db["startup_attrs"].rows
+        }
+
     # --------------------------------------------------------- score overrides
 
     def set_override(
