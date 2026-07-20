@@ -38,6 +38,7 @@ import asyncio
 import json
 import re
 import time
+from collections.abc import Callable
 
 import anthropic
 from pydantic import BaseModel, Field, ValidationError
@@ -692,10 +693,88 @@ def parse_strategy(text: str) -> StrategyProposal:
     return proposal
 
 
+# The config fields the strategy agent emits, in generation order, paired
+# with the human-readable stage shown live as each one starts streaming.
+# _call_stream watches the growing JSON for each key and fires on_progress so
+# the UI can narrate "what it's working on" instead of a blank spinner.
+_STRATEGY_STAGES: list[tuple[str, str]] = [
+    ("thesis", "Restating the thesis"),
+    ("rationale", "Writing the rationale"),
+    ("target_stages", "Choosing target stages"),
+    ("keywords", "Bio-intent keywords"),
+    ("target_bios", "Departure markers"),
+    ("sectors", "Sectors"),
+    ("disqualifiers", "Disqualifiers"),
+    ("launch_phrases", "Launch phrases"),
+    ("searches_departure", "Departure searches"),
+    ("searches_stealth_intent", "Stealth-intent searches"),
+    ("searches_hiring", "Founding-team hiring searches"),
+    ("searches_launch", "Just-launched searches"),
+    ("bio_searches", "Bio searches"),
+    ("github_topics", "GitHub topics"),
+    ("watchlist", "Investor watchlist"),
+]
+
+
+@retry(
+    stop=stop_after_attempt(3),
+    wait=wait_random_exponential(multiplier=1, max=30),
+    retry=(
+        retry_if_exception_type((anthropic.RateLimitError, anthropic.InternalServerError))
+        | (
+            retry_if_exception_type(anthropic.APIConnectionError)
+            & retry_if_not_exception_type(anthropic.APITimeoutError)
+        )
+    ),
+    reraise=True,
+)
+def _call_stream(
+    client: anthropic.Anthropic,
+    model: str,
+    system: str,
+    user: str,
+    on_progress: Callable[[str], None] | None = None,
+    max_tokens: int = 4096,
+) -> str:
+    """Same single-shot call as `_call`, but STREAMED: as the JSON builds,
+    fire `on_progress(label)` once per top-level key (in schema order) so the
+    UI can show what's being written. Returns the full text, identical to
+    `_call`. Progress display failures never break generation."""
+    announced: set[str] = set()
+    with client.messages.stream(
+        model=model, max_tokens=max_tokens, system=system,
+        messages=[{"role": "user", "content": user}],
+    ) as stream:
+        acc: list[str] = []
+        for chunk in stream.text_stream:
+            acc.append(chunk)
+            if on_progress is None:
+                continue
+            joined = "".join(acc)
+            for key, label in _STRATEGY_STAGES:
+                # Match the JSON member start ("key":) — not a bare mention of
+                # the word inside a value string (e.g. the rationale prose).
+                if key not in announced and re.search(
+                    rf'"{re.escape(key)}"\s*:', joined
+                ):
+                    announced.add(key)
+                    try:
+                        on_progress(label)
+                    except Exception:
+                        pass
+        final = stream.get_final_message()
+    return next(b.text for b in final.content if b.type == "text").strip()
+
+
 def generate_strategy(
-    description: str, thesis: Thesis, seeds: Seeds, settings: Settings
+    description: str, thesis: Thesis, seeds: Seeds, settings: Settings,
+    on_progress: Callable[[str], None] | None = None,
 ) -> StrategyProposal:
     """Turn a natural-language thesis into a full sourcing configuration.
+
+    When `on_progress` is given the call is streamed and the callback fires
+    once per config section as it starts writing (live UI narration);
+    otherwise it's a plain blocking call (CLI, tests).
 
     Raises RuntimeError when no Anthropic key is configured or the reply
     can't be parsed — the strategy agent has no meaningful offline fallback.
@@ -718,7 +797,11 @@ def generate_strategy(
     last_error: Exception | None = None
     try:
         for _ in range(PARSE_ATTEMPTS):
-            text = _call(client, settings.claude_model, _STRATEGY_SYSTEM, prompt)
+            if on_progress is not None:
+                text = _call_stream(client, settings.claude_model,
+                                    _STRATEGY_SYSTEM, prompt, on_progress)
+            else:
+                text = _call(client, settings.claude_model, _STRATEGY_SYSTEM, prompt)
             try:
                 return parse_strategy(text)
             except (json.JSONDecodeError, ValidationError, ValueError) as exc:

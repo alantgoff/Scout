@@ -629,3 +629,52 @@ def test_memo_section_check_is_case_insensitive(monkeypatch) -> None:
     )
     assert is_ai is True
     assert "missing_sections" not in meta
+
+
+def test_call_stream_reports_progress_per_config_section() -> None:
+    """The streamed strategy call fires on_progress once per top-level config
+    key, in schema order — and a bare mention of a key inside the rationale
+    prose must NOT prematurely fire that stage."""
+    from scout import agents
+
+    payload = json.dumps({
+        "thesis": "t",
+        # "watchlist" and "keywords" appear here as prose, NOT as JSON members.
+        "rationale": "the watchlist and keywords are discussed here as prose",
+        "keywords": ["a"],
+        "watchlist": ["x"],
+    })
+
+    class _Block:
+        type = "text"
+        text = payload
+
+    class _Final:
+        content = [_Block()]
+
+    class _Stream:
+        text_stream = list(payload)  # char-by-char to stress incremental match
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+        def get_final_message(self):
+            return _Final()
+
+    class _Client:
+        class messages:  # noqa: N801 — mimics the SDK surface
+            @staticmethod
+            def stream(**kwargs):
+                return _Stream()
+
+    events: list[str] = []
+    text = agents._call_stream(_Client(), "m", "sys", "user",
+                               on_progress=events.append)
+    assert text == payload
+    # thesis → rationale → keywords → watchlist, each exactly once, in order.
+    # The prose mentions of watchlist/keywords never fire early.
+    assert events == ["Restating the thesis", "Writing the rationale",
+                      "Bio-intent keywords", "Investor watchlist"]

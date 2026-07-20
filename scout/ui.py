@@ -2424,16 +2424,37 @@ if nav == "Thesis":
     generate_col, _ = st.columns([1.6, 4])
     if generate_col.button("Design strategy with AI", type="primary",
                            disabled=not description.strip()):
+        # Live status: the strategy agent streams a big JSON config in one
+        # call (~30–60s), so narrate each section as Claude writes it instead
+        # of a blank spinner. status.write/update flush to the frontend during
+        # the run, exactly like the deep-research memo narration.
+        status = st.status("Designing strategy with AI…", expanded=True)
+        done: list[str] = []
+
+        def on_progress(label: str) -> None:
+            done.append(label)
+            status.update(label=f"Designing strategy — {label}…")
+            status.write(f"✍️ {label}")
+
         try:
-            with st.spinner("Designing strategy — Claude is writing your query bank…"):
-                proposal_new = generate_strategy(description, thesis, seeds, settings)
-                _, wl_invalid, wl_validated = validate_watchlist(
-                    proposal_new.watchlist, settings, store
-                )
+            status.write("Claude is drafting your full sourcing config — "
+                         "targeting, the X query bank, bio searches, GitHub "
+                         "topics, and a watchlist.")
+            proposal_new = generate_strategy(description, thesis, seeds, settings,
+                                             on_progress=on_progress)
+            status.update(label="Validating watchlist handles on X…")
+            status.write("🔎 Checking the watchlist resolves on X…")
+            _, wl_invalid, wl_validated = validate_watchlist(
+                proposal_new.watchlist, settings, store
+            )
+            status.update(label=f"Strategy ready — {len(done)} sections written. "
+                                "Review below.",
+                          state="complete", expanded=False)
             st.session_state["proposal"] = proposal_new
             st.session_state["watchlist_invalid"] = wl_invalid
             st.session_state["watchlist_validated"] = wl_validated
         except RuntimeError as exc:
+            status.update(label="Strategy generation failed.", state="error")
             st.error(str(exc))
 
     proposal = st.session_state.get("proposal")
