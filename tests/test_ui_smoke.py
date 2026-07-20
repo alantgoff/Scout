@@ -37,9 +37,11 @@ def seed_store(db_path: Path) -> None:
                        one_line_summary="Building an eval platform.",
                        thesis_fit=0.8, confidence=0.9,
                        grounding="website", customer_type="b2b",
-                       quality={"team": 0.8, "traction": 0.6},
-                       quality_reasons={"team": "prev sold EvalCo",
-                                        "traction": "website: 12 logos"},
+                       scorecard={"prev_founder_experience": 3,
+                                  "commercial_traction": 2,
+                                  "tech_moat_ip": 3},
+                       scorecard_reasons={"prev_founder_experience": "prev sold EvalCo",
+                                          "commercial_traction": "website: 12 logos"},
                        value_add_fit=0.7,
                        value_add_levers={"global_expansion": 0.9,
                                          "data_driven_growth": 0.5},
@@ -102,9 +104,10 @@ def test_ui_renders_without_exceptions(tmp_path, monkeypatch) -> None:
     # The firm value-add dimension renders (chip + lever bars in Details)
     assert "lift 70%" in page_text
     assert "Local-to-global expansion" in page_text
-    # Scoring is broken out with explanations: rubric header, blend share,
-    # per-dim citation, missing dims shown as excluded, the math intro.
-    assert "Company quality" in page_text
+    # Scoring is broken out with explanations: scorecard header + band,
+    # blend share, per-criterion citation, excluded sections, the math intro.
+    assert "Scorecard" in page_text
+    assert "Enterprise readiness" in page_text
     assert "of the blend" in page_text
     assert "12 logos" in page_text
     assert "no evidence — excluded" in page_text
@@ -144,6 +147,27 @@ def test_ui_renders_without_exceptions(tmp_path, monkeypatch) -> None:
     at.run()
     assert not at.exception
     assert "X API spend" in _page_text(at)
+
+
+def test_longlist_and_shortlist_render_cards_with_leads(tmp_path, monkeypatch) -> None:
+    """The funnel pages call _lead_card, which reaches module-level helpers
+    (e.g. _attr_display) that must be bound before ANY nav block runs — not
+    just the Startups page. The base smoke test only hits the empty states,
+    so this seeds a longlisted + shortlisted lead and renders both pages."""
+    at = _app(tmp_path, monkeypatch)
+    at.run()
+    store = Store(tmp_path / "smoke.db")
+    store.set_pipeline("smoke_founder", status="longlisted")
+    store.set_pipeline("nora_builds", status="shortlisted")
+
+    at.session_state["nav"] = "Longlist"
+    at.run()
+    assert not at.exception, at.exception[0].message if at.exception else ""
+    assert "SmokeCo" in _page_text(at)  # the card rendered, not the empty state
+
+    at.session_state["nav"] = "Shortlist"
+    at.run()
+    assert not at.exception, at.exception[0].message if at.exception else ""
 
 
 def test_memo_button_routes_and_generates_named_by_startup(tmp_path, monkeypatch) -> None:

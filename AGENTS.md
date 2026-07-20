@@ -111,9 +111,16 @@ scout/
   dbfields.py       Pure grid helpers for the Database CRM: slugify_key,
                     canon, editor_changes (data_editor diffing), attr_display.
                     Kept out of ui.py so they unit-test without Streamlit.
+  rubric.py         Pure scorecard registry: the B2B "Enterprise readiness" and
+                    B2C "Consumer readiness" rubrics (sections → 1–3 criteria
+                    with purposes, anchors, sub-weights), rubric_for routing,
+                    band_for/BAND_LABELS, and prompt_block() (renders both
+                    rubrics into the classifier prompt via {scorecard}).
   score.py          Pure scoring. score_leads + score_breakdown (THE score math,
-                    single source of truth; UI renders its steps) + apply_override
-                    (manual quality/fit/pinned-score overrides re-entering that math).
+                    single source of truth; UI renders its steps) +
+                    scorecard_score (criteria → sections → 0–100 + band) +
+                    company_quality (scorecard-vs-legacy dispatch) + apply_override
+                    (manual section/fit/pinned-score overrides re-entering that math).
   export.py         CSV + Markdown writers, rich terminal table, memo_pdf_bytes
                     (markdown-pdf/PyMuPDF investment-memo PDF), override-aware
                     pipeline_rows(store, thesis).
@@ -233,9 +240,18 @@ shortlist / pass, persisted in the `pipeline` table as statuses `longlisted` /
 
 1. Components (each 0–100, absent when unevidenced):
    `signals = 100 × Σ(value_i × weight_i) / Σ(all thesis weights)`;
-   `quality = 100 × Σ(dim_i × quality_weight_i) / Σ(weights of PRESENT dims)`
-   (dims from `llm.quality` — the evidence-backed rubric, keys in
-   `config.QUALITY_DIMENSIONS`, weights in `thesis.quality_weights`);
+   `quality = the readiness SCORECARD` (`score.scorecard_score`): criteria
+   from `llm.scorecard` (key → 1–3, evidence-cited, omit-don't-guess; the
+   rubric registry lives in `scout/rubric.py`) → per-section weighted average
+   over PRESENT criteria mapped `(avg−1)/2×100` → total renormalized over
+   present sections with weights from `thesis.scorecard_weights` (per rubric).
+   `customer_type` routes the rubric: b2c → consumer scorecard; b2b / b2b2c /
+   mixed / None → enterprise. The 0–100 total carries a band
+   (`rubric.band_for`: ≥80 Strong · 60–79 Promising · <60 Too early).
+   LEGACY verdicts (pre-scorecard cache, flat `llm.quality` dims over
+   `config.QUALITY_DIMENSIONS` / `thesis.quality_weights`) still score via
+   `score.quality_score`; `score.company_quality` is the dispatch point —
+   use IT, never call either path directly from UI/export code.
    `fit = 100 × llm.thesis_fit`.
 2. `base = Σ(score_weight_c × component_c) / Σ(weights of PRESENT components)`
    — the 45/35/20 blend (`signal_params.score_weight_quality/_fit/_signals`),
@@ -254,11 +270,18 @@ shortlist / pass, persisted in the `pipeline` table as statuses `longlisted` /
    confidence multiplier (dropping them used to RESTORE the full heuristic
    score, rewarding speculation over honest unknowns).
 
-The quality rubric is scored through a **customer_type lens** (b2b / b2c /
-b2b2c / mixed): B2B traction = logos/pilots/pipeline/SOC2, B2C = users/
-growth/retention/virality. `team` is the one dimension where founder
-background counts (as cited team evidence — never product evidence);
-`investors` needs NAMED investors (watchlist follows cap it at 0.3).
+The scorecard rubrics (`scout/rubric.py`, derived from the V5 "Enterprise
+Readiness Evaluation Framework" spreadsheet, refined for sourcing-time
+evidence): **B2B "Enterprise readiness"** — Founders & cap table 18 / Market
+23 / Technology 23 / Product 18 / Traction & business model 18; **B2C
+"Consumer readiness"** — Founders & cap table 18 / Market 23 / Product &
+experience 23 / Growth & engagement 18 / Monetization & business model 18.
+Criterion sub-weights are code-owned in the registry; section weights are
+UI-editable (`thesis.scorecard_weights`). The founders & cap table criteria
+are the ONLY place founder background counts (cited concretely — never
+product evidence); the classifier prompt renders both rubrics from
+`rubric.prompt_block()` via the `{scorecard}` placeholder, so prompt and
+math can never drift.
 
 The 9 signals (heuristics.py). Three read enrichment fields set by the pipeline
 from store history, not by adapters — `recent_followed_by`, `bio_changed`,
@@ -281,11 +304,14 @@ from store history, not by adapters — `recent_followed_by`, `bio_changed`,
 multiplier) are UI-editable, read by the heuristics — do not re-hardcode them.
 
 **Manual overrides** layer on top at load time, not at run time:
-`store.score_overrides` rows (per-handle quality dims / thesis fit / pinned
-score + note) are applied by `score.apply_override` in ui.py and in
-`export.pipeline_rows(store, thesis)` — adjusted dims/fit are written into the
-verdict (with "manual" reasons) and re-enter `score_breakdown`; a pinned score
-wins outright and shows as a final "manual score override" step. Stored leads
+`store.score_overrides` rows (per-handle scorecard sections 0–100 / legacy
+quality dims / thesis fit / pinned score + note) are applied by
+`score.apply_override` in ui.py and in `export.pipeline_rows(store, thesis)`
+— adjusted sections land in `verdict.scorecard_manual` and replace the
+computed section scores inside the rollup (legacy dim overrides only touch
+pre-scorecard verdicts); fit is written into the verdict (with a "manual"
+reason); everything re-enters `score_breakdown`; a pinned score wins
+outright and shows as a final "manual score override" step. Stored leads
 in the DB keep the model's numbers; overrides live only in their own table.
 
 ---
@@ -302,7 +328,7 @@ in the DB keep the model's numbers; overrides live only in their own table.
 | bio_snapshots | bio history for bio_change detection |
 | unlinked_leads | github/hn founders with no X handle (manual lookup) |
 | pipeline | deal-flow state: status, notes, outreach, channel, brief (the investment memo) + brief_at / brief_edited_at / brief_meta_json (depth, sources, searches, honesty flags) |
-| score_overrides | the investor's manual scoring per handle (quality dims / fit / pinned score + note) — applied at load by `score.apply_override` |
+| score_overrides | the investor's manual scoring per handle (scorecard sections 0–100 / legacy quality dims / fit / pinned score + note) — applied at load by `score.apply_override` |
 | startup_columns | the Database CRM's user-owned column schema: key, label, type (select/multiselect/text/number/checkbox), options_json, builtin, ai_fill, position. Seeded ONCE by `ensure_default_columns` (table existence suppresses re-seeding, so deleting a builtin sticks) |
 | startup_attrs | per-startup values for those columns (values_json merge store; None deletes a key) |
 | llm_verdicts | **verdict cache** — Claude verdict per handle, keyed by an input fingerprint (bio + tweets + rendered prompt + model + website URL + site-text hash + github + pinned); TTL `VERDICT_TTL_DAYS`. The audit pass re-records corrected verdicts under the same fingerprint |
@@ -388,6 +414,12 @@ silently widen its input set to all-time).
   `typer.Exit(1)`, never a traceback.
 - **Change scoring:** edit `score_breakdown` only — everything else (score_leads,
   the UI's step display) flows from it.
+- **Change the scorecard rubrics:** edit the registry in `scout/rubric.py`
+  only — criteria, purposes, anchors, sub-weights, and the prompt block all
+  live there; `test_rubric.py` pins the invariants (weights sum, unique keys,
+  3 anchors each). Changing it re-renders the classifier prompt, which
+  invalidates the verdict cache — `scout reclassify` backfills. Section
+  weights are data (`thesis.scorecard_weights`), not code.
 - **Add a stage behavior:** edit the `STAGE_SEARCH_CATEGORIES` /
   `STAGE_DISCOVERY_SOURCES` / `STAGE_BIO_GRAPH` maps in config.py.
 - **Add a database column type:** extend `dbfields.ATTR_TYPE_LABELS`, the
@@ -418,6 +450,16 @@ silently widen its input set to all-time).
   with expander state preservation (see the stateless-expander note in ui.py),
   triage insights + AI weight suggestions (insights.py + suggest_weights),
   pipeline CSV export, agent timeouts, staleness nudge.
+- v5 additions: the readiness SCORECARD replaced the flat v7 quality rubric as
+  the quality component — B2B enterprise + B2C consumer rubrics in
+  `scout/rubric.py` (derived from the V5 scorecard spreadsheet), criteria 1–3
+  → weighted sections → 0–100 + band, routed by customer_type; section-level
+  manual overrides (`sections_json`); Band column in the CRM; scorecard in
+  memos/CSV/digest. Legacy flat-quality verdicts still render and score via
+  `company_quality` dispatch until `scout reclassify` re-scores them (the
+  prompt change auto-invalidated the verdict cache). The dead
+  `thesis_fit_weight` key in thesis.yaml is ignored by pydantic and drops on
+  the next Settings save.
 - **Waiting on the user:** X account cookies (`TW_COOKIES`) to activate the X
   discovery legs (query bank, bio search, follow-graph); replacing the suggested
   default `watchlist` in seeds.yaml with Headline's own investors.

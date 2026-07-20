@@ -333,6 +333,7 @@ def test_score_override_roundtrip_and_clear(tmp_path: Path) -> None:
     store.set_override("Ada", quality={"traction": 0.9}, fit=0.5, note="saw the demo")
     row = store.all_overrides()["ada"]  # handle lowercased
     assert row["quality"] == {"traction": 0.9}
+    assert row["sections"] == {}
     assert row["fit"] == 0.5
     assert row["score"] is None
     assert row["note"] == "saw the demo"
@@ -341,6 +342,18 @@ def test_score_override_roundtrip_and_clear(tmp_path: Path) -> None:
     row = store.all_overrides()["ada"]
     assert row["score"] == 88.0 and row["quality"] == {} and row["fit"] is None
     store.clear_override("@Ada")
+    assert store.all_overrides() == {}
+
+
+def test_score_override_sections_roundtrip(tmp_path: Path) -> None:
+    store = Store(tmp_path / "t.db")
+    store.set_override("Ada", sections={"market": 80.0, "technology": 55.0},
+                       note="their traction is better than the model thinks")
+    row = store.all_overrides()["ada"]
+    assert row["sections"] == {"market": 80.0, "technology": 55.0}
+    assert row["quality"] == {}
+    # A section-only override still clears when everything empties out.
+    store.set_override("ada", sections=None, quality=None, fit=None, score=None)
     assert store.all_overrides() == {}
 
 

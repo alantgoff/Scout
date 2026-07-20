@@ -13,8 +13,8 @@ Two agents:
   questions for a first call). Cached by the caller in the pipeline table.
 
 - **Investment-memo agent** (`investment_memo`): one scored lead plus its
-  full evidence dossier (labeled website crawl, recent tweets, quality
-  rubric) in, a multi-section internal investment memo out — overview,
+  full evidence dossier (labeled website crawl, recent tweets, readiness
+  scorecard) in, a multi-section internal investment memo out — overview,
   product & differentiation, tech & architecture, competitive landscape
   (table), market sizing, strategic capital & acquisition dynamics,
   recommendation (VERDICT line). Three depths: quick (dossier only),
@@ -49,8 +49,10 @@ from tenacity import (
     wait_random_exponential,
 )
 
+from scout import rubric as rubric_mod
 from scout.config import STAGES, Seeds, Settings, Thesis
 from scout.models import Lead
+from scout.score import scorecard_score
 
 PARSE_ATTEMPTS = 3
 
@@ -180,7 +182,8 @@ A numbered list — [n] page title — URL — of only the sources you actually 
 
 _MEMO_SYSTEM = """You are a venture analyst at {firm} writing an INTERNAL investment memo \
 on an early-stage startup sourced from X/Twitter. You get an evidence dossier: profile \
-data, scored signals, the classifier's verdict with a per-dimension quality rubric, \
+data, scored signals, the classifier's verdict with a per-criterion readiness scorecard \
+(enterprise rubric for B2B, consumer for B2C — each criterion 1-3, evidence-cited), \
 recent tweets, and labeled text captured from websites on file.
 
 EVIDENCE RULES (non-negotiable):
@@ -324,8 +327,23 @@ def _memo_template(lead: Lead, thesis: Thesis) -> str:
     hits = ", ".join(s.name for s in lead.signals if s.value > 0) or "none"
     fit = (f"{verdict.thesis_fit:.0%} — {verdict.fit_reason or 'no reason recorded'}"
            if verdict and verdict.thesis_fit is not None else "not scored")
+    quality_heading = "Quality rubric (evidence-backed dimensions):"
     quality = ""
-    if verdict and verdict.quality:
+    scorecard = scorecard_score(verdict, thesis)
+    if scorecard is not None:
+        result, sections = scorecard
+        quality_heading = (
+            f"Readiness scorecard ({result.rubric_label}): {result.total:.0f}/100 "
+            f"— {rubric_mod.BAND_LABELS[result.band]} "
+            f"({result.n_present_sections}/{result.n_sections} sections evidence-backed):"
+        )
+        quality = "\n".join(
+            f"- {s.label}: {s.score:.0f}/100"
+            + (" (manual override)" if s.manual
+               else f" ({s.n_present}/{s.n_total} criteria scored)")
+            for s in sections if s.score is not None
+        )
+    elif verdict and verdict.quality:
         quality = "\n".join(
             f"- {k}: {v:.0%}" + (f" — {verdict.quality_reasons[k]}"
                                  if verdict.quality_reasons.get(k) else "")
@@ -367,7 +385,7 @@ Not in evidence — requires analyst judgment on acquirer fit and tuck-in vs. pl
 
 Thesis fit: {fit}
 
-Quality rubric (evidence-backed dimensions):
+{quality_heading}
 {quality or '- none scored'}
 
 First-call questions: What are you building and why now? What's the unique advantage? Who is the first customer? What would make this a venture-scale outcome?"""
@@ -953,7 +971,26 @@ def _brief_context(lead: Lead, thesis: Thesis) -> str:
             lines.append(f"Thesis fit: {verdict.thesis_fit:.2f} — {verdict.fit_reason}")
         if verdict.customer_type:
             lines.append(f"Customer type: {verdict.customer_type}")
-        if verdict.quality:
+        scorecard = scorecard_score(verdict, thesis)
+        if scorecard is not None:
+            result, sections = scorecard
+            lines.append(
+                f"Readiness scorecard ({result.rubric_label} rubric): "
+                f"{result.total:.0f}/100 — {rubric_mod.BAND_LABELS[result.band]} "
+                f"({result.n_present_sections}/{result.n_sections} sections evidence-backed)"
+            )
+            for s in sections:
+                if s.score is None:
+                    continue
+                crits = "; ".join(
+                    f"{c.label} {int(round(c.value))}/3"
+                    + (f" ({c.reason})" if c.reason else "")
+                    for c in s.criteria if c.value is not None
+                )
+                suffix = " — manual override" if s.manual else ""
+                lines.append(f"  - {s.label}: {s.score:.0f}/100{suffix}"
+                             + (f" — {crits}" if crits else ""))
+        elif verdict.quality:
             dims = ", ".join(
                 f"{k} {v:.0%}"
                 + (f" ({verdict.quality_reasons[k]})" if verdict.quality_reasons.get(k) else "")

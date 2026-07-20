@@ -280,20 +280,33 @@ def test_legacy_v6_payload_has_empty_quality() -> None:
     assert verdict.customer_type is None
 
 
-def test_prompt_carries_quality_rubric_and_lenses() -> None:
+def test_prompt_carries_both_scorecards_and_routing() -> None:
     prompt = _system_prompt(Thesis(thesis="edge ai"))
-    assert "QUALITY RUBRIC" in prompt
+    assert "SCORECARD" in prompt
     assert "customer_type" in prompt
-    assert "case studies" in prompt  # b2b lens wording
-    assert "retention" in prompt  # b2c lens wording
-    assert "at most 0.3" in prompt  # watchlist-follow cap for investors dim
+    assert "ENTERPRISE READINESS SCORECARD" in prompt
+    assert "CONSUMER READINESS SCORECARD" in prompt
+    # Routing: b2c → consumer; everything else (incl. unknown) → enterprise.
+    assert '"b2c" -> the CONSUMER scorecard' in prompt
     assert "OMIT the key" in prompt
+    # Every criterion of both rubrics is rendered from the registry.
+    from scout import rubric
+    for rb in rubric.RUBRICS.values():
+        for criterion in rb.criteria:
+            assert f"- {criterion.key}:" in prompt, criterion.key
 
 
-def test_custom_prompt_still_gets_quality_evidence_rules() -> None:
+def test_custom_prompt_still_gets_scorecard_evidence_rules() -> None:
     thesis = Thesis(llm_prompt="Custom: {thesis}", thesis="agents")
     prompt = _system_prompt(thesis)
-    assert "QUALITY DIMS" in prompt  # EVIDENCE_RULES addition survives
+    assert "SCORECARD: score a criterion only" in prompt  # EVIDENCE_RULES survive
+
+
+def test_custom_prompt_scorecard_placeholder_substitutes() -> None:
+    thesis = Thesis(llm_prompt="Custom: {thesis}\n{scorecard}", thesis="agents")
+    prompt = _system_prompt(thesis)
+    assert "ENTERPRISE READINESS SCORECARD" in prompt
+    assert "{scorecard}" not in prompt
 
 
 def test_dossier_includes_watchlist_follow_lines() -> None:
@@ -339,3 +352,87 @@ def test_verify_user_claim_includes_quality() -> None:
     claim_text = _verify_user(lead, make_tweets(), None, 2000)
     assert '"quality"' in claim_text
     assert '"customer_type"' in claim_text
+
+
+# --- v8: readiness scorecard ---------------------------------------------------
+
+
+def test_parse_verdicts_with_scorecard_fields() -> None:
+    payload = [{
+        "handle": "acme", "account_type": "founder", "is_founder": True,
+        "stage": "launched", "grounding": "website", "customer_type": "b2b",
+        "scorecard": {"prev_founder_experience": 3, "commercial_traction": 2},
+        "scorecard_reasons": {"prev_founder_experience": "sold DevCo to Datadog",
+                              "commercial_traction": "website: 3 named pilots"},
+        "sector": "devtools", "thesis_fit": 0.4, "confidence": 0.8,
+    }]
+    verdict = _parse_verdicts(json.dumps(payload))[0]
+    assert verdict.scorecard["commercial_traction"] == 2
+    assert "pilots" in verdict.scorecard_reasons["commercial_traction"]
+    assert verdict.quality == {}  # legacy fields stay empty on new verdicts
+
+
+def test_legacy_v7_payload_has_empty_scorecard() -> None:
+    payload = [{"handle": "old", "is_founder": True, "confidence": 0.8,
+                "quality": {"team": 0.7}}]
+    verdict = _parse_verdicts(json.dumps(payload))[0]
+    assert verdict.scorecard == {}
+    assert verdict.scorecard_reasons == {}
+    assert verdict.scorecard_manual == {}
+
+
+def test_apply_verification_replaces_scorecard_wholesale() -> None:
+    from scout.signals.llm import VerificationResult, apply_verification
+
+    verdict = make_verdict().model_copy(update={
+        "customer_type": "b2b",
+        "scorecard": {"prev_founder_experience": 3.0, "commercial_traction": 3.0},
+        "scorecard_reasons": {"prev_founder_experience": "x",
+                              "commercial_traction": "y"},
+    })
+    result = VerificationResult(
+        handle="benhylak", verification="corrected",
+        corrections={
+            "scorecard": {"prev_founder_experience": 3},
+            "scorecard_reasons": {"prev_founder_experience": "prev exit (site)"},
+        },
+        note="traction score was uncited",
+    )
+    fixed = apply_verification(verdict, result)
+    assert fixed.scorecard == {"prev_founder_experience": 3.0}  # wholesale
+    assert "commercial_traction" not in fixed.scorecard_reasons
+
+
+def test_apply_verification_cross_rubric_correction_rescores_cleanly() -> None:
+    from scout.config import Thesis as ThesisModel
+    from scout.score import scorecard_score
+    from scout.signals.llm import VerificationResult, apply_verification
+
+    verdict = make_verdict().model_copy(update={
+        "customer_type": "b2b",
+        "scorecard": {"commercial_traction": 3.0},
+    })
+    result = VerificationResult(
+        handle="benhylak", verification="corrected",
+        corrections={"customer_type": "b2c",
+                     "scorecard": {"user_growth": 3},
+                     "scorecard_reasons": {"user_growth": "app store #4"}},
+        note="sells to consumers",
+    )
+    fixed = apply_verification(verdict, result)
+    scorecard = scorecard_score(fixed, ThesisModel())
+    assert scorecard is not None
+    assert scorecard[0].rubric_key == "b2c"  # re-routed and scoreable
+
+
+def test_verify_user_claim_includes_scorecard() -> None:
+    from scout.models import Lead
+    from scout.signals.llm import _verify_user
+
+    lead = Lead(account=make_account(),
+                llm=make_verdict().model_copy(update={
+                    "customer_type": "b2b",
+                    "scorecard": {"prev_founder_experience": 3.0}}))
+    claim_text = _verify_user(lead, make_tweets(), None, 2000)
+    assert '"scorecard"' in claim_text
+    assert '"prev_founder_experience"' in claim_text
