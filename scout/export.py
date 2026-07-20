@@ -217,6 +217,13 @@ strong { color: #20180f; }
 em { color: #4a4034; }
 code { font-size: 9pt; }
 blockquote { color: #4a4034; margin: 6pt 0 6pt 10pt; }
+table { border-collapse: collapse; width: 100%; margin: 6pt 0; }
+th { font-size: 8pt; text-transform: uppercase; letter-spacing: 0.06em;
+     color: #6b6052; text-align: left; padding: 4pt 8pt 4pt 0;
+     border-bottom: 0.8pt solid #a89a83; }
+td { font-size: 9pt; color: #4a4034; padding: 4.5pt 8pt 4.5pt 0;
+     border-bottom: 0.5pt solid #d8cdbb; vertical-align: top; }
+a { color: #7a5d1e; }
 """
 
 

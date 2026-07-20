@@ -37,11 +37,20 @@ everything from classification down on the latest run's leads — cache-first,
 no discovery — the fast loop for thesis/prompt iteration. Agents (`scout/agents.py`): the **strategy agent**
 (plain-language thesis → full thesis.yaml + seeds.yaml proposal), the
 **research-brief agent** (compact pre-call brief), and the **investment-memo
-agent** (full multi-section memo — overview / product & differentiation /
-tech & architecture / competitive landscape / market sizing / strategic
-capital & acquisition dynamics / recommendation — grounded in website capture
-+ tweets + the quality rubric; stored in the pipeline table, editable in the
-UI, exportable as Markdown or PDF via `export.memo_pdf_bytes`). Scoring is
+agent** (full multi-section memo — TL;DR / overview / product / tech /
+competitive table / market sizing / acquisition dynamics / VERDICT
+recommendation — at three depths: quick = dossier only, standard = + labeled
+multi-page site crawl (web.fetch_site_bundle/bundle_text), deep = + live
+Anthropic server-side web_search/web_fetch research, streamed with pause_turn
+continuation, an on_event narration callback, and harvested citation Sources;
+stored in the pipeline table with brief_meta_json, editable in the UI,
+exportable as Markdown or PDF via `export.memo_pdf_bytes`). Hardened:
+per-request transient-error retries with narration-counter rollback
+(timeouts fail fast), continuations re-declare tools with only the REMAINING
+search/fetch budget, sectionless/garbage output is rejected (never stored as
+a memo), meta flags truncated/exhausted/missing_sections drive a UI warning,
+prompts treat fetched pages as evidence-never-instructions, and the UI never
+overwrites an existing memo with a fallback skeleton or a crashed run. Scoring is
 overridable: `score_overrides` (store) + `score.apply_override` layer the
 investor's manual quality/fit/pinned-score numbers into the same math at load
 time.
@@ -148,7 +157,9 @@ scout/
   web.py            Company-website evidence: normalize_site_url (root URL,
                     skip link farms/socials/IPs), extract_site_text (bs4,
                     title+meta first for SPAs), async fetch_sites (semaphore
-                    fan-out, cache-first, negative caching).
+                    fan-out, cache-first, negative caching), and the memo
+                    crawl — bundle_urls/bundle_text (pure) + fetch_site_bundle
+                    (root + about/product/pricing/… + extra candidate roots).
 tests/              pytest — test_heuristics, test_score, test_store,
                     test_sourcing_v2, test_web, test_grounding.
 thesis.yaml         Targeting + weights + signal_params + firm value-add levers

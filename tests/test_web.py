@@ -85,3 +85,40 @@ def test_normalize_skips_link_farms_and_socials() -> None:
         assert normalize_site_url(url) is None, url
     # ...but real product domains survive
     assert normalize_site_url("https://linktree-competitor.com") is not None
+
+
+# --- site bundle (memo evidence crawl) ------------------------------------------
+
+
+def test_bundle_urls_root_subpages_extras_capped() -> None:
+    from scout.web import CRAWL_PATHS, bundle_urls
+
+    urls = bundle_urls("https://evalhq.ai/pricing?utm=x",
+                       extra_urls=("adriengaidon.com", "https://evalhq.ai/"),
+                       max_pages=20)
+    assert urls[0] == "https://evalhq.ai/"          # normalized root first
+    assert urls[1] == f"https://evalhq.ai/{CRAWL_PATHS[0]}"
+    assert "https://adriengaidon.com/" in urls      # distinct extra kept
+    assert len(urls) == len(set(urls))              # deduped
+    assert bundle_urls("not a url") == []           # unusable root → nothing
+    assert len(bundle_urls("https://evalhq.ai", max_pages=4)) == 4
+
+
+def test_bundle_text_labels_pages_and_respects_budget() -> None:
+    from scout.models import SitePage
+    from scout.web import bundle_text
+
+    pages = [
+        SitePage(url="https://e.ai/", final_url="https://e.ai/", status="ok",
+                 text="home " * 200),
+        SitePage(url="https://e.ai/pricing", final_url="https://e.ai/pricing",
+                 status="ok", text="price " * 200),
+        SitePage(url="https://e.ai/dead", status="error:http:404"),
+    ]
+    text = bundle_text(pages, 600)
+    assert "### Page: /home" in text
+    assert "### Page: /pricing" in text
+    assert "dead" not in text                       # unusable page excluded
+    assert len(text) < 700                          # labels + budgeted bodies
+    assert bundle_text(pages, 0) == ""
+    assert bundle_text([], 1000) == ""

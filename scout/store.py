@@ -539,6 +539,7 @@ class Store:
         channel: str | None = None,
         brief: str | None = None,
         brief_edited: bool = False,
+        brief_meta: dict | None = None,
     ) -> None:
         """Upsert deal-flow state for one lead (read-merge-write so partial
         updates never clobber the other fields).
@@ -546,7 +547,9 @@ class Store:
         `brief` holds the investment memo markdown. A generation
         (brief_edited=False) stamps brief_at and clears brief_edited_at; a
         manual edit (brief_edited=True) stamps brief_edited_at and keeps the
-        original generation time."""
+        original generation time. `brief_meta` (depth, sources, searches —
+        agents.investment_memo's meta) is stored as brief_meta_json alongside
+        a generation and left untouched by edits."""
         handle = handle.lstrip("@").lower()
         row = {"handle": handle}
         if self.db["pipeline"].exists():
@@ -570,21 +573,29 @@ class Store:
             else:
                 row["brief_at"] = now
                 row["brief_edited_at"] = None
+        if brief_meta is not None:
+            row["brief_meta_json"] = json.dumps(brief_meta)
         row["updated_at"] = datetime.now(timezone.utc).isoformat()
         self.db["pipeline"].upsert(row, pk="handle", alter=True)
+
+    @staticmethod
+    def _decode_pipeline(row: dict) -> dict:
+        row["brief_meta"] = json.loads(row.get("brief_meta_json") or "{}")
+        return row
 
     def get_pipeline(self, handle: str) -> dict:
         handle = handle.lstrip("@").lower()
         if not self.db["pipeline"].exists():
             return {}
         rows = list(self.db["pipeline"].rows_where("handle = ?", [handle], limit=1))
-        return dict(rows[0]) if rows else {}
+        return self._decode_pipeline(dict(rows[0])) if rows else {}
 
     def all_pipeline(self) -> dict[str, dict]:
         """All deal-flow rows keyed by lowercased handle."""
         if not self.db["pipeline"].exists():
             return {}
-        return {r["handle"]: dict(r) for r in self.db["pipeline"].rows}
+        return {r["handle"]: self._decode_pipeline(dict(r))
+                for r in self.db["pipeline"].rows}
 
     def pipeline_counts(self) -> dict[str, int]:
         """Count of leads at each status (only statuses that appear)."""

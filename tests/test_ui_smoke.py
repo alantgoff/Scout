@@ -152,7 +152,8 @@ def test_memo_button_routes_and_generates_named_by_startup(tmp_path, monkeypatch
     assert not at.exception, at.exception[0].message if at.exception else ""
     assert at.session_state["nav"] == "Memos"
     # The memo was generated on arrival (offline fallback — no API key),
-    # stored in the pipeline, and carries the section skeleton.
+    # stored in the pipeline with its generation meta, and carries the
+    # section skeleton.
     row = Store(db).get_pipeline("smoke_founder")
     assert row.get("brief")
     for heading in ("## Overview", "## Product & differentiation",
@@ -161,13 +162,43 @@ def test_memo_button_routes_and_generates_named_by_startup(tmp_path, monkeypatch
                     "## Strategic capital & acquisition dynamics",
                     "## Recommendation"):
         assert heading in row["brief"], heading
+    assert row["brief_meta"]["depth"] == "standard"  # session default depth
     page_text = _page_text(at)
     # Startup-named everywhere: page header, memo title, and the toast.
     assert "Investment memos" in page_text
     assert "SmokeCo" in page_text
+    # Depth UX renders: selector state + cost caption + verdict chip from
+    # the template's VERDICT line.
+    assert at.session_state["memo_depth"] == "Standard"
+    assert "per memo" in page_text
+    assert ">TRACK</span>" in page_text
     toasts = " ".join(t.value for t in at.toast)
     assert "SmokeCo" in toasts  # named by startup…
     assert "smoke_founder" not in toasts  # …never by the raw handle
+
+
+def test_regenerate_without_key_never_clobbers_existing_memo(tmp_path, monkeypatch) -> None:
+    """The overwrite guard: when generation falls back to the data-only
+    skeleton (here: no API key), an existing memo must survive untouched."""
+    db = tmp_path / "smoke.db"
+    at = _app(tmp_path, monkeypatch)
+    Store(db).set_pipeline("smoke_founder", status="longlisted",
+                           brief="## Overview\nORIGINAL MEMO",
+                           brief_meta={"depth": "standard", "sources": [],
+                                       "searches": 0, "fetches": 0})
+    at.session_state["nav"] = "Memos"
+    at.session_state["memo_pick"] = "smoke_founder"
+    at.run()
+    assert not at.exception
+
+    regen = next(b for b in at.button if b.key == "memo_generate")
+    regen.click()
+    at.run()
+    assert not at.exception, at.exception[0].message if at.exception else ""
+    row = Store(db).get_pipeline("smoke_founder")
+    assert row["brief"] == "## Overview\nORIGINAL MEMO"  # untouched
+    toasts = " ".join(t.value for t in at.toast)
+    assert "existing memo untouched" in toasts
 
 
 def test_memo_edit_saves_with_edit_stamp(tmp_path, monkeypatch) -> None:

@@ -367,3 +367,18 @@ def test_pipeline_brief_edit_stamps(tmp_path: Path) -> None:
     store.set_pipeline("ada", brief="v3 regenerated")
     row = store.get_pipeline("ada")
     assert row["brief_edited_at"] is None
+
+
+def test_pipeline_brief_meta_roundtrip(tmp_path: Path) -> None:
+    store = Store(tmp_path / "t.db")
+    meta = {"depth": "deep", "sources": ["https://a.com", "https://b.com"],
+            "searches": 5, "fetches": 3}
+    store.set_pipeline("ada", brief="## Overview\nx", brief_meta=meta)
+    row = store.get_pipeline("ada")
+    assert row["brief_meta"] == meta
+    # An edit leaves the generation meta untouched.
+    store.set_pipeline("ada", brief="## Overview\nedited", brief_edited=True)
+    assert store.get_pipeline("ada")["brief_meta"] == meta
+    # Rows without meta decode to an empty dict, not a crash.
+    store.set_pipeline("noone", status="longlisted")
+    assert store.all_pipeline()["noone"]["brief_meta"] == {}

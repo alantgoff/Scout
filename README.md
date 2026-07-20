@@ -111,16 +111,26 @@ being written):
    (Shortlisted → Contacted → Meeting → Diligence → Allocated) with notes,
    the same per-dimension scoring cards, and a one-click **pipeline CSV
    export** (CRM-import-ready).
-5. **Memos** — the full investment memo per startup, written from the whole
-   evidence dossier (website capture, recent tweets, quality rubric, your
-   notes): **Overview · Product & differentiation · Technology &
-   architecture · Competitive landscape · Market sizing · Strategic capital
-   & acquisition dynamics (natural acquirers, tuck-in vs. platform, exit
-   sizing) · Recommendation** (PURSUE/TRACK/PASS with conviction and
-   first-call questions). Memos are **editable in place** (generation and
-   edit each timestamped), **named after the startup** (stealth identities
-   for unnamed ones), and export as **Markdown or a styled PDF**. The
-   **AI-drafted outreach** message lives below the memo.
+5. **Memos** — the full investment memo per startup: **Overview · Product
+   & differentiation · Technology & architecture · Competitive landscape
+   (table) · Market sizing (arithmetic shown) · Strategic capital &
+   acquisition dynamics (named acquirers, tuck-in vs. platform, exit
+   sizing) · Recommendation** (a **VERDICT: PURSUE/TRACK/PASS** line with
+   tripwires and first-call questions), opening with a 3-bullet TL;DR.
+   Pick the **research depth** per memo: **Quick** (dossier only, ~30s,
+   ~$0.02), **Standard** (+ a multi-page crawl of the company site —
+   about/product/pricing/etc., cache-first — ~1-2 min, ~$0.05), or **Deep
+   research** (Claude searches the live web with Anthropic's server-side
+   `web_search`/`web_fetch`: finds the real company site when the on-file
+   URL is the founder's personal page, verifies funding and competitors,
+   and cites a **Sources** section — ~3-6 min, ~$0.15-0.40; the run
+   narrates its searches live). An optional **Focus** box steers the memo
+   ("dig into the moat"). The dossier labels WHOSE pages were captured, so
+   a founder's personal site is never dressed up as product evidence.
+   Memos are **editable in place** (generation and edit each timestamped,
+   depth + source count shown), **named after the startup** (stealth
+   identities for unnamed ones), and export as **Markdown or a styled
+   PDF**. The **AI-drafted outreach** message lives below the memo.
 6. **Settings** — keys, the budget ledger, and defaults.
 
 Deal-flow state (longlist/shortlist status, notes, outreach, memos) persists

@@ -107,6 +107,69 @@ def extract_site_text(html: str, max_chars: int) -> str:
     return "\n".join(parts)[:max_chars].strip()
 
 
+# Subpages worth reading beyond the homepage — where startups actually
+# describe the product, pricing, customers, and team. Fetched cache-first;
+# 404s are negative-cached like any other failure.
+CRAWL_PATHS = ("about", "product", "pricing", "customers", "docs", "blog",
+               "careers", "team")
+
+
+def bundle_urls(root_url: str, extra_urls: tuple[str, ...] = (),
+                max_pages: int = 7) -> list[str]:
+    """The URL list for a site crawl: root first, then well-known subpages,
+    then extra candidate roots (e.g. company_url AND the bio website when
+    they differ). Pure — unit-testable. Order-preserving, deduped, capped."""
+    urls: list[str] = []
+    root = normalize_site_url(root_url)
+    if root:
+        urls.append(root)
+        urls += [f"{root}{path}" for path in CRAWL_PATHS]
+    for extra in extra_urls:
+        extra_root = normalize_site_url(extra)
+        if extra_root and extra_root not in urls:
+            urls.append(extra_root)
+    return list(dict.fromkeys(urls))[:max_pages]
+
+
+def bundle_text(pages: list[SitePage], max_chars: int) -> str:
+    """Concatenate usable pages into one labeled evidence block, root page
+    first, within a total char budget split across pages (the root gets the
+    leftovers of any short subpages). Pure — unit-testable."""
+    usable = [p for p in pages if p.usable]
+    if not usable or max_chars <= 0:
+        return ""
+    parts: list[str] = []
+    remaining = max_chars
+    for i, page in enumerate(usable):
+        if remaining <= 80:  # not enough left to say anything useful
+            break
+        # Even split over the pages left, so one long page can't starve the
+        # rest; the last page takes whatever remains.
+        budget = remaining // (len(usable) - i)
+        path = urlparse(page.final_url or page.url).path.strip("/") or "home"
+        text = " ".join(page.text.split())[:budget]
+        parts.append(f"### Page: /{path}\n{text}")
+        remaining -= len(text)
+    return "\n\n".join(parts)
+
+
+async def fetch_site_bundle(
+    root_url: str,
+    settings: Settings,
+    store: Store | None = None,
+    extra_urls: tuple[str, ...] = (),
+    max_pages: int = 7,
+) -> list[SitePage]:
+    """Crawl a company site's key pages (root + CRAWL_PATHS + extra candidate
+    roots), cache-first, concurrently. Returns every fetched page (callers
+    filter with .usable / bundle_text)."""
+    urls = bundle_urls(root_url, extra_urls, max_pages)
+    if not urls:
+        return []
+    result = await fetch_sites(urls, settings, store)
+    return [result[u] for u in urls if u in result]
+
+
 async def _fetch_one(client: httpx.AsyncClient, url: str) -> SitePage:
     """One GET → SitePage (never raises; failures become status strings)."""
     page = SitePage(url=url, fetched_at=datetime.now(timezone.utc))

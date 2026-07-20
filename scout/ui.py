@@ -87,7 +87,7 @@ from scout.score import (
 )
 from scout.signals.llm import DEFAULT_PROMPT_TEMPLATE
 from scout.store import Store
-from scout.web import fetch_sites, normalize_site_url
+from scout.web import bundle_text, fetch_site_bundle, normalize_site_url
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 THESIS_PATH = PROJECT_ROOT / "thesis.yaml"
@@ -341,6 +341,34 @@ def _inject_css() -> None:
         .nudge { background:var(--accent-soft); border-radius:12px; padding:10px 16px;
           font-size:0.88rem; color:var(--ink-2); margin:0 0 16px; }
         .nudge b { color:var(--ink); }
+
+        /* Memo document — editorial reading layout inside the memo container */
+        .memo-title { font-family:var(--serif); font-size:1.5rem; font-weight:600;
+          letter-spacing:-0.01em; color:var(--ink); }
+        .chip.pass { background:rgba(178,58,44,0.12); color:#7c2d20; }
+        .chip.big { font-size:0.72rem; padding:4.5px 13px; vertical-align:3px;
+          margin-left:10px; }
+        .st-key-memodoc h2 { font-family:var(--serif); font-size:1.28rem;
+          font-weight:600; letter-spacing:-0.01em; color:var(--ink);
+          border-bottom:1px solid var(--hair); padding-bottom:6px;
+          margin:1.5rem 0 0.6rem; }
+        .st-key-memodoc p, .st-key-memodoc li { font-size:0.95rem;
+          line-height:1.6; color:var(--ink-2); }
+        .st-key-memodoc strong { color:var(--ink); }
+        .st-key-memodoc table { border-collapse:collapse; width:100%;
+          margin:8px 0 4px; }
+        .st-key-memodoc th { font-size:0.68rem; text-transform:uppercase;
+          letter-spacing:0.08em; color:var(--muted); font-weight:600;
+          text-align:left; padding:6px 12px 6px 0;
+          border-bottom:1px solid var(--hair-strong); }
+        .st-key-memodoc td { font-size:0.88rem; color:var(--ink-2);
+          padding:7px 12px 7px 0; border-bottom:1px solid var(--hair);
+          vertical-align:top; }
+        .st-key-memotldr { background:var(--accent-soft); border-radius:12px;
+          padding:4px 16px 6px; margin:6px 0 4px; }
+        .st-key-memotldr p, .st-key-memotldr li { font-size:0.92rem;
+          color:var(--ink-2); }
+        .st-key-memotldr [data-testid="stMarkdownContainer"] { padding:0; }
 
         /* Live scan banner (auto-refreshing fragment) — butter-yellow wash */
         .scanbar { background:var(--accent-soft); border-radius:12px; padding:10px 16px;
@@ -1855,40 +1883,148 @@ def _memo_pdf_cached(memo_md: str, title: str, subtitle: str) -> bytes:
     return memo_pdf_bytes(memo_md, title, subtitle)
 
 
+# Depth tiers for memo generation: label → (agents depth key, what it adds,
+# time estimate, cost estimate). Captions keep the spend decision informed.
+MEMO_DEPTH_INFO = {
+    "Quick": ("quick", "dossier only — no fetching, no search", "~30s", "~$0.02"),
+    "Standard": ("standard", "+ multi-page website crawl", "~1–2 min", "~$0.05"),
+    "Deep research": ("deep", "+ live web search & fetch, cited sources",
+                      "~3–6 min", "~$0.15–0.40"),
+}
+MEMO_DEPTH_LABEL = {v[0]: k for k, v in MEMO_DEPTH_INFO.items()}
+
+
+def _memo_md(md: str) -> str:
+    """Escape $ so Streamlit's markdown doesn't pair dollar amounts into
+    LaTeX math spans ("$300M seed at $1.1B" would render as italic soup)."""
+    return md.replace("$", "\\$")
+
+
+def _memo_parts(md: str) -> tuple[str, str]:
+    """Split a memo into (tldr_markdown, body_markdown) so the TL;DR renders
+    as a callout. No TL;DR head → ("", whole memo)."""
+    idx = md.find("\n## ")
+    if idx <= 0:
+        return "", md
+    head = md[:idx]
+    if "TL;DR" not in head:
+        return "", md
+    return head.replace("**TL;DR**", "").strip(), md[idx + 1:]
+
+
+def _selected_depth() -> str:
+    label = st.session_state.get("memo_depth") or "Standard"
+    return MEMO_DEPTH_INFO.get(label, MEMO_DEPTH_INFO["Standard"])[0]
+
+
+def _site_evidence(lead: Lead, depth: str) -> tuple[str, str]:
+    """(labeled site bundle, provenance note) for the memo dossier.
+
+    Crawls the key pages of every candidate URL on file (company_url + the
+    bio website), cache-first, and says WHOSE pages these appear to be — a
+    founder's personal domain must never masquerade as product evidence
+    (the Walden Robotics failure)."""
+    if depth == "quick":
+        return "", ""
+    verdict = lead.llm
+    candidates = [u for u in [(verdict.company_url if verdict else None),
+                              lead.account.website] if u]
+    primary = next((u for u in candidates if normalize_site_url(u)), None)
+    if primary is None:
+        return "", "no website URL on file at all"
+    try:
+        pages = asyncio.run(fetch_site_bundle(
+            primary, settings, store, extra_urls=tuple(candidates[1:])))
+    except Exception:
+        pages = []
+    site_text = bundle_text(pages, 9000 if depth == "standard" else 6000)
+    host = urlparse(normalize_site_url(primary) or "").netloc
+    if not site_text:
+        return "", f"the URL on file ({host}) yielded no readable pages"
+    company = (verdict.company_name or "").strip() if verdict else ""
+    company_slug = re.sub(r"[^a-z0-9]", "", company.lower())
+    host_slug = re.sub(r"[^a-z0-9]", "", host.lower())
+    if company_slug and company_slug not in host_slug:
+        note = (f"captured from {host}, which does NOT look like "
+                f"{company}'s own domain — likely the founder's personal "
+                "site; treat product claims accordingly")
+    else:
+        note = f"captured from {host}"
+    return site_text, note
+
+
 def _generate_memo(handle: str) -> None:
-    """Assemble the evidence dossier (cached website text — fetched live if
-    missing — plus recent tweets and the investor's notes), run the memo
-    agent, store the result, and rerun with a startup-named toast."""
+    """Assemble the evidence dossier at the selected depth (site crawl,
+    tweets, notes, focus), run the memo agent — narrating deep research
+    live — store the result + meta, and rerun with a startup-named toast."""
     lead = lead_by_handle.get(handle)
     if lead is None:
         st.error("No lead data in the store for this startup — run discovery first.")
         return
     row = pipeline.get(handle, {})
-    verdict = lead.llm
-    site_text = ""
-    url = normalize_site_url(
-        ((verdict.company_url if verdict else None) or lead.account.website)
-    )
-    if url:
-        page = store.cached_site(url, settings.website_ttl_days)
-        if page is None:
-            try:
-                page = asyncio.run(fetch_sites([url], settings, store)).get(url)
-            except Exception:
-                page = None  # a dead site must never block the memo
-        if page is not None and page.usable:
-            site_text = page.text
-    tweets = store.get_tweets(lead.account.id, limit=12)
+    depth = _selected_depth()
+    focus = (st.session_state.get("memo_focus") or "").strip()
     name = display_name(lead)
-    with st.spinner(f"Writing the investment memo for {name} — Claude is working "
-                    "through the full dossier (this takes a minute)…"):
-        memo, is_ai = investment_memo(
-            lead, thesis, settings, site_text=site_text, tweets=tweets,
-            notes=row.get("notes") or "",
+    # No key → the template renders regardless; don't crawl for nothing.
+    site_text, site_note = (
+        _site_evidence(lead, depth) if settings.anthropic_api_key else ("", "")
+    )
+    tweets = store.get_tweets(lead.account.id, limit=12)
+    kwargs = dict(site_text=site_text, site_note=site_note, tweets=tweets,
+                  notes=row.get("notes") or "", depth=depth, focus=focus)
+
+    existing_brief = (row.get("brief") or "").strip()
+    try:
+        if depth == "deep":
+            with st.status(f"Deep research — {name}", expanded=True) as status:
+                def on_event(kind: str, detail: str) -> None:
+                    icon = {"search": "🔎 Searching", "fetch": "📄 Reading",
+                            "continue": "↻ Continuing",
+                            "retry": "⚠ Retrying"}.get(kind, kind)
+                    status.write(f"{icon}: {detail}" if detail else icon)
+
+                status.write("Reading the dossier and site capture — live web "
+                             "research takes a few minutes; keep this tab open.")
+                memo, is_ai, meta = investment_memo(
+                    lead, thesis, settings, on_event=on_event, **kwargs)
+                if is_ai:
+                    status.update(
+                        label=(f"Research done — {meta['searches']} searches, "
+                               f"{len(meta['sources'])} sources cited"),
+                        state="complete", expanded=False,
+                    )
+                else:
+                    status.update(label="Research failed — the API errored "
+                                        "or returned nothing usable",
+                                  state="error", expanded=False)
+        else:
+            with st.spinner(f"Writing the investment memo for {name}"
+                            + (" — crawling the site and working through the "
+                               "dossier…" if depth == "standard"
+                               else " from the dossier…")):
+                memo, is_ai, meta = investment_memo(lead, thesis, settings, **kwargs)
+    except Exception as exc:  # a crashed run must never cost stored work
+        st.session_state["toast"] = (
+            f"Memo generation failed for {name} ({type(exc).__name__}) — "
+            "nothing was overwritten. Try again."
         )
-    store.set_pipeline(handle, brief=memo)
+        st.rerun()
+
+    if not is_ai and existing_brief:
+        # Generation fell back to the data-only skeleton (no key, API error,
+        # or unusable output) — never replace a real memo with a skeleton.
+        st.session_state["toast"] = (
+            f"Generation fell back to the data-only skeleton — kept {name}'s "
+            "existing memo untouched."
+            if settings.anthropic_api_key else
+            f"No Anthropic key — kept {name}'s existing memo untouched."
+        )
+        st.rerun()
+
+    store.set_pipeline(handle, brief=memo, brief_meta=meta)
+    depth_label = MEMO_DEPTH_LABEL.get(depth, depth)
     st.session_state["toast"] = (
-        f"Memo ready — {name}" if is_ai
+        f"{depth_label} memo ready — {name}" if is_ai
         else f"Data-only memo skeleton saved for {name} — add an Anthropic key "
              "and regenerate for the full analysis."
     )
@@ -1939,6 +2075,7 @@ if nav == "Memos":
         picked_row = pipeline.get(pick, {})
         picked_name = display_name(picked_lead) if picked_lead else f"@{pick}"
 
+        brief_meta = picked_row.get("brief_meta") or {}
         bits = []
         if picked_lead is not None:
             v = picked_lead.llm
@@ -1946,6 +2083,11 @@ if nav == "Memos":
             if v and v.thesis_fit is not None:
                 bits.append(f"thesis fit {v.thesis_fit:.0%}")
             bits.append(STATUS_LABELS.get(_status_of(picked_lead), ""))
+        if brief_meta.get("depth"):
+            meta_bit = MEMO_DEPTH_LABEL.get(brief_meta["depth"], brief_meta["depth"])
+            if brief_meta.get("sources"):
+                meta_bit += f" · {len(brief_meta['sources'])} sources"
+            bits.append(meta_bit)
         if picked_row.get("brief_at"):
             bits.append(f"generated {_ago(picked_row['brief_at'])}")
         if picked_row.get("brief_edited_at"):
@@ -1953,6 +2095,43 @@ if nav == "Memos":
         if bits:
             st.markdown(f'<div class="subtle">{_e(" · ".join(b for b in bits if b))}</div>',
                         unsafe_allow_html=True)
+        if (brief_meta.get("missing_sections") or brief_meta.get("truncated")
+                or brief_meta.get("exhausted")):
+            reason = ("was cut off mid-write" if brief_meta.get("truncated")
+                      else "hit the research budget before finishing"
+                      if brief_meta.get("exhausted")
+                      else "is missing sections: "
+                           + ", ".join(brief_meta["missing_sections"][:3]))
+            st.markdown(
+                f'<div class="subtle">⚠ This memo may be incomplete — it '
+                f'{_e(reason)}. Consider regenerating.</div>',
+                unsafe_allow_html=True,
+            )
+
+        # Depth + focus — how much research the next generation gets. The
+        # caption keeps the spend decision informed; deep research costs
+        # real API money.
+        st.write("")
+        dc1, dc2 = st.columns([2.15, 3.85])
+        with dc1:
+            st.session_state.setdefault("memo_depth", "Standard")
+            depth_pick = st.segmented_control(
+                "Memo depth", list(MEMO_DEPTH_INFO), key="memo_depth",
+                label_visibility="collapsed",
+            ) or "Standard"
+        with dc2:
+            _key, d_desc, d_time, d_cost = MEMO_DEPTH_INFO.get(
+                depth_pick, MEMO_DEPTH_INFO["Standard"])
+            st.markdown(
+                f'<div class="subtle" style="margin-top:7px">{_e(d_desc)} · '
+                f'{_e(d_time)} · {_e(d_cost)} per memo</div>',
+                unsafe_allow_html=True,
+            )
+        focus_text = st.text_input(
+            "Focus", key="memo_focus", label_visibility="collapsed",
+            placeholder="Focus the memo on… (optional — e.g. competitive moat, "
+                        "GTM motion, acquirer appetite)",
+        )
 
         if st.session_state.pop("memo_autogen", False) and not picked_row.get("brief"):
             _generate_memo(pick)  # ends in st.rerun()
@@ -1984,6 +2163,12 @@ if nav == "Memos":
             sub_bits = [f"{thesis.firm_name or 'Scout'} · {date_label}"]
             if picked_lead is not None:
                 sub_bits.append(f"score {picked_lead.score:.0f}/100")
+            if brief_meta.get("depth"):
+                pdf_meta = MEMO_DEPTH_LABEL.get(brief_meta["depth"],
+                                                brief_meta["depth"])
+                if brief_meta.get("sources"):
+                    pdf_meta += f", {len(brief_meta['sources'])} sources"
+                sub_bits.append(pdf_meta)
             sub_bits.append(f"@{pick} · internal — confidential")
             try:
                 a4.download_button(
@@ -2012,9 +2197,23 @@ if nav == "Memos":
                 st.rerun()
         elif existing_memo:
             st.write("")
-            with st.container(border=True):
-                st.markdown(f"### {picked_name}")
-                st.markdown(existing_memo)
+            # Verdict chip pulled from the Recommendation's VERDICT line.
+            verdict_chip = ""
+            verdict_hit = re.search(r"VERDICT:\s*(PURSUE|TRACK|PASS)", existing_memo)
+            if verdict_hit:
+                v_word = verdict_hit.group(1)
+                v_cls = {"PURSUE": "accent", "TRACK": "", "PASS": "pass"}[v_word]
+                verdict_chip = f'<span class="chip big {v_cls}">{v_word}</span>'
+            with st.container(border=True, key="memodoc"):
+                st.markdown(
+                    f'<span class="memo-title">{_e(picked_name)}</span>{verdict_chip}',
+                    unsafe_allow_html=True,
+                )
+                memo_tldr, memo_body = _memo_parts(existing_memo)
+                if memo_tldr:
+                    with st.container(key="memotldr"):
+                        st.markdown(_memo_md(memo_tldr))
+                st.markdown(_memo_md(memo_body))
         else:
             st.markdown(
                 '<div class="subtle" style="margin-top:8px">No memo yet for '
@@ -2646,7 +2845,9 @@ def _render_database() -> None:
         )
 
         picked_rows = (event.selection.rows or []) if event is not None else []
-        if picked_rows and not df.empty:
+        # Bounds check: a selection made before a filter change can outlive
+        # the rows it pointed at.
+        if picked_rows and not df.empty and picked_rows[0] < len(df):
             sel_handle = str(df.iloc[picked_rows[0]]["handle"])
             sel_lead = lead_by_handle.get(sel_handle)
             if sel_lead is not None:
