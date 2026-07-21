@@ -1990,30 +1990,6 @@ def _render_startup_feed() -> None:
             return True  # Everything
 
         pairs = [(x, e) for x, e in pairs if _in_track(x)]
-        base_leads = [x for x, _ in pairs]
-
-        n_new = sum(1 for _, e in pairs if e and e.is_new)
-        n_convergence = sum(1 for x in leads if x.account.recent_followed_by)
-        fits = [x.llm.thesis_fit for x in base_leads if x.llm and x.llm.thesis_fit is not None]
-        strong_fit = sum(1 for f in fits if f >= 0.7)
-        n_long = counts.get("longlisted", 0)
-        n_short = sum(counts.get(s, 0) for s in WIN_STAGES)
-        sub = f"{n_new} new this run" if scope == "All runs" else "latest run"
-        t1, t2, t3, t4 = st.columns(4)
-        if track == "Startups":
-            n_companies = len(group_by_company(pairs))
-            t1.markdown(_tile("Launched startups", str(n_companies), sub), unsafe_allow_html=True)
-        elif track == "Pre-launch watch":
-            t1.markdown(_tile("Pre-launch startups", str(len(base_leads)), sub), unsafe_allow_html=True)
-        else:
-            t1.markdown(_tile("Tracked leads", str(len(base_leads)), sub), unsafe_allow_html=True)
-        t2.markdown(_tile("Strong fit", str(strong_fit), "thesis fit ≥ 70%"), unsafe_allow_html=True)
-        t3.markdown(_tile("Smart-money events", str(n_convergence), "new follows · latest run"),
-                    unsafe_allow_html=True)
-        t4.markdown(_tile("In funnel", str(n_long + n_short),
-                          f"{n_long} longlisted · {n_short} shortlisted"), unsafe_allow_html=True)
-        st.write("")
-
         # Reset must land BEFORE the filter widgets instantiate.
         FILTER_DEFAULTS: dict = {
             "f_type": ["founder", "startup"], "f_stage": list(STAGES),
@@ -2207,16 +2183,6 @@ if nav == "Longlist":
             unsafe_allow_html=True,
         )
     else:
-        ll_fits = [lead_by_handle[h].llm.thesis_fit for h in longlist
-                   if h in lead_by_handle and lead_by_handle[h].llm
-                   and lead_by_handle[h].llm.thesis_fit is not None]
-        ll_scores = [lead_by_handle[h].score for h in longlist if h in lead_by_handle]
-        t1, t2, t3 = st.columns(3)
-        t1.markdown(_tile("Longlisted", str(len(longlist))), unsafe_allow_html=True)
-        t2.markdown(_tile("Strong fit", str(sum(1 for f in ll_fits if f >= 0.7)),
-                          "thesis fit ≥ 70%"), unsafe_allow_html=True)
-        t3.markdown(_tile("Top score", f"{max(ll_scores):.0f}" if ll_scores else "—"),
-                    unsafe_allow_html=True)
         st.markdown(
             '<div class="section-sub" style="margin-top:14px">Pick a startup to open its '
             'dossier — the <b>Score</b> and its parts (<b>Quality</b> product &amp; founder '
@@ -2243,12 +2209,6 @@ if nav == "Shortlist":
             unsafe_allow_html=True,
         )
     else:
-        cols = st.columns(len(WIN_STAGES))
-        for col, stage_key in zip(cols, WIN_STAGES):
-            col.markdown(_tile(STATUS_LABELS[stage_key], str(counts.get(stage_key, 0))),
-                         unsafe_allow_html=True)
-        st.write("")
-
         st.markdown(
             '<div class="section-sub" style="margin-top:8px">Pick a startup to open its '
             'dossier — move it through the funnel and keep notes right in the panel. '
