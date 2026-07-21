@@ -997,6 +997,10 @@ def _run_panel() -> None:
     elif scan.get("status") == "done":
         if b1.button("View results", key="rp_refresh", type="primary"):
             st.session_state["page_loaded_at"] = datetime.now(timezone.utc).isoformat()
+            # Land on the lead feed showing this run — the whole point of the
+            # button. Clearing the scope key snaps it back to "Latest run".
+            st.session_state["nav_target"] = "Startups"
+            st.session_state.pop("leads_time_scope", None)
             st.rerun(scope="app")
     log_path = scan.get("log_path") or st.session_state.get("last_log_path", "")
     tail = _tail_log(log_path)
@@ -1890,9 +1894,11 @@ def _render_startup_feed() -> None:
 
 
 def _pick_label(h: str) -> str:
+    # The startup is the object — list it by its name, not the founder's X
+    # handle. display_name resolves company → synthesized identity → person,
+    # only falling back to the bare handle when there's no lead data at all.
     picked = lead_by_handle.get(h)
-    ident = startup_identity(picked) if picked else None
-    return f"{ident[0]} — @{h}" if ident else f"@{h}"
+    return display_name(picked) if picked else f"@{h}"
 
 
 def _ranked(handles: list[str]) -> list[str]:
@@ -2422,8 +2428,10 @@ if nav == "Thesis":
                                label_visibility="collapsed",
                                placeholder="e.g. Technical founders leaving top AI labs to build vertical agents on proprietary data…")
     generate_col, _ = st.columns([1.6, 4])
-    if generate_col.button("Design strategy with AI", type="primary",
-                           disabled=not description.strip()):
+    # No text required: an empty box designs a strategy from scratch (or from
+    # the saved thesis, which the agent gets as context) — same as message
+    # generation, which never needed the box filled either.
+    if generate_col.button("Design strategy with AI", type="primary"):
         # Live status: the strategy agent streams a big JSON config in one
         # call (~30–60s), so narrate each section as Claude writes it instead
         # of a blank spinner. status.write/update flush to the frontend during
