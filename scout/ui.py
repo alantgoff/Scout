@@ -223,6 +223,9 @@ def _inject_css() -> None:
           color:var(--muted); font-size:0.95rem; font-weight:400; line-height:1.3;
           white-space:nowrap; overflow:hidden; text-overflow:ellipsis; min-width:0;
           border-left:1px solid var(--hair); padding-left:14px; }
+        /* Top bar — nav sits on the wordmark's row, pushed to the right edge. */
+        .st-key-topnav [data-testid="stSegmentedControl"] { width:100%; }
+        .st-key-topnav [role="radiogroup"] { justify-content:flex-end; }
 
         /* Left rail (sidebar) — the Startups feed's controls, so the results
            column is just results. Warm surface, hairline divider, full-width
@@ -886,14 +889,27 @@ def _status_of(lead: Lead) -> str:
     return pipeline.get(lead.account.handle.lower(), {}).get("status") or "new"
 
 
-# Header — slim wordmark + one-line thesis. The full thesis lives on the
-# Thesis page; repeating it full-height on every tab cost the fold (worse on
-# mobile, where it was a whole screen of chrome before any content).
-st.markdown(
-    f'<div class="masthead"><span class="brand">Scout</span>'
-    f'<span class="thesis-line">{_e(thesis.thesis) or "No thesis yet — open Thesis and describe one."}</span></div>',
-    unsafe_allow_html=True,
-)
+# Top bar — wordmark + one-line thesis (left) and the page nav (right), on one
+# slim row. Session-state-driven nav (unlike st.tabs) so any button can route to
+# a page via nav_target + rerun. The full thesis lives on the Thesis page.
+PAGES = ["Thesis", "Startups", "Longlist", "Shortlist", "Memos", "Settings"]
+if (_nav_target := st.session_state.pop("nav_target", None)) in PAGES:
+    st.session_state["nav"] = _nav_target
+st.session_state.setdefault("nav", "Thesis")
+_hdr_l, _hdr_r = st.columns([1, 1.35], vertical_alignment="center")
+with _hdr_l:
+    st.markdown(
+        f'<div class="masthead"><span class="brand">Scout</span>'
+        f'<span class="thesis-line">{_e(thesis.thesis) or "No thesis yet — open Thesis and describe one."}</span></div>',
+        unsafe_allow_html=True,
+    )
+with _hdr_r:
+    with st.container(key="topnav"):
+        nav = st.segmented_control("Page", PAGES, key="nav", label_visibility="collapsed")
+if nav is None:  # clicking the active pill deselects — snap back
+    st.session_state["nav_target"] = st.session_state.get("nav_last", "Thesis")
+    st.rerun()
+st.session_state["nav_last"] = nav
 
 st.session_state.setdefault(
     "page_loaded_at", datetime.now(timezone.utc).isoformat()
@@ -1104,21 +1120,6 @@ def _run_panel() -> None:
     if tail:
         with st.expander("Console log"):
             st.code(tail, language=None)
-
-# Top-level navigation — session-state-driven (unlike st.tabs) so any button
-# can route to a page: set st.session_state["nav_target"] and rerun.
-PAGES = ["Thesis", "Startups", "Longlist", "Shortlist", "Memos", "Settings"]
-if (_nav_target := st.session_state.pop("nav_target", None)) in PAGES:
-    st.session_state["nav"] = _nav_target
-st.session_state.setdefault("nav", "Thesis")
-with st.container(key="topnav"):
-    nav = st.segmented_control("Page", PAGES, key="nav",
-                               label_visibility="collapsed")
-if nav is None:  # clicking the active pill deselects — snap back
-    st.session_state["nav_target"] = st.session_state.get("nav_last", "Thesis")
-    st.rerun()
-st.session_state["nav_last"] = nav
-
 
 # ============================================================ STARTUPS · feed
 
@@ -1844,18 +1845,22 @@ def _render_cockpit(leads: list[Lead], sel_key: str, more=None) -> None:
         sel = handles[0]
         st.session_state[sel_key] = sel
     by_handle = {l.account.handle.lower(): l for l in leads}
+    # Fixed-height panes so the list and detail scroll INDEPENDENTLY (like the
+    # cockpit mockup) instead of the whole page scrolling as one.
     list_col, detail_col = st.columns([1.5, 1], gap="medium")
     with list_col:
-        for lead in leads:
-            if _feed_row(lead, selected=lead.account.handle.lower() == sel):
-                st.session_state[sel_key] = lead.account.handle.lower()
-                st.rerun()
-        if more is not None:
-            label, cb = more
-            if st.button(label, use_container_width=True, key=f"{sel_key}_more"):
-                cb()
+        with st.container(height=640, border=False):
+            for lead in leads:
+                if _feed_row(lead, selected=lead.account.handle.lower() == sel):
+                    st.session_state[sel_key] = lead.account.handle.lower()
+                    st.rerun()
+            if more is not None:
+                label, cb = more
+                if st.button(label, use_container_width=True, key=f"{sel_key}_more"):
+                    cb()
     with detail_col:
-        _detail_pane(by_handle[sel])
+        with st.container(height=640, border=False):
+            _detail_pane(by_handle[sel])
 
 
 def _render_precision_pass() -> None:
