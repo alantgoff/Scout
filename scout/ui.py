@@ -343,6 +343,16 @@ def _inject_css() -> None:
           margin:8px 0 10px auto; }
         /* deep mustard — the butter accent, dark enough to read on the track */
         .scorefill { height:4px; border-radius:2px; background:#d9b83f; }
+        /* Score breakdown — labeled rows (Qual/Fit/Sig) instead of a cryptic
+           "Q·F·S" glyph. Right-aligned to sit under the score number. */
+        .scoredims { margin-top:7px; display:flex; flex-direction:column; gap:2px;
+          cursor:help; }
+        .scoredims > div { display:flex; justify-content:flex-end; gap:6px;
+          align-items:baseline; font-size:0.6rem; color:var(--muted);
+          text-transform:uppercase; letter-spacing:0.08em; font-weight:600; }
+        .scoredims b { font-family:var(--serif); font-size:0.86rem; color:var(--ink);
+          font-weight:600; letter-spacing:0; text-transform:none; min-width:15px;
+          text-align:right; }
 
         /* Signal bars (single hue — magnitude) */
         .sigrow { display:flex; align-items:center; gap:10px; margin:5px 0; }
@@ -1276,18 +1286,25 @@ def _lead_card(
             bar_pct = min(max(lead.score / (view_max or 1.0) * 100, 0), 100)
             pct_html = (f'<div class="scorecap" style="margin-top:5px">{_e(pct_label)}</div>'
                         if pct_label else "")
-            # Component caption: which of quality / fit / signals this score
-            # is made of (present components only).
+            # Score breakdown: labeled Qual / Fit / Sig rows (present components
+            # only), with a tooltip spelling out what each dimension means —
+            # replaces the unlabeled "Q·F·S" glyph nobody could read.
             comp_html = ""
             if verdict is not None:
-                bits = [f"{tag} {value:.0f}"
-                        for tag, value in (("Q", comps["quality"]),
-                                           ("F", comps["fit"]),
-                                           ("S", comps["signals"]))
+                dims = [(label, value)
+                        for label, value in (("Qual", comps["quality"]),
+                                             ("Fit", comps["fit"]),
+                                             ("Sig", comps["signals"]))
                         if value is not None]
-                if bits:
-                    comp_html = (f'<div class="scorecap" style="margin-top:5px">'
-                                 f'{_e(" · ".join(bits))}</div>')
+                if dims:
+                    rows = "".join(f'<div><span>{l}</span><b>{v:.0f}</b></div>'
+                                   for l, v in dims)
+                    comp_html = (
+                        '<div class="scoredims" title="Score breakdown — '
+                        'Quality: product &amp; founder strength · '
+                        'Fit: match to your thesis · '
+                        'Signals: smart-money follows this run">' + rows + '</div>'
+                    )
             st.markdown(
                 f"""
                 <div class="scoreblock">
@@ -1953,9 +1970,10 @@ if nav == "Longlist":
         t3.markdown(_tile("Top score", f"{max(ll_scores):.0f}" if ll_scores else "—"),
                     unsafe_allow_html=True)
         st.markdown(
-            '<div class="section-sub" style="margin-top:14px">Claude\'s scoring is open on every '
-            'card — signals, score math, thesis fit, value-add levers. Promote the best to the '
-            'shortlist.</div>',
+            '<div class="section-sub" style="margin-top:14px">Every card shows the '
+            '<b>Score</b> and its parts — <b>Quality</b> (product &amp; founder strength), '
+            '<b>Fit</b> (thesis match), <b>Signals</b> (smart-money follows this run). '
+            'Claude\'s full scoring is open on each card. Promote the best to the shortlist.</div>',
             unsafe_allow_html=True,
         )
         _dimension_cards(longlist, key_ns="ll")
