@@ -1792,12 +1792,23 @@ def _detail_pane(lead: Lead) -> None:
         if c2.button("Remove", key=f"{ns}_rm_{hk}", use_container_width=True):
             store.set_pipeline(account.handle, status="new")
             st.session_state["toast"] = f"Removed @{account.handle} from the longlist"; st.rerun()
-    elif status == "shortlisted":
-        if st.button("To longlist", key=f"{ns}_demote_{hk}", use_container_width=True):
-            store.set_pipeline(account.handle, status="longlisted")
-            st.session_state["toast"] = f"Moved @{account.handle} back to the longlist"; st.rerun()
     elif status in WIN_STAGES:
-        if st.button("Remove", key=f"{ns}_rm_{hk}", use_container_width=True):
+        # In the funnel: move the stage (including back to Longlist) and keep
+        # notes right here — this replaces the old separate pipeline table.
+        stage_opts = [STATUS_LABELS["longlisted"]] + [STATUS_LABELS[s] for s in WIN_STAGES]
+        cur_label = STATUS_LABELS.get(status, STATUS_LABELS["shortlisted"])
+        new_stage = st.selectbox("Pipeline stage", stage_opts,
+                                 index=stage_opts.index(cur_label) if cur_label in stage_opts else 0,
+                                 key=f"{ns}_stage_{hk}")
+        notes = st.text_area("Notes", value=(pipeline.get(hk, {}).get("notes") or ""),
+                             key=f"{ns}_notes_{hk}", height=84,
+                             placeholder="Call notes, next step, owner…")
+        c1, c2 = st.columns(2)
+        if c1.button("Save", key=f"{ns}_save_{hk}", type="primary", use_container_width=True):
+            store.set_pipeline(account.handle, status=LABEL_TO_STATUS.get(new_stage, "shortlisted"),
+                               notes=notes)
+            st.session_state["toast"] = f"Saved @{account.handle}"; st.rerun()
+        if c2.button("Remove", key=f"{ns}_rm_{hk}", use_container_width=True):
             store.set_pipeline(account.handle, status="new")
             st.session_state["toast"] = f"Removed @{account.handle} from the shortlist"; st.rerun()
     elif status == "passed":
@@ -1812,6 +1823,33 @@ def _detail_pane(lead: Lead) -> None:
         if c2.button("Pass", key=f"{ns}_pass_{hk}", use_container_width=True):
             store.set_pipeline(account.handle, status="passed")
             st.session_state["toast"] = f"Passed on @{account.handle}"; st.rerun()
+
+
+def _render_cockpit(leads: list[Lead], sel_key: str, more=None) -> None:
+    """Shared triage cockpit: a scannable warm-row list (left) drives the
+    selected lead's dossier (right). `sel_key` persists the selection per page,
+    so the Feed, Longlist, and Shortlist each keep their own. `more`, when set,
+    is a (label, callback) rendered as a Show-more button under the list."""
+    if not leads:
+        return
+    handles = [l.account.handle.lower() for l in leads]
+    sel = st.session_state.get(sel_key)
+    if sel not in handles:
+        sel = handles[0]
+        st.session_state[sel_key] = sel
+    by_handle = {l.account.handle.lower(): l for l in leads}
+    list_col, detail_col = st.columns([1.5, 1], gap="medium")
+    with list_col:
+        for lead in leads:
+            if _feed_row(lead, selected=lead.account.handle.lower() == sel):
+                st.session_state[sel_key] = lead.account.handle.lower()
+                st.rerun()
+        if more is not None:
+            label, cb = more
+            if st.button(label, use_container_width=True, key=f"{sel_key}_more"):
+                cb()
+    with detail_col:
+        _detail_pane(by_handle[sel])
 
 
 def _render_startup_feed() -> None:
@@ -2078,30 +2116,14 @@ def _render_startup_feed() -> None:
                             'to <b>All runs</b> to see everything scout is tracking.</div>',
                             unsafe_allow_html=True)
         else:
-            # Cockpit: a scannable warm-row list (left) drives the full dossier
-            # in the detail pane (right). Selection persists across reruns; if
-            # the picked lead scrolls out of view, fall back to the top row.
-            view_handles = [l.account.handle.lower() for l, _, _ in page]
-            sel = st.session_state.get("feed_selected")
-            if sel not in view_handles:
-                sel = view_handles[0]
-                st.session_state["feed_selected"] = sel
-            by_handle = {l.account.handle.lower(): (l, e, s) for l, e, s in page}
-
-            list_col, detail_col = st.columns([1.5, 1], gap="medium")
-            with list_col:
-                for lead, entry, secondary in page:
-                    if _feed_row(lead, selected=lead.account.handle.lower() == sel):
-                        st.session_state["feed_selected"] = lead.account.handle.lower()
-                        st.rerun()
-                if len(display) > limit:
-                    if st.button(f"Show more ({len(display) - limit} remaining)",
-                                 use_container_width=True):
-                        st.session_state["leads_limit"] = limit + page_size
-                        st.rerun()
-            with detail_col:
-                d_lead, _d_entry, _d_secondary = by_handle[sel]
-                _detail_pane(d_lead)
+            page_leads = [lead for lead, _e, _s in page]
+            more = None
+            if len(display) > limit:
+                def _show_more() -> None:
+                    st.session_state["leads_limit"] = limit + page_size
+                    st.rerun()
+                more = (f"Show more ({len(display) - limit} remaining)", _show_more)
+            _render_cockpit(page_leads, "feed_selected", more=more)
 
         out_dir = PROJECT_ROOT / settings.out_dir
         artifacts = sorted(out_dir.glob("*"), key=lambda p: p.stat().st_mtime, reverse=True)[:3]
@@ -2127,26 +2149,6 @@ def _pick_label(h: str) -> str:
 def _ranked(handles: list[str]) -> list[str]:
     return sorted(handles,
                   key=lambda h: -(lead_by_handle[h].score if h in lead_by_handle else 0))
-
-
-def _dimension_cards(handles: list[str], key_ns: str) -> None:
-    """Score-ranked lead cards with Claude's per-dimension scoring open on
-    every card: signal bars, step-by-step score math, thesis fit, and the
-    firm value-add levers."""
-    with_leads = [h for h in handles if h in lead_by_handle]
-    view_max = max((lead_by_handle[h].score for h in with_leads), default=100.0)
-    for h in handles:
-        lead = lead_by_handle.get(h)
-        if lead is None:
-            st.markdown(
-                f'<div class="subtle">@{_e(h)} — no lead data in the store '
-                '(cleared or never scored); manage it in the table above.</div>',
-                unsafe_allow_html=True,
-            )
-            continue
-        _lead_card(lead, entry_by_handle.get(h),
-                   fresh=h in latest_handles, view_max=view_max,
-                   details_open=True, key_ns=key_ns)
 
 
 if nav == "Longlist":
@@ -2177,7 +2179,12 @@ if nav == "Longlist":
             'Claude\'s full scoring is open on each card. Promote the best to the shortlist.</div>',
             unsafe_allow_html=True,
         )
-        _dimension_cards(longlist, key_ns="ll")
+        ll_leads = [lead_by_handle[h] for h in longlist if h in lead_by_handle]
+        if len(ll_leads) < len(longlist):
+            st.markdown(f'<div class="subtle">{len(longlist) - len(ll_leads)} longlisted '
+                        'account(s) have no lead data (cleared or never scored) — find them in '
+                        'the <b>Database</b>.</div>', unsafe_allow_html=True)
+        _render_cockpit(ll_leads, sel_key="ll_selected")
 
 
 if nav == "Shortlist":
@@ -2197,55 +2204,14 @@ if nav == "Shortlist":
                          unsafe_allow_html=True)
         st.write("")
 
-        editor_rows = []
-        for handle_key in shortlist:
-            row = pipeline[handle_key]
-            lead = lead_by_handle.get(handle_key)
-            verdict = lead.llm if lead else None
-            identity = startup_identity(lead) if lead else None
-            editor_rows.append({
-                "handle": handle_key,
-                "Startup": identity[0] if identity else "—",
-                "Lead": lead.account.url if lead else f"https://x.com/{handle_key}",
-                "Fit": (f"{verdict.thesis_fit:.0%}" if verdict and verdict.thesis_fit is not None else "—"),
-                "Score": lead.score if lead else 0,
-                "Status": STATUS_LABELS.get(row.get("status") or "shortlisted", "Shortlisted"),
-                "Notes": row.get("notes") or "",
-            })
-        edited = st.data_editor(
-            editor_rows, hide_index=True, use_container_width=True, key="pipeline_editor",
-            column_order=["Startup", "Lead", "Fit", "Score", "Status", "Notes"],
-            column_config={
-                "handle": None,
-                "Startup": st.column_config.TextColumn("Startup", disabled=True,
-                                                       width="medium"),
-                "Lead": st.column_config.LinkColumn("Lead", display_text=r"x\.com/(.+)",
-                                                    disabled=True, width="small"),
-                "Fit": st.column_config.TextColumn("Fit", disabled=True, width="small"),
-                "Score": st.column_config.ProgressColumn("Score", min_value=0, max_value=100,
-                                                         format="%d", width="medium"),
-                "Status": st.column_config.SelectboxColumn(
-                    "Status",
-                    options=([STATUS_LABELS["longlisted"]]
-                             + [STATUS_LABELS[s] for s in WIN_STAGES]
-                             + [STATUS_LABELS["passed"]]),
-                    required=True),
-                "Notes": st.column_config.TextColumn("Notes", width="large"),
-            },
+        st.markdown(
+            '<div class="section-sub" style="margin-top:8px">Pick a startup to open its '
+            'dossier — move it through the funnel and keep notes right in the panel. '
+            'The full per-run scorecard for each is on the <b>Database</b> row.</div>',
+            unsafe_allow_html=True,
         )
-        for orig, new in zip(editor_rows, edited):
-            if new["Status"] != orig["Status"] or new["Notes"] != orig["Notes"]:
-                store.set_pipeline(orig["handle"],
-                                   status=LABEL_TO_STATUS.get(new["Status"], "shortlisted"),
-                                   notes=new["Notes"])
-                st.rerun()
-
-        st.write("")
-        st.markdown('<div class="section-title">How Claude scored them</div>'
-                    '<div class="section-sub">Per-dimension detail for every shortlisted startup — '
-                    'signals, score math, thesis fit, value-add levers.</div>',
-                    unsafe_allow_html=True)
-        _dimension_cards(shortlist, key_ns="sl")
+        sl_leads = [lead_by_handle[h] for h in shortlist if h in lead_by_handle]
+        _render_cockpit(sl_leads, sel_key="sl_selected")
 
         st.write("")
         export_rows = pipeline_rows(store, thesis)
