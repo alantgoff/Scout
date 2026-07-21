@@ -247,20 +247,20 @@ def _inject_css() -> None:
         /* Cockpit feed rows — compact warm rows in the list column. The whole
            row is clickable: an invisible full-bleed st.button is overlaid on the
            markdown (scoped by the st-key-frow_ container class). */
-        [class*="st-key-frow_"] { position:relative; margin-bottom:8px; }
+        [class*="st-key-frow_"] { position:relative; margin-bottom:0; }
         [class*="st-key-frow_"] [data-testid="stButton"] { position:absolute; inset:0;
           margin:0; z-index:3; }
         [class*="st-key-frow_"] [data-testid="stButton"] > button { width:100%;
           height:100%; min-height:100%; opacity:0; padding:0; border:none; }
-        .frow { display:grid; grid-template-columns:34px 1fr 92px 38px; gap:12px;
-          align-items:center; padding:11px 14px; border:1px solid var(--hair);
-          border-radius:12px; background:var(--surface); }
-        .frow.sel { box-shadow:inset 3px 0 0 var(--accent); border-color:var(--hair-strong); }
+        .frow { display:grid; grid-template-columns:38px 1fr 120px 48px; gap:14px;
+          align-items:center; padding:12px 16px; border-bottom:1px solid var(--hair); }
+        .frow:hover { background:var(--surface); }
+        .frow.sel { background:var(--surface); box-shadow:inset 3px 0 0 var(--accent); }
         .frow-av { width:34px; height:34px; border-radius:50%; background:var(--butter);
           display:flex; align-items:center; justify-content:center; font-family:var(--serif);
           font-weight:600; font-size:13px; color:var(--ink); }
         .frow-body { min-width:0; }
-        .frow-nm { font-family:var(--serif); font-size:15px; font-weight:600; line-height:1.15;
+        .frow-nm { font-family:var(--serif); font-size:16px; font-weight:600; line-height:1.15;
           color:var(--ink); white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
         .frow-sub { color:var(--muted); font-size:11.5px; margin-top:1px; white-space:nowrap;
           overflow:hidden; text-overflow:ellipsis; }
@@ -275,7 +275,7 @@ def _inject_css() -> None:
           margin-top:3px; }
         .frow-bar > i { display:block; height:100%; background:var(--accent); }
         .frow-bar.gold > i { background:var(--gold); }
-        .frow-sc { font-family:var(--serif); font-size:22px; font-weight:600; text-align:right;
+        .frow-sc { font-family:var(--serif); font-size:24px; font-weight:600; text-align:right;
           color:var(--ink); }
 
         /* Cockpit detail pane (right column) — full-width dossier for the picked
