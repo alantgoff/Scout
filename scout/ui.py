@@ -241,6 +241,70 @@ def _inject_css() -> None:
           text-transform:uppercase; letter-spacing:0.09em; color:var(--muted);
           font-weight:600; }
 
+        /* Cockpit feed rows — compact warm rows in the list column. The whole
+           row is clickable: an invisible full-bleed st.button is overlaid on the
+           markdown (scoped by the st-key-frow_ container class). */
+        [class*="st-key-frow_"] { position:relative; margin-bottom:8px; }
+        [class*="st-key-frow_"] [data-testid="stButton"] { position:absolute; inset:0;
+          margin:0; z-index:3; }
+        [class*="st-key-frow_"] [data-testid="stButton"] > button { width:100%;
+          height:100%; min-height:100%; opacity:0; padding:0; border:none; }
+        .frow { display:grid; grid-template-columns:34px 1fr 92px 38px; gap:12px;
+          align-items:center; padding:11px 14px; border:1px solid var(--hair);
+          border-radius:12px; background:var(--surface); }
+        .frow.sel { box-shadow:inset 3px 0 0 var(--accent); border-color:var(--hair-strong); }
+        .frow-av { width:34px; height:34px; border-radius:50%; background:var(--butter);
+          display:flex; align-items:center; justify-content:center; font-family:var(--serif);
+          font-weight:600; font-size:13px; color:var(--ink); }
+        .frow-body { min-width:0; }
+        .frow-nm { font-family:var(--serif); font-size:15px; font-weight:600; line-height:1.15;
+          color:var(--ink); white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+        .frow-sub { color:var(--muted); font-size:11.5px; margin-top:1px; white-space:nowrap;
+          overflow:hidden; text-overflow:ellipsis; }
+        .frow-tags { display:flex; gap:5px; margin-top:5px; }
+        .frow-tag { font-size:9px; letter-spacing:.06em; text-transform:uppercase;
+          font-weight:600; padding:2px 7px; border-radius:999px; border:1px solid var(--hair);
+          color:var(--ink-2); white-space:nowrap; }
+        .frow-fit .frow-fitlab { display:flex; justify-content:space-between;
+          font-size:9.5px; color:var(--muted); letter-spacing:.04em; }
+        .frow-fit .frow-fitlab b { font-family:var(--serif); font-size:12px; color:var(--ink); }
+        .frow-bar { height:5px; background:var(--track); border-radius:3px; overflow:hidden;
+          margin-top:3px; }
+        .frow-bar > i { display:block; height:100%; background:var(--accent); }
+        .frow-bar.gold > i { background:var(--gold); }
+        .frow-sc { font-family:var(--serif); font-size:22px; font-weight:600; text-align:right;
+          color:var(--ink); }
+
+        /* Cockpit detail pane (right column) — full-width dossier for the picked
+           lead: header, score readout, reasoning, triage. */
+        .dpane-head { display:flex; gap:12px; align-items:flex-start; }
+        .dpane-av { width:44px; height:44px; border-radius:50%; background:var(--butter);
+          display:flex; align-items:center; justify-content:center; font-family:var(--serif);
+          font-weight:600; font-size:16px; color:var(--ink); flex:none; }
+        .dpane-nm { font-family:var(--serif); font-size:22px; font-weight:600; line-height:1.1;
+          color:var(--ink); }
+        .dpane-sub { color:var(--muted); font-size:12.5px; margin-top:3px; }
+        .dpane-summary { font-size:13.5px; line-height:1.5; color:var(--ink-2); margin-top:12px; }
+        .dpane-readout { margin:16px 0 4px; border:1px solid var(--hair); border-radius:14px;
+          background:var(--bg); padding:16px; }
+        .dpane-top { display:flex; align-items:baseline; justify-content:space-between; }
+        .dpane-big { font-family:var(--serif); font-size:38px; font-weight:600; line-height:1;
+          color:var(--ink); }
+        .dpane-big small { font-size:14px; color:var(--muted); font-weight:500; }
+        .dpane-fit { font-family:var(--serif); font-size:22px; font-weight:600; color:var(--ink); }
+        .dpane-dims { display:flex; flex-direction:column; gap:10px; margin-top:14px; }
+        .dpane-dim { display:grid; grid-template-columns:64px 1fr 26px; gap:10px; align-items:center; }
+        .dpane-dlab { font-size:11px; letter-spacing:.06em; text-transform:uppercase;
+          color:var(--muted); font-weight:600; }
+        .dpane-bar { height:6px; background:var(--track); border-radius:3px; overflow:hidden; }
+        .dpane-bar > i { display:block; height:100%; background:var(--accent); }
+        .dpane-dval { font-family:var(--serif); font-size:14px; text-align:right; font-weight:600;
+          color:var(--ink); }
+        .dpane-legend { font-size:11px; color:var(--muted); margin-top:11px; line-height:1.5; }
+        .dpane-h { margin:16px 0 6px; font-size:11px; letter-spacing:.12em; text-transform:uppercase;
+          color:var(--muted); }
+        .dpane-p { margin:0 0 10px; font-size:13.5px; line-height:1.55; color:var(--ink-2); }
+
         .section-title { font-family:var(--serif); font-size:1.45rem; font-weight:600;
           letter-spacing:-0.01em; color:var(--ink); margin:0 0 2px; }
         .section-sub { color:var(--muted); font-size:0.92rem; margin:0 0 14px; }
@@ -1633,6 +1697,123 @@ def _lead_card(
                 _override_editor(lead, ov, key_ns)
 
 
+def _feed_row(lead: Lead, selected: bool) -> bool:
+    """One compact, clickable lead row for the cockpit list (left column). The
+    whole row is a click target: an invisible full-bleed button is overlaid on
+    the markdown via CSS (scoped by the container's st-key class). Returns True
+    if this row was clicked this run. The full dossier renders in the detail
+    pane; the row shows just enough to scan and pick."""
+    account, verdict = lead.account, lead.llm
+    hk = account.handle.lower()
+    identity = startup_identity(lead)
+    title = identity[0] if identity else (account.name or account.handle)
+    fit = verdict.thesis_fit if (verdict and verdict.thesis_fit is not None) else None
+    fit_pct = f"{fit:.0%}" if fit is not None else "—"
+    fit_w = fit * 100 if fit is not None else 0
+    gold = " gold" if (fit is not None and fit >= 0.7) else ""
+    # 2-3 orientation tags: B2B/B2C, funnel status (or stage if still new).
+    tags: list[str] = []
+    if verdict and verdict.customer_type:
+        tags.append(CUSTOMER_TYPE_LABEL.get(verdict.customer_type, verdict.customer_type))
+    status = _status_of(lead)
+    if status != "new":
+        tags.append(STATUS_LABELS.get(status, status))
+    elif verdict and verdict.stage:
+        tags.append(STAGE_LABEL.get(verdict.stage, verdict.stage))
+    tag_html = "".join(f'<span class="frow-tag">{_e(t)}</span>' for t in tags[:3])
+    html = (
+        f'<div class="frow{" sel" if selected else ""}">'
+        f'<div class="frow-av">{_e(_initials(title, account.handle))}</div>'
+        f'<div class="frow-body"><div class="frow-nm">{_e(title)}</div>'
+        f'<div class="frow-sub">@{_e(account.handle)} · {account.followers:,} followers</div>'
+        f'<div class="frow-tags">{tag_html}</div></div>'
+        f'<div class="frow-fit"><div class="frow-fitlab"><span>FIT</span><b>{_e(fit_pct)}</b></div>'
+        f'<div class="frow-bar{gold}"><i style="width:{fit_w:.0f}%"></i></div></div>'
+        f'<div class="frow-sc">{lead.score:.0f}</div></div>'
+    )
+    with st.container(key=f"frow_{hk}"):
+        st.markdown(html, unsafe_allow_html=True)
+        return st.button("open", key=f"fpick_{hk}", use_container_width=True)
+
+
+def _detail_pane(lead: Lead) -> None:
+    """The selected lead's dossier in the cockpit's right pane. Laid out
+    full-width (header, score readout, why/audit, triage) so nothing squishes —
+    unlike _lead_card, whose narrow score sub-column wraps inside a half column.
+    Focused on the triage decision; the deep scorecard lives on Longlist/
+    Shortlist, which the lead lands on once you act."""
+    account, verdict = lead.account, lead.llm
+    hk = account.handle.lower()
+    status = _status_of(lead)
+    comps = score_components(lead, thesis)
+    identity = startup_identity(lead)
+    title = identity[0] if identity else (account.name or account.handle)
+    fit = verdict.thesis_fit if (verdict and verdict.thesis_fit is not None) else None
+    fit_str = f"{fit:.0%}" if fit is not None else "—"
+    dims = [(dl, dv) for dl, dv in (("Quality", comps["quality"]),
+                                    ("Fit", comps["fit"]), ("Signal", comps["signals"]))
+            if dv is not None]
+    dim_html = "".join(
+        f'<div class="dpane-dim"><span class="dpane-dlab">{dl}</span>'
+        f'<div class="dpane-bar"><i style="width:{dv:.0f}%"></i></div>'
+        f'<span class="dpane-dval">{dv:.0f}</span></div>' for dl, dv in dims)
+    company_url = (verdict.company_url or "").strip() if verdict else ""
+    link = f'<a href="{_e(company_url or account.url)}" target="_blank">↗ site</a>'
+    summary = ((verdict.product_summary if verdict else "")
+               or (verdict.one_line_summary if verdict else "") or account.bio or "")
+    why = (verdict.why_interesting if verdict else "") or ""
+    audit = (verdict.verification_note if verdict else "") or ""
+    st.markdown(
+        '<div class="dpane">'
+        f'<div class="dpane-head"><div class="dpane-av">{_e(_initials(title, account.handle))}</div>'
+        f'<div style="min-width:0"><div class="dpane-nm">{_e(title)}</div>'
+        f'<div class="dpane-sub">@{_e(account.handle)} · {account.followers:,} followers · {link}</div>'
+        f'</div></div>'
+        + (f'<div class="dpane-summary">{_e(summary)}</div>' if summary else "")
+        + '<div class="dpane-readout"><div class="dpane-top">'
+        f'<div class="dpane-big">{lead.score:.0f}<small> / 100</small></div>'
+        '<div style="text-align:right"><div class="scorecap">Thesis fit</div>'
+        f'<div class="dpane-fit">{_e(fit_str)}</div></div></div>'
+        f'<div class="dpane-dims">{dim_html}</div>'
+        '<div class="dpane-legend">Quality = product &amp; founder strength · '
+        'Fit = match to your thesis · Signal = smart-money follows this run.</div></div>'
+        + (f'<h4 class="dpane-h">Why this score</h4><p class="dpane-p">{_e(why)}</p>' if why else "")
+        + (f'<h4 class="dpane-h">Audit</h4><p class="dpane-p">{_e(audit)}</p>' if audit else "")
+        + '</div>',
+        unsafe_allow_html=True,
+    )
+    # Triage — status-dependent, full-width. Same funnel moves as the card face.
+    ns = "feeddet"
+    if status == "longlisted":
+        c1, c2 = st.columns(2)
+        if c1.button("Shortlist", key=f"{ns}_short_{hk}", type="primary", use_container_width=True):
+            store.set_pipeline(account.handle, status="shortlisted")
+            st.session_state["toast"] = f"Shortlisted @{account.handle}"; st.rerun()
+        if c2.button("Remove", key=f"{ns}_rm_{hk}", use_container_width=True):
+            store.set_pipeline(account.handle, status="new")
+            st.session_state["toast"] = f"Removed @{account.handle} from the longlist"; st.rerun()
+    elif status == "shortlisted":
+        if st.button("To longlist", key=f"{ns}_demote_{hk}", use_container_width=True):
+            store.set_pipeline(account.handle, status="longlisted")
+            st.session_state["toast"] = f"Moved @{account.handle} back to the longlist"; st.rerun()
+    elif status in WIN_STAGES:
+        if st.button("Remove", key=f"{ns}_rm_{hk}", use_container_width=True):
+            store.set_pipeline(account.handle, status="new")
+            st.session_state["toast"] = f"Removed @{account.handle} from the shortlist"; st.rerun()
+    elif status == "passed":
+        if st.button("Restore", key=f"{ns}_restore_{hk}", use_container_width=True):
+            store.set_pipeline(account.handle, status="new")
+            st.session_state["toast"] = f"Restored @{account.handle}"; st.rerun()
+    else:
+        c1, c2 = st.columns(2)
+        if c1.button("Longlist", key=f"{ns}_long_{hk}", type="primary", use_container_width=True):
+            store.set_pipeline(account.handle, status="longlisted")
+            st.session_state["toast"] = f"Longlisted @{account.handle}"; st.rerun()
+        if c2.button("Pass", key=f"{ns}_pass_{hk}", use_container_width=True):
+            store.set_pipeline(account.handle, status="passed")
+            st.session_state["toast"] = f"Passed on @{account.handle}"; st.rerun()
+
+
 def _render_startup_feed() -> None:
     """The sourcing feed: startup-first lead cards over the latest run (or the
     all-runs ledger), with track / scope / filters and inline triage."""
@@ -1877,16 +2058,6 @@ def _render_startup_feed() -> None:
             unsafe_allow_html=True,
         )
 
-        # Score bar + percentile are relative to what's actually in view.
-        scores_desc = sorted((x.score for x, _ in shown), reverse=True)
-        view_max = scores_desc[0] if scores_desc else 100.0
-
-        def _pct_label(score: float) -> str:
-            if len(scores_desc) < 10:
-                return ""
-            pct = -(-100 * (scores_desc.index(score) + 1) // len(scores_desc))  # ceil
-            return f"top {pct}%" if pct <= 50 else ""
-
         # Reset pagination whenever the view changes (track, scope, filters…)
         page_size = 25
         view_key = repr((track, scope, strategy_hash, tuple(type_filter), tuple(stage_filter),
@@ -1896,16 +2067,8 @@ def _render_startup_feed() -> None:
             st.session_state["leads_limit"] = page_size
         limit = st.session_state.get("leads_limit", page_size)
 
-        for lead, entry, secondary in display[:limit]:
-            _lead_card(lead, entry,
-                       fresh=lead.account.handle.lower() in latest_handles,
-                       view_max=view_max, pct_label=_pct_label(lead.score),
-                       secondary=secondary)
-        if len(display) > limit:
-            if st.button(f"Show more ({len(display) - limit} remaining)"):
-                st.session_state["leads_limit"] = limit + page_size
-                st.rerun()
-        if not display:
+        page = display[:limit]
+        if not page:
             if track == "Startups":
                 st.markdown('<div class="subtle">No launched startups in view yet — try the '
                             '<b>Pre-launch watch</b> track, widen the filters, or run discovery.</div>',
@@ -1914,6 +2077,31 @@ def _render_startup_feed() -> None:
                 st.markdown('<div class="subtle">No leads in the latest run — switch the scope '
                             'to <b>All runs</b> to see everything scout is tracking.</div>',
                             unsafe_allow_html=True)
+        else:
+            # Cockpit: a scannable warm-row list (left) drives the full dossier
+            # in the detail pane (right). Selection persists across reruns; if
+            # the picked lead scrolls out of view, fall back to the top row.
+            view_handles = [l.account.handle.lower() for l, _, _ in page]
+            sel = st.session_state.get("feed_selected")
+            if sel not in view_handles:
+                sel = view_handles[0]
+                st.session_state["feed_selected"] = sel
+            by_handle = {l.account.handle.lower(): (l, e, s) for l, e, s in page}
+
+            list_col, detail_col = st.columns([1.5, 1], gap="medium")
+            with list_col:
+                for lead, entry, secondary in page:
+                    if _feed_row(lead, selected=lead.account.handle.lower() == sel):
+                        st.session_state["feed_selected"] = lead.account.handle.lower()
+                        st.rerun()
+                if len(display) > limit:
+                    if st.button(f"Show more ({len(display) - limit} remaining)",
+                                 use_container_width=True):
+                        st.session_state["leads_limit"] = limit + page_size
+                        st.rerun()
+            with detail_col:
+                d_lead, _d_entry, _d_secondary = by_handle[sel]
+                _detail_pane(d_lead)
 
         out_dir = PROJECT_ROOT / settings.out_dir
         artifacts = sorted(out_dir.glob("*"), key=lambda p: p.stat().st_mtime, reverse=True)[:3]
