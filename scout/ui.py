@@ -2213,10 +2213,10 @@ if nav == "Longlist":
         t3.markdown(_tile("Top score", f"{max(ll_scores):.0f}" if ll_scores else "—"),
                     unsafe_allow_html=True)
         st.markdown(
-            '<div class="section-sub" style="margin-top:14px">Every card shows the '
-            '<b>Score</b> and its parts — <b>Quality</b> (product &amp; founder strength), '
-            '<b>Fit</b> (thesis match), <b>Signals</b> (smart-money follows this run). '
-            'Claude\'s full scoring is open on each card. Promote the best to the shortlist.</div>',
+            '<div class="section-sub" style="margin-top:14px">Pick a startup to open its '
+            'dossier — the <b>Score</b> and its parts (<b>Quality</b> product &amp; founder '
+            'strength, <b>Fit</b> thesis match, <b>Signals</b> smart-money follows this run) '
+            'are in the panel. Promote the best to the shortlist.</div>',
             unsafe_allow_html=True,
         )
         ll_leads = [lead_by_handle[h] for h in longlist if h in lead_by_handle]
