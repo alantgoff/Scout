@@ -717,8 +717,16 @@ def run(
 def reclassify(
     top: Annotated[
         int | None,
-        typer.Option(help="Only reclassify the top N leads of the latest run."),
+        typer.Option(help="Only reclassify the top N leads (of the latest run, "
+                          "or of the whole ledger with --all)."),
     ] = None,
+    all_runs: Annotated[
+        bool,
+        typer.Option("--all", help="Reclassify EVERY startup across ALL runs (the "
+                     "whole ledger), not just the latest run. Slower and costs more "
+                     "(one Claude call per distinct startup), but corrects the entire "
+                     "database in a single pass — use after a thesis or prompt change."),
+    ] = False,
     skip_verify: Annotated[
         bool, typer.Option("--skip-verify", help="Skip the adversarial audit pass.")
     ] = False,
@@ -726,20 +734,25 @@ def reclassify(
         Path, typer.Option("--thesis", help="Path to thesis.yaml.")
     ] = Path("thesis.yaml"),
 ) -> None:
-    """Re-run classification + audit + scoring on the LATEST run's leads —
-    no discovery, no timeline fetching. Cache-first everywhere (tweets,
-    websites, unchanged verdicts), so this is the fast loop for iterating
-    on the thesis or prompt: minutes and cents, not an hour."""
+    """Re-run classification + audit + scoring — no discovery, no timeline
+    fetching. Cache-first everywhere (tweets, websites, unchanged verdicts),
+    so this is the fast loop for iterating on the thesis or prompt: minutes
+    and cents, not an hour. Defaults to the LATEST run's leads; --all covers
+    every distinct startup across the whole ledger."""
     settings = Settings()
     thesis = _load_thesis_or_exit(thesis_path)
     store = Store(settings.db_path)
-    prior = store.load_latest_leads()
+    scope_label = "the whole ledger" if all_runs else "the latest run"
+    prior = (
+        [e.lead for e in store.load_lead_ledger(include_demo=False)]
+        if all_runs else store.load_latest_leads()
+    )
     if not prior:
         console.print("[red]No leads yet[/red] — run `scout run` first.")
         raise typer.Exit(1)
     if all(x.account.source == "demo" for x in prior):
         console.print(
-            "[yellow]Latest run is the offline demo — reclassify works on real runs.[/yellow]"
+            "[yellow]Only offline-demo leads found — reclassify works on real runs.[/yellow]"
         )
         raise typer.Exit(1)
 
@@ -750,9 +763,9 @@ def reclassify(
     store.scan_start("reclassify", os.getpid(), phases=phases)
     ok = False
     try:
-        store.scan_update("preparing", f"{len(prior)} leads from the latest run")
+        store.scan_update("preparing", f"{len(prior)} leads from {scope_label}")
         console.print(
-            f"Reclassifying [bold]{len(prior)}[/bold] leads from the latest run "
+            f"Reclassifying [bold]{len(prior)}[/bold] leads from {scope_label} "
             "(no discovery — cached tweets and sites)."
         )
         # The store row may be fresher than the lead snapshot (a later run
@@ -771,7 +784,15 @@ def reclassify(
             if not disqualified:
                 leads.append(Lead(account=account, signals=signals))
 
-        cap = top if top is not None else settings.llm_max_candidates
+        # --all means "correct everything": don't throttle to
+        # llm_max_candidates the way a fresh run does. An explicit --top still
+        # caps either scope.
+        if top is not None:
+            cap = top
+        elif all_runs:
+            cap = len(leads)
+        else:
+            cap = settings.llm_max_candidates
         ranked, _skipped = _rank_candidates(leads, thesis, cap)
         candidates = [
             (lead.account, tweets_by_handle.get(lead.account.handle, []))

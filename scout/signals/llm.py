@@ -62,11 +62,15 @@ Target stages: {stages}
 {value_add}
 
 For each account in the user message decide:
-- account_type: "founder" (a person building a company), "startup" (the company's own account), or "other" (corporate account, investor, commentator, hobbyist)
-- is_founder: true only for "founder" or "startup" accounts worth a VC conversation
-- stage: how far along they are ("idea", "stealth", "launched", "scaling")
-- company_name: the STARTUP behind the account, when identifiable from the bio/tweets/website — the product or company name a VC would put in a memo. null when genuinely unknown (deep stealth). Never invent one.
-- company_url: the company/product website if visible in the data, else null.
+- account_type: "founder" (a person building a COMPANY), "startup" (the company's own account), or "other" (corporate account, investor, commentator, hobbyist, OR an open-source maintainer / researcher / indie dev with no company behind the work). An open-source library, framework, model, dataset, or personal/side project is NOT a startup unless the evidence shows a COMPANY being built around it — an own-domain product site (not the code repo), funding, a paid/commercial offering, or a founding team. A GitHub repo by itself is build evidence, not a company: when the only artifact is code with no company around it, use "other".
+- is_founder: true only for "founder" or "startup" accounts worth a VC conversation (a real or forming company). false for "other", including OSS maintainers and hobbyists with no company.
+- stage — how far along the PRODUCT is, judged from evidence (a live/accessible product, launch posts, app-store/API/package presence), not from tenure or ambition:
+  - "idea": no product yet — only a concept, research, or "exploring/thinking about" language.
+  - "stealth": actively building but nothing publicly usable yet — no live product, waitlist-only, "coming soon", or a landing page with no working product behind it.
+  - "launched": a product real users can access RIGHT NOW — a working product site, a live web/mobile app, an App/Play-store listing, a public API or installable package, a GA or open beta, or a pinned/recent "we launched / now live / try it / v1 out" post. A live, usable product means LAUNCHED even if the company is tiny or pre-revenue. When torn between stealth and launched and there IS an accessible product, choose launched.
+  - "scaling": launched AND showing growth — named customers/logos, revenue, a hiring team, or a growth round.
+- company_name: the STARTUP behind the account, when identifiable from the bio/tweets/website — the product or company name a VC would put in a memo. null when genuinely unknown (deep stealth) OR when the only thing behind the account is an open-source repo/library with no company (a repo or package name is NOT a company name). Never invent one.
+- company_url: the company/product website if visible — its OWN domain. A github.com / gitlab.com / npmjs.com / pypi.org / huggingface.co URL is code or a package, NOT a company site; never use it as company_url (leave null if that is the only link).
 - product_summary: 1-2 sentences stating what the company ACTUALLY does, naming the evidence source (e.g. website: "AI agent monitoring…"). null when the product cannot be established from the evidence.
 - grounding: the strongest evidence that established the product — "website" | "pinned_tweet" | "tweets" | "github" | "bio" | "none"
 - sector: the broad sector, and subsector: the finest slice you can name (e.g. sector "ai infra", subsector "agent evals"). null when the product itself is not established.
@@ -121,6 +125,19 @@ EVIDENCE RULES — these override everything above:
 - Product unknown -> customer_type null and the scorecard limited to
   founders & cap table criteria at most (concrete founder history); every
   other criterion omitted.
+- AN OPEN-SOURCE REPO IS NOT A COMPANY. GitHub / package-registry activity
+  (repos, stars, a trending library, model, or dataset) is BUILD evidence
+  only. Unless the dossier shows a company around it — an own-domain product
+  site (not the code host), funding, a paid/commercial offering, or a
+  founding team — set account_type "other", is_founder false, company_name
+  null, company_url null. A github.com/gitlab.com/huggingface.co/npmjs.com/
+  pypi.org link is code, never a company_url. "Popular repo" != "startup".
+- STAGE from the PRODUCT, not tenure or ambition: a product real users can
+  access right now (live product site, web/mobile app, app-store listing,
+  public API/package, GA/open beta, or a recent "launched/now live/try it"
+  post) is "launched" (or "scaling" with growth), NOT "stealth" — even for a
+  tiny or pre-revenue company. Reserve "stealth"/"idea" for accounts with no
+  publicly usable product. Do not under-call a shipped product to stealth.
 - Website text may be in any language, or thin (JS-heavy sites). Thin or
   missing website text is weak evidence — do not stretch it. A website
   marked unreachable is NOT evidence of anything.
@@ -485,19 +502,23 @@ You get the lead's evidence dossier (bio, website text, tweets, github) and the 
 - Does the website text contradict the verdict? The website wins.
 - Is thesis_fit justified by the PRODUCT?
 - Is product_summary actually supported by the evidence it cites?
+- IS THIS ACTUALLY A COMPANY? An open-source repo, library, model, dataset, or personal project is NOT a startup unless the dossier shows a company around it (own-domain product site — not the code host, funding, a paid/commercial offering, or a founding team). If the only artifact is a GitHub/package repo, correct account_type to "other", is_founder to false, company_name to null, and company_url to null (a github.com/gitlab.com/huggingface.co/pypi.org/npmjs.com URL is not a company site). Note it.
+- IS THE STAGE RIGHT? A product real users can access now (live product site, web/mobile app, app-store listing, public API/package, GA/open beta, or a recent "launched/now live/try it" post) is "launched" (or "scaling" with growth), NOT "stealth". Correct an under-called stage.
 - Is every scorecard criterion score (1-3) backed by the evidence its scorecard_reasons cites? The founders & cap table criteria are the ONLY ones where founder background counts. When correcting the scorecard, return the COMPLETE corrected "scorecard" and "scorecard_reasons" objects (they replace wholesale) and drop any criterion whose evidence does not exist in the dossier. If you correct customer_type across the b2b/b2c boundary, re-issue the scorecard in the OTHER rubric's criterion keys. For "unverifiable", scorecard should be {{}} or founders-criteria-only. (Legacy verdicts carry a flat "quality" dict instead — audit and correct it the same way, with team as the only founder-background dimension.)
 
 Respond with ONLY a JSON object, no other text:
-{{"handle": str, "verification": "confirmed"|"corrected"|"unverifiable", "corrections": {{}} or any of {{"sector": str|null, "subsector": str|null, "business_model": str|null, "stage": "idea"|"stealth"|"launched"|"scaling", "thesis_fit": 0-1, "product_summary": str|null, "one_line_summary": str, "grounding": "website"|"pinned_tweet"|"tweets"|"github"|"bio"|"none", "customer_type": "b2b"|"b2c"|"b2b2c"|"mixed"|null, "scorecard": {{"criterion_key": 1|2|3}}, "scorecard_reasons": {{"criterion_key": str}}, "quality": {{"dim": 0-1}}, "quality_reasons": {{"dim": str}}, "confidence": 0-1}}, "note": str}}
+{{"handle": str, "verification": "confirmed"|"corrected"|"unverifiable", "corrections": {{}} or any of {{"account_type": "founder"|"startup"|"other", "is_founder": bool, "company_name": str|null, "company_url": str|null, "sector": str|null, "subsector": str|null, "business_model": str|null, "stage": "idea"|"stealth"|"launched"|"scaling", "thesis_fit": 0-1, "product_summary": str|null, "one_line_summary": str, "grounding": "website"|"pinned_tweet"|"tweets"|"github"|"bio"|"none", "customer_type": "b2b"|"b2c"|"b2b2c"|"mixed"|null, "scorecard": {{"criterion_key": 1|2|3}}, "scorecard_reasons": {{"criterion_key": str}}, "quality": {{"dim": 0-1}}, "quality_reasons": {{"dim": str}}, "confidence": 0-1}}, "note": str}}
 
 "confirmed": the evidence supports the verdict — leave corrections empty.
 "corrected": the evidence contradicts part of it — put ONLY the fixed fields in corrections, and say what was wrong in note.
 "unverifiable": the evidence cannot establish what the company does — null out speculated fields and include "confidence" <= 0.3 in corrections."""
 
-# Only these verdict fields may be overwritten by an audit. quality/
-# quality_reasons stay whitelisted so audits of legacy cached verdicts
-# still apply.
+# Only these verdict fields may be overwritten by an audit. account_type/
+# is_founder/company_name/company_url let the audit demote an OSS repo or
+# non-company masquerading as a startup; quality/quality_reasons stay
+# whitelisted so audits of legacy cached verdicts still apply.
 _CORRECTION_FIELDS = {
+    "account_type", "is_founder", "company_name", "company_url",
     "sector", "subsector", "business_model", "stage", "thesis_fit",
     "product_summary", "one_line_summary", "grounding", "confidence",
     "customer_type", "quality", "quality_reasons",

@@ -215,8 +215,9 @@ def test_apply_verification_whitelists_and_caps() -> None:
             "sector": "developer tools", "subsector": "ai observability",
             "business_model": "b2b saas", "thesis_fit": 0.2,
             "grounding": "website",
+            "company_name": "Other Co",   # whitelisted (demote non-companies)
             "handle": "HACKED",           # not whitelisted — ignored
-            "company_name": "Other Co",   # not whitelisted — ignored
+            "why_interesting": "HACKED",  # not whitelisted — ignored
         },
         note="website contradicts the hardware claim",
     )
@@ -224,8 +225,9 @@ def test_apply_verification_whitelists_and_caps() -> None:
     assert fixed.business_model == "b2b saas"
     assert fixed.thesis_fit == 0.2
     assert fixed.grounding == "website"
+    assert fixed.company_name == "Other Co"    # whitelisted, applied
     assert fixed.handle == "benhylak"          # whitelist held
-    assert fixed.company_name == "Raindrop AI"  # whitelist held
+    assert fixed.why_interesting == ""         # whitelist held (default)
     assert fixed.verification == "corrected"
     assert "contradicts" in fixed.verification_note
     # Original verdict untouched (pure function).
@@ -307,6 +309,42 @@ def test_custom_prompt_scorecard_placeholder_substitutes() -> None:
     prompt = _system_prompt(thesis)
     assert "ENTERPRISE READINESS SCORECARD" in prompt
     assert "{scorecard}" not in prompt
+
+
+def test_prompt_defines_stages_and_oss_is_not_a_company() -> None:
+    prompt = _system_prompt(Thesis(thesis="ai infra"))
+    # Stage definitions exist (not just the bare enum) so launched isn't
+    # under-called to stealth.
+    assert "a product real users can access RIGHT NOW" in prompt
+    assert "choose launched" in prompt.lower()
+    # OSS-repo-is-not-a-company guidance, in the decision list AND the
+    # non-editable evidence rules (so custom prompts keep it).
+    assert "open-source library, framework" in prompt
+    assert "A GitHub repo by itself is build evidence" in prompt
+    custom = _system_prompt(Thesis(llm_prompt="Custom: {thesis}", thesis="x"))
+    assert "AN OPEN-SOURCE REPO IS NOT A COMPANY" in custom
+    assert "STAGE from the PRODUCT" in custom
+
+
+def test_audit_can_demote_oss_repo_to_non_company() -> None:
+    from scout.signals.llm import VerificationResult, apply_verification
+
+    # A repo the classifier over-called as a launched startup.
+    verdict = make_verdict(account_type="startup", is_founder=True,
+                           stage="launched", company_name="cool-lib",
+                           company_url="https://github.com/x/cool-lib")
+    result = VerificationResult(
+        handle="benhylak", verification="corrected",
+        corrections={"account_type": "other", "is_founder": False,
+                     "company_name": None, "company_url": None,
+                     "stage": "idea"},
+        note="just an OSS library, no company",
+    )
+    fixed = apply_verification(verdict, result)
+    assert fixed.account_type == "other"
+    assert fixed.is_founder is False
+    assert fixed.company_name is None
+    assert fixed.company_url is None
 
 
 def test_dossier_includes_watchlist_follow_lines() -> None:
