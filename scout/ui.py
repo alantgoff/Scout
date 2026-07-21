@@ -206,20 +206,23 @@ def _inject_css() -> None:
           -webkit-font-smoothing:antialiased;
         }
         .stApp { background:var(--bg); }
-        .block-container { padding-top:2.2rem; padding-bottom:4rem; max-width:1080px; }
+        .block-container { padding-top:1.4rem; padding-bottom:4rem; max-width:1080px; }
         #MainMenu, footer, header[data-testid="stHeader"], [data-testid="stToolbar"],
         [data-testid="stDecoration"] { visibility:hidden; height:0; }
 
         /* Typography — serif display over sans body, like the Headline site */
         h1,h2,h3,h4 { font-family:var(--serif) !important; font-weight:600;
           letter-spacing:-0.01em; color:var(--ink); }
-        /* Centered serif masthead — echoes the headline.com wordmark */
-        .hero-title { font-family:var(--serif); font-size:2.7rem; font-weight:600;
-          letter-spacing:-0.015em; color:var(--ink); line-height:1.05; margin:0;
-          text-align:center; }
-        .hero-sub { font-family:var(--serif); font-style:italic; color:var(--ink-2);
-          font-size:1.08rem; margin:8px auto 0; font-weight:400; max-width:44rem;
-          text-align:center; line-height:1.45; }
+        /* Slim masthead — small wordmark + a one-line thesis, so content keeps
+           the fold. Full thesis lives on the Thesis page. */
+        .masthead { display:flex; align-items:baseline; gap:14px; margin:0 0 2px;
+          min-width:0; }
+        .masthead .brand { font-family:var(--serif); font-size:1.5rem; font-weight:600;
+          letter-spacing:-0.015em; color:var(--ink); line-height:1; flex:none; }
+        .masthead .thesis-line { font-family:var(--serif); font-style:italic;
+          color:var(--muted); font-size:0.95rem; font-weight:400; line-height:1.3;
+          white-space:nowrap; overflow:hidden; text-overflow:ellipsis; min-width:0;
+          border-left:1px solid var(--hair); padding-left:14px; }
         .section-title { font-family:var(--serif); font-size:1.45rem; font-weight:600;
           letter-spacing:-0.01em; color:var(--ink); margin:0 0 2px; }
         .section-sub { color:var(--muted); font-size:0.92rem; margin:0 0 14px; }
@@ -791,10 +794,12 @@ def _status_of(lead: Lead) -> str:
     return pipeline.get(lead.account.handle.lower(), {}).get("status") or "new"
 
 
-# Header — large title, thesis as the subtitle
+# Header — slim wordmark + one-line thesis. The full thesis lives on the
+# Thesis page; repeating it full-height on every tab cost the fold (worse on
+# mobile, where it was a whole screen of chrome before any content).
 st.markdown(
-    f'<div class="hero-title">Scout</div>'
-    f'<div class="hero-sub">{_e(thesis.thesis) or "No thesis yet — open Thesis and describe one."}</div>',
+    f'<div class="masthead"><span class="brand">Scout</span>'
+    f'<span class="thesis-line">{_e(thesis.thesis) or "No thesis yet — open Thesis and describe one."}</span></div>',
     unsafe_allow_html=True,
 )
 
