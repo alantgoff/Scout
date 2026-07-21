@@ -223,6 +223,24 @@ def _inject_css() -> None:
           color:var(--muted); font-size:0.95rem; font-weight:400; line-height:1.3;
           white-space:nowrap; overflow:hidden; text-overflow:ellipsis; min-width:0;
           border-left:1px solid var(--hair); padding-left:14px; }
+
+        /* Left rail (sidebar) — the Startups feed's controls, so the results
+           column is just results. Warm surface, hairline divider, full-width
+           controls with visible labels. */
+        section[data-testid="stSidebar"] { background:var(--surface);
+          border-right:1px solid var(--hair); }
+        section[data-testid="stSidebar"] [data-testid="stSidebarUserContent"] {
+          padding-top:0.6rem; }
+        .rail-title { font-family:var(--serif); font-size:1.35rem; font-weight:600;
+          color:var(--ink); line-height:1.1; }
+        .rail-note { color:var(--muted); font-size:0.82rem; margin:1px 0 10px; }
+        section[data-testid="stSidebar"] [data-testid="stSegmentedControl"],
+        section[data-testid="stSidebar"] [role="radiogroup"] { width:100%;
+          flex-wrap:wrap; }
+        section[data-testid="stSidebar"] label p { font-size:0.68rem !important;
+          text-transform:uppercase; letter-spacing:0.09em; color:var(--muted);
+          font-weight:600; }
+
         .section-title { font-family:var(--serif); font-size:1.45rem; font-weight:600;
           letter-spacing:-0.01em; color:var(--ink); margin:0 0 2px; }
         .section-sub { color:var(--muted); font-size:0.92rem; margin:0 0 14px; }
@@ -1644,21 +1662,24 @@ def _render_startup_feed() -> None:
             )
 
         strategies = store.list_strategies()
-        sc1, sc2, sc3 = st.columns([2.3, 1.4, 2.3])
-        with sc1:
+        # Controls live in the left rail (sidebar) so the feed column is just
+        # results — not a stack of segmented toggles stacked above every card.
+        rail = st.sidebar
+        rail.markdown('<div class="rail-title">Startups</div>'
+                      '<div class="rail-note">Scope and filter the feed.</div>',
+                      unsafe_allow_html=True)
+        with rail:
             # THE product split: real launched startups first; people the
             # system expects to launch soon are the completeness track.
             track = st.segmented_control(
                 "Track", ["Startups", "Pre-launch watch", "Everything"],
-                default="Startups", key="leads_track", label_visibility="collapsed",
+                default="Startups", key="leads_track",
             ) or "Startups"
-        with sc2:
             scope = st.segmented_control(
                 "Scope", ["Latest run", "All runs"], default="Latest run",
-                key="leads_time_scope", label_visibility="collapsed",
+                key="leads_time_scope",
             ) or "Latest run"
-        strategy_hash = None
-        with sc3:
+            strategy_hash = None
             if scope == "All runs" and len(strategies) >= 2:
                 def _strategy_label(h: str | None) -> str:
                     if h is None:
@@ -1669,8 +1690,7 @@ def _render_startup_feed() -> None:
                     return f"{statement} · {s['run_count']} run{plural}"
                 strategy_hash = st.selectbox(
                     "Strategy", [None] + [s["strategy_hash"] for s in strategies],
-                    format_func=_strategy_label, label_visibility="collapsed",
-                    key="leads_strategy",
+                    format_func=_strategy_label, key="leads_strategy",
                     help="Runs made with identical thesis + seeds group into one strategy.",
                 )
 
@@ -1749,17 +1769,13 @@ def _render_startup_feed() -> None:
             not st.session_state.get("f_hidepassed", True),
         ])
 
-        f1, f2, f3, f4 = st.columns([2.6, 1.2, 1.2, 2])
-        with f1:
-            query = st.text_input("Search", placeholder="Search name, bio, sector, tags…",
-                                  label_visibility="collapsed")
-        with f2:
+        with rail:
+            query = st.text_input("Search", placeholder="name, bio, sector, tags…")
             lift_sort = f"{thesis.firm_name or 'Value-add'} lift"
-            sort_by = st.selectbox("Sort", ["Score", "Quality", "Score change", "Thesis fit",
-                                            lift_sort, "Followers"],
-                                   label_visibility="collapsed")
-        with f3:
-            with st.popover(f"Filters · {n_active}" if n_active else "Filters"):
+            sort_by = st.selectbox("Sort by", ["Score", "Quality", "Score change", "Thesis fit",
+                                               lift_sort, "Followers"])
+            with st.popover(f"Filters · {n_active}" if n_active else "Filters",
+                            use_container_width=True):
                 type_filter = st.multiselect("Type", ["founder", "startup", "other"],
                                              default=FILTER_DEFAULTS["f_type"], key="f_type",
                                              format_func=lambda t: TYPE_LABEL[t])
@@ -1777,8 +1793,6 @@ def _render_startup_feed() -> None:
                 if n_active and st.button("Reset filters"):
                     st.session_state["filters_reset"] = True
                     st.rerun()
-        with f4:
-            pass
 
         HIDE_LABELS = {"type": "type filter", "stage": "stage filter",
                        "ctype": "customer type", "score": "min score",
