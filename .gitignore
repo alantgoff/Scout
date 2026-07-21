@@ -24,3 +24,4 @@ __pycache__/
 
 # Phone digest checkout (its own repo: scout-digest)
 docs/
+.gstack/
