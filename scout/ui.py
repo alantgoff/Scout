@@ -1664,10 +1664,9 @@ def _render_startup_feed() -> None:
         strategies = store.list_strategies()
         # Controls live in the left rail (sidebar) so the feed column is just
         # results — not a stack of segmented toggles stacked above every card.
+        # The rail header + Latest-run/Database switch are rendered by the
+        # nav-level block before this runs.
         rail = st.sidebar
-        rail.markdown('<div class="rail-title">Startups</div>'
-                      '<div class="rail-note">Scope and filter the feed.</div>',
-                      unsafe_allow_html=True)
         with rail:
             # THE product split: real launched startups first; people the
             # system expects to launch soon are the completeness track.
@@ -3542,13 +3541,21 @@ def _render_raw_tables() -> None:
                         st.error(f"{type(exc).__name__}: {exc}")
 
 
-# The Startups page: the sourcing feed + the startup database, as sub-pages.
+# The Startups page: the sourcing feed + the startup database. A rail-level
+# switch (not st.tabs) renders only ONE body per run — st.tabs renders both
+# server-side, which leaked the feed's sidebar controls onto the Database view.
 if nav == "Startups":
-    sub_feed, sub_db = st.tabs(["Latest run", "Database"])
-    with sub_feed:
-        _render_startup_feed()
-    with sub_db:
+    st.sidebar.markdown('<div class="rail-title">Startups</div>', unsafe_allow_html=True)
+    # "Feed" (not "Latest run") so it doesn't collide with the feed's own
+    # Latest-run/All-runs Scope toggle below it in the same rail.
+    startups_view = st.sidebar.segmented_control(
+        "View", ["Feed", "Database"], default="Feed",
+        key="startups_view", label_visibility="collapsed",
+    ) or "Feed"
+    if startups_view == "Database":
         _render_database()
+    else:
+        _render_startup_feed()
 
 
 # ============================================================ SETTINGS
