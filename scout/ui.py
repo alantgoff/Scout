@@ -1811,6 +1811,12 @@ def _detail_pane(lead: Lead) -> None:
         if c2.button("Remove", key=f"{ns}_rm_{hk}", use_container_width=True):
             store.set_pipeline(account.handle, status="new")
             st.session_state["toast"] = f"Removed @{account.handle} from the shortlist"; st.rerun()
+        # Thread to the next funnel stage: draft/open the outreach memo.
+        memo_label = "Open memo →" if pipeline.get(hk, {}).get("brief") else "Write memo →"
+        if st.button(memo_label, key=f"{ns}_memo_{hk}", use_container_width=True):
+            st.session_state["nav_target"] = "Memos"
+            st.session_state["memo_target"] = hk
+            st.rerun()
     elif status == "passed":
         if st.button("Restore", key=f"{ns}_restore_{hk}", use_container_width=True):
             store.set_pipeline(account.handle, status="new")
@@ -1850,6 +1856,40 @@ def _render_cockpit(leads: list[Lead], sel_key: str, more=None) -> None:
                 cb()
     with detail_col:
         _detail_pane(by_handle[sel])
+
+
+def _render_precision_pass() -> None:
+    """Paid X-API re-score of the latest run's top leads — sharpen scores before
+    outreach. Lives with the Feed (not the Thesis setup page) because it acts on
+    the latest run's leads, which is what you're looking at here."""
+    scan_active = ((store.current_scan() or {}).get("status") == "running")
+    st.markdown("---")
+    st.markdown('<div class="section-title">Precision pass</div>'
+                '<div class="section-sub">Before outreach, re-score the top leads of the latest '
+                'run with fresh official X API data. Discovery stays free — only this step '
+                'spends, and only after you confirm the cost.</div>',
+                unsafe_allow_html=True)
+    v1, v2, _v3 = st.columns([1, 1, 2])
+    with v1:
+        n_verify = st.number_input("Top leads to hydrate", 1, 200, 20)
+    with v2:
+        v_tweets = st.number_input("Tweets per lead", 0, 50, 10)
+    v_est = int(n_verify) * (settings.xapi_cost_per_user_read
+                             + int(v_tweets) * settings.xapi_cost_per_post_read)
+    v_remaining = max(settings.xapi_spend_cap_usd - store.xapi_spend_usd(), 0.0)
+    v_lo, v_hi, _vper, _vlabel = _estimate_scan("verify", n_verify=int(n_verify))
+    st.markdown(
+        f'<div class="subtle">Worst case ≈ <b>${v_est:.2f}</b> · '
+        f'<b>${v_remaining:.2f}</b> left of the cap · estimated '
+        f'<b>{_fmt_dur(v_lo)}–{_fmt_dur(v_hi)}</b>. Results land as a verify run '
+        'in the ledger.</div>',
+        unsafe_allow_html=True,
+    )
+    v_ready = st.checkbox(f"Spend up to ${v_est:.2f} of the X API budget",
+                          key="confirm_verify_spend")
+    if st.button("Run precision pass", disabled=not v_ready or scan_active):
+        _launch_scan(["verify", "--max", str(int(n_verify)), "--tweets", str(int(v_tweets))],
+                     "verify")
 
 
 def _render_startup_feed() -> None:
@@ -2795,37 +2835,6 @@ if nav == "Thesis":
 
     st.write("")
     st.markdown("---")
-
-    # --- Precision pass (paid verify) ------------------------------------------
-    st.markdown('<div class="section-title">Precision pass</div>'
-                '<div class="section-sub">Before outreach, re-score the top leads of the latest '
-                'run with fresh official X API data. Discovery stays free — only this step '
-                'spends, and only after you confirm the cost.</div>',
-                unsafe_allow_html=True)
-    v1, v2, _v3 = st.columns([1, 1, 2])
-    with v1:
-        n_verify = st.number_input("Top leads to hydrate", 1, 200, 20)
-    with v2:
-        v_tweets = st.number_input("Tweets per lead", 0, 50, 10)
-    v_est = int(n_verify) * (settings.xapi_cost_per_user_read
-                             + int(v_tweets) * settings.xapi_cost_per_post_read)
-    v_remaining = max(settings.xapi_spend_cap_usd - store.xapi_spend_usd(), 0.0)
-    v_lo, v_hi, _vper, _vlabel = _estimate_scan("verify", n_verify=int(n_verify))
-    st.markdown(
-        f'<div class="subtle">Worst case ≈ <b>${v_est:.2f}</b> · '
-        f'<b>${v_remaining:.2f}</b> left of the cap · estimated '
-        f'<b>{_fmt_dur(v_lo)}–{_fmt_dur(v_hi)}</b>. Results land as a verify run '
-        f'in the ledger.</div>',
-        unsafe_allow_html=True,
-    )
-    v_ready = st.checkbox(f"Spend up to ${v_est:.2f} of the X API budget",
-                          key="confirm_verify_spend")
-    if st.button("Run precision pass", disabled=not v_ready or scan_active):
-        _launch_scan(["verify", "--max", str(int(n_verify)), "--tweets", str(int(v_tweets))],
-                     "verify")
-
-    st.write("")
-    st.markdown("---")
     st.markdown('<div class="section-title">Fine-tune</div>'
                 '<div class="section-sub">Everything the agent wrote is editable by hand.</div>',
                 unsafe_allow_html=True)
@@ -3710,6 +3719,7 @@ if nav == "Startups":
         _render_database()
     else:
         _render_startup_feed()
+        _render_precision_pass()
 
 
 # ============================================================ SETTINGS
