@@ -244,18 +244,42 @@ def _inject_css() -> None:
           text-transform:uppercase; letter-spacing:0.09em; color:var(--muted);
           font-weight:600; }
 
-        /* Cockpit feed rows — compact warm rows in the list column. The whole
-           row is clickable: an invisible full-bleed st.button is overlaid on the
-           markdown (scoped by the st-key-frow_ container class). */
+        /* Cockpit feed rows. Each row is a REAL st.button (reliable click) with
+           the warm-row visual painted as a decorative markdown overlay on top —
+           pointer-events:none so a click anywhere on the row falls through to
+           the button beneath. This inverts the old (broken) hack: the button is
+           the normal in-flow element with real height, so it can't collapse to
+           0px; the markdown is the absolute decorative layer. Scoped by the
+           st-key-frow_ container class. */
         [class*="st-key-frow_"] { position:relative; margin-bottom:0; }
-        [class*="st-key-frow_"] [data-testid="stButton"] { position:absolute; inset:0;
-          margin:0; z-index:3; }
+        [class*="st-key-frow_"] [data-testid="stButton"] { margin:0; }
         [class*="st-key-frow_"] [data-testid="stButton"] > button { width:100%;
-          height:100%; min-height:100%; opacity:0; padding:0; border:none; }
+          min-height:70px; padding:0; border:none; border-bottom:1px solid var(--hair);
+          border-radius:0; background:transparent; outline:none; }
+        [class*="st-key-frow_"] [data-testid="stButton"] > button:hover {
+          background:var(--surface) !important; border-color:var(--hair); color:inherit; }
+        [class*="st-key-frow_"] [data-testid="stButton"] > button:focus,
+        [class*="st-key-frow_"] [data-testid="stButton"] > button:focus:not(:active) {
+          outline:none; color:inherit; box-shadow:none; }
+        /* Selected row: light surface + accent bar, held across hover/focus
+           (!important beats Streamlit's built-in primary-button theme hover). */
+        [class*="st-key-frow_"] [data-testid="stButton"] > button[kind="primary"],
+        [class*="st-key-frow_"] [data-testid="stButton"] > button[kind="primary"]:hover,
+        [class*="st-key-frow_"] [data-testid="stButton"] > button[kind="primary"]:focus {
+          background:var(--surface) !important; color:inherit;
+          box-shadow:inset 3px 0 0 var(--accent) !important; }
+        /* Hide the button's own accessibility label — the overlay carries the row. */
+        [class*="st-key-frow_"] [data-testid="stButton"] > button [data-testid="stMarkdownContainer"] {
+          display:none; }
+        /* The visual row: absolutely overlaid, ignores pointer events, stretched
+           to the button so its own grid can vertically center the content. */
+        [class*="st-key-frow_"] [data-testid="stElementContainer"]:has(.frow) {
+          position:absolute; inset:0; z-index:2; pointer-events:none; }
+        [class*="st-key-frow_"] [data-testid="stElementContainer"]:has(.frow) [data-testid="stMarkdown"],
+        [class*="st-key-frow_"] [data-testid="stElementContainer"]:has(.frow) [data-testid="stMarkdownContainer"] {
+          width:100%; height:100%; }
         .frow { display:grid; grid-template-columns:38px 1fr 120px 48px; gap:14px;
-          align-items:center; padding:12px 16px; border-bottom:1px solid var(--hair); }
-        .frow:hover { background:var(--surface); }
-        .frow.sel { background:var(--surface); box-shadow:inset 3px 0 0 var(--accent); }
+          align-items:center; padding:0 16px; width:100%; height:100%; }
         .frow-av { width:34px; height:34px; border-radius:50%; background:var(--butter);
           display:flex; align-items:center; justify-content:center; font-family:var(--serif);
           font-weight:600; font-size:13px; color:var(--ink); }
@@ -307,6 +331,20 @@ def _inject_css() -> None:
         .dpane-h { margin:16px 0 6px; font-size:11px; letter-spacing:.12em; text-transform:uppercase;
           color:var(--muted); }
         .dpane-p { margin:0 0 10px; font-size:13.5px; line-height:1.55; color:var(--ink-2); }
+        /* Scoring breakdown inside the NARROW detail pane: reflow each .sigrow so
+           the evidence text wraps to its own full-width line under [name·bar·pts]
+           instead of a cramped fixed 34% column (the card face has room; the pane
+           does not). */
+        .dscore { margin-top:2px; }
+        .dscore .subtle { display:block; margin-top:12px; }
+        .dscore .sigrow { flex-wrap:wrap; gap:3px 8px; margin:7px 0; }
+        .dscore .signame { flex:1 1 auto; min-width:0; font-size:0.82rem; }
+        .dscore .sigtrack { flex:0 0 60px; order:2; }
+        .dscore .sigpts { flex:0 0 auto; order:3; font-size:0.82rem; }
+        .dscore .sigdetail { flex:1 1 100%; order:4; margin-left:0; font-size:0.76rem;
+          line-height:1.4; color:var(--muted); white-space:normal; overflow:visible;
+          text-overflow:clip; }
+        .dscore .math-step { font-size:0.8rem; }
 
         .section-title { font-family:var(--serif); font-size:1.45rem; font-weight:600;
           letter-spacing:-0.01em; color:var(--ink); margin:0 0 2px; }
@@ -1234,6 +1272,198 @@ def _override_editor(lead: Lead, ov: dict, key_ns: str) -> None:
         st.rerun()
 
 
+def _score_detail_html(lead: Lead, comps: dict) -> str:
+    """The per-dimension scoring breakdown as one HTML block — the readiness
+    scorecard (Q, section by section with its 1–3 criteria), thesis fit (F), X
+    signals (S), and the firm value-add levers — in the shared .sigrow layout.
+    Reused by the lead card (Database dossier) and the cockpit detail pane so
+    the two never drift. `comps` is a score_components(lead, thesis) result."""
+    verdict = lead.llm
+    params = thesis.signal_params
+    parts: list[str] = []
+    # ---- Company quality (Q): the readiness scorecard, section by section with
+    # the 1–3 criteria under each — hover a name for what it measures; the note
+    # is the evidence each score rests on. Sections/criteria Claude could NOT
+    # evidence show as excluded, never guessed. Legacy verdicts fall back to the
+    # flat v7 rubric below.
+    if verdict is not None and comps["scorecard"] is not None:
+        result, sections = comps["scorecard"]
+        parts.append(
+            f'<div class="subtle" style="margin-top:10px">Scorecard '
+            f'<b>Q {result.total:.0f} · {_e(BAND_LABELS[result.band])}</b> · '
+            f'{params.score_weight_quality:.0%} of the blend — '
+            f'{_e(result.rubric_label)} rubric, {result.n_present_sections} of '
+            f'{result.n_sections} sections evidence-backed. Criteria are scored '
+            '1–3 (● = point) from cited evidence only; unscored criteria are '
+            'excluded and their weight renormalizes. Hover a row for what it '
+            'measures.</div>'
+        )
+        wsum_s = sum(s.weight for s in sections) or 1.0
+        sc_rows: list[str] = []
+        for s in sections:
+            tip = f"{100 * s.weight / wsum_s:.0f}% of the scorecard"
+            if s.score is None:
+                sc_rows.append(
+                    f'<div class="sigrow" style="opacity:0.55">'
+                    f'<div class="signame" title="{_e(tip)}"><b>{_e(s.label)}</b></div>'
+                    f'<div class="sigtrack"></div>'
+                    f'<div class="sigpts">—</div>'
+                    f'<div class="sigdetail">no evidence — excluded, weight renormalizes</div></div>'
+                )
+                continue
+            note = ("manual override — your number" if s.manual
+                    else f"{s.n_present}/{s.n_total} criteria scored")
+            sc_rows.append(
+                f'<div class="sigrow"><div class="signame" title="{_e(tip)}"><b>{_e(s.label)}</b></div>'
+                f'<div class="sigtrack"><div class="sigfill" style="width:{s.score:.0f}%"></div></div>'
+                f'<div class="sigpts">{s.score:.0f}</div>'
+                f'<div class="sigdetail">{_e(note)}</div></div>'
+            )
+            for c in s.criteria:
+                if c.value is None:
+                    continue
+                pips = "●" * int(round(c.value)) + "○" * (3 - int(round(c.value)))
+                sc_rows.append(
+                    f'<div class="sigrow" style="margin-left:16px">'
+                    f'<div class="signame" title="{_e(c.purpose)}">{_e(c.label)}</div>'
+                    f'<div class="sigtrack"><div class="sigfill" style="width:{50 * (c.value - 1):.0f}%"></div></div>'
+                    f'<div class="sigpts">{pips}</div>'
+                    f'<div class="sigdetail" title="{_e(c.reason)}">{_e(c.reason)}</div></div>'
+                )
+            missing = [c.label for c in s.criteria if c.value is None]
+            if missing and s.n_present:
+                sc_rows.append(
+                    f'<div class="sigrow" style="margin-left:16px;opacity:0.55">'
+                    f'<div class="signame">not scored</div>'
+                    f'<div class="sigtrack"></div><div class="sigpts">—</div>'
+                    f'<div class="sigdetail" title="{_e(", ".join(missing))}">'
+                    f'no evidence: {_e(", ".join(missing))}</div></div>'
+                )
+        parts.append(f'<div style="margin-top:4px">{"".join(sc_rows)}</div>')
+        # ---- Thesis fit (F): one number, with Claude's reasoning.
+        if verdict.thesis_fit is not None:
+            parts.append(
+                f'<div class="subtle" style="margin-top:10px">Thesis fit '
+                f'<b>F {100 * min(max(verdict.thesis_fit, 0.0), 1.0):.0f}</b> · '
+                f'{params.score_weight_fit:.0%} of the blend — '
+                f'{_e(verdict.fit_reason or "no reasoning recorded")}</div>'
+            )
+    elif verdict is not None:
+        weighted_dims = [(k, w) for k, w in thesis.quality_weights.items() if w > 0]
+        wsum_q = sum(w for _, w in weighted_dims) or 1.0
+        q = quality_score(verdict, thesis)
+        if q is not None:
+            lens = CUSTOMER_TYPE_LABEL.get(verdict.customer_type or "", "")
+            known_n = sum(1 for k, _w in weighted_dims if k in verdict.quality)
+            parts.append(
+                f'<div class="subtle" style="margin-top:10px">Company quality '
+                f'<b>Q {q:.0f}</b> · {params.score_weight_quality:.0%} of the blend — '
+                f'legacy flat rubric, {known_n} of {len(weighted_dims)} dimensions '
+                'evidence-backed'
+                + (f", scored through the {_e(lens)} lens" if lens else "")
+                + '. <b>Reclassify latest run</b> on the Thesis page re-scores it '
+                'on the new readiness scorecard. Hover a dimension for what it '
+                'measures.</div>'
+            )
+            q_rows: list[str] = []
+            for k, w in sorted(weighted_dims,
+                               key=lambda kw: -(verdict.quality.get(kw[0], -1.0))):
+                label = QUALITY_DIM_LABEL.get(k, k)
+                tip = (f"{QUALITY_DIMENSIONS.get(k, '')} — "
+                       f"{100 * w / wsum_q:.0f}% of the quality score")
+                value = verdict.quality.get(k)
+                if value is None:
+                    q_rows.append(
+                        f'<div class="sigrow" style="opacity:0.55">'
+                        f'<div class="signame" title="{_e(tip)}">{_e(label)}</div>'
+                        f'<div class="sigtrack"></div>'
+                        f'<div class="sigpts">—</div>'
+                        f'<div class="sigdetail">no evidence — excluded, weight renormalizes</div></div>'
+                    )
+                else:
+                    value = min(max(value, 0.0), 1.0)
+                    reason = verdict.quality_reasons.get(k, "")
+                    q_rows.append(
+                        f'<div class="sigrow"><div class="signame" title="{_e(tip)}">{_e(label)}</div>'
+                        f'<div class="sigtrack"><div class="sigfill" style="width:{100 * value:.0f}%"></div></div>'
+                        f'<div class="sigpts">{value:.0%}</div>'
+                        f'<div class="sigdetail" title="{_e(reason)}">{_e(reason)}</div></div>'
+                    )
+            parts.append(f'<div style="margin-top:4px">{"".join(q_rows)}</div>')
+        else:
+            parts.append(
+                '<div class="subtle" style="margin-top:10px">No scorecard on '
+                'this verdict (older cache) — <b>Reclassify latest run</b> on the '
+                'Thesis page scores it on the readiness scorecard, or set the '
+                'section scores yourself in <b>Adjust scoring</b>.</div>'
+            )
+        # ---- Thesis fit (F): one number, with Claude's reasoning.
+        if verdict.thesis_fit is not None:
+            parts.append(
+                f'<div class="subtle" style="margin-top:10px">Thesis fit '
+                f'<b>F {100 * min(max(verdict.thesis_fit, 0.0), 1.0):.0f}</b> · '
+                f'{params.score_weight_fit:.0%} of the blend — '
+                f'{_e(verdict.fit_reason or "no reasoning recorded")}</div>'
+            )
+    # ---- X signals (S): the deterministic momentum score — every signal that
+    # fired, its weighted points, and the evidence.
+    hits = [s for s in lead.signals if s.value > 0]
+    if comps["signals"] is not None:
+        s_note = (f'{len(hits)} signal{"s" if len(hits) != 1 else ""} fired '
+                  f'of {len(thesis.weights)} tracked'
+                  if hits else "no signals fired")
+        parts.append(
+            f'<div class="subtle" style="margin-top:10px">X signals '
+            f'<b>S {comps["signals"]:.0f}</b> · {params.score_weight_signals:.0%} '
+            f'of the blend — {s_note}. Hover a signal for what it means; '
+            'points = value × weight.</div>'
+        )
+    if hits:
+        max_pts = max(s.contribution for s in hits) or 1.0
+        parts.append("".join(
+            f'<div class="sigrow"><div class="signame" title="{_e(SIGNAL_HELP.get(s.name, ""))}">{_e(s.name)}</div>'
+            f'<div class="sigtrack"><div class="sigfill" style="width:{100 * s.contribution / max_pts:.0f}%"></div></div>'
+            f'<div class="sigpts">{s.contribution:.1f}</div>'
+            f'<div class="sigdetail" title="{_e(s.detail)}">{_e(s.detail)}</div></div>'
+            for s in sorted(hits, key=lambda s: -s.contribution)
+        ))
+    # ---- Firm value-add: which of the firm's specific levers would accelerate
+    # this startup, per the classifier.
+    if verdict and verdict.value_add_fit is not None:
+        firm = thesis.firm_name or "Firm"
+        reason = f" — {verdict.value_add_reason}" if verdict.value_add_reason else ""
+        parts.append(
+            f'<div class="subtle" style="margin-top:10px">{_e(firm)} lift '
+            f'{verdict.value_add_fit:.0%}{_e(reason)}</div>'
+        )
+        lever_labels = {x.key: x.label for x in thesis.firm_value_add}
+        lever_help = {x.key: x.description for x in thesis.firm_value_add}
+        levers = [(k, min(max(v, 0.0), 1.0))
+                  for k, v in verdict.value_add_levers.items() if v > 0]
+        if levers:
+            parts.append('<div style="margin-top:4px">' + "".join(
+                f'<div class="sigrow"><div class="signame" title="{_e(lever_help.get(k, ""))}">{_e(lever_labels.get(k, k))}</div>'
+                f'<div class="sigtrack"><div class="sigfill" style="width:{100 * v:.0f}%"></div></div>'
+                f'<div class="sigpts">{v:.0%}</div>'
+                f'<div class="sigdetail"></div></div>'
+                for k, v in sorted(levers, key=lambda kv: -kv[1])
+            ) + '</div>')
+    return "".join(parts)
+
+
+def _score_math_html(lead: Lead, manual_score: float | None = None) -> str:
+    """The step-by-step score math as one HTML block — how Q, F and S blend and
+    which trust multipliers moved the number. The last step IS the score."""
+    steps = "".join(
+        f'<div class="math-step">{_e(desc)} → <b>{running:.1f}</b></div>'
+        for desc, running in score_breakdown(lead, thesis, manual_score=manual_score)
+    )
+    return ('<div class="subtle" style="margin-top:10px">Score math — the blend '
+            'renormalizes over the components this lead actually evidences, then '
+            'trust multipliers apply:</div>'
+            f'<div style="margin-top:2px">{steps}</div>')
+
+
 def _lead_card(
     lead: Lead,
     entry: LedgerEntry | None = None,
@@ -1444,7 +1674,6 @@ def _lead_card(
         # value CHANGES between reruns, so user toggles persist.
         with st.expander("Details", expanded=details_open):
             ov = overrides.get(handle_key) or {}
-            params = thesis.signal_params
             if verdict and verdict.why_interesting:
                 st.markdown(f'<div class="lead-summary">{_e(verdict.why_interesting)}</div>',
                             unsafe_allow_html=True)
@@ -1459,186 +1688,10 @@ def _lead_card(
                     'revisit them in <b>Adjust scoring</b>.</div>',
                     unsafe_allow_html=True,
                 )
-            # ---- Company quality (Q): the readiness scorecard, section by
-            # section with the 1–3 criteria under each — hover a name for
-            # what it measures; the note is the evidence each score rests
-            # on. Sections/criteria Claude could NOT evidence show as
-            # excluded, never guessed. Legacy verdicts fall back to the
-            # flat v7 rubric below.
-            if verdict is not None and comps["scorecard"] is not None:
-                result, sections = comps["scorecard"]
-                st.markdown(
-                    f'<div class="subtle" style="margin-top:10px">Scorecard '
-                    f'<b>Q {result.total:.0f} · {_e(BAND_LABELS[result.band])}</b> · '
-                    f'{params.score_weight_quality:.0%} of the blend — '
-                    f'{_e(result.rubric_label)} rubric, {result.n_present_sections} of '
-                    f'{result.n_sections} sections evidence-backed. Criteria are scored '
-                    '1–3 (● = point) from cited evidence only; unscored criteria are '
-                    'excluded and their weight renormalizes. Hover a row for what it '
-                    'measures.</div>',
-                    unsafe_allow_html=True,
-                )
-                wsum_s = sum(s.weight for s in sections) or 1.0
-                sc_rows: list[str] = []
-                for s in sections:
-                    tip = f"{100 * s.weight / wsum_s:.0f}% of the scorecard"
-                    if s.score is None:
-                        sc_rows.append(
-                            f'<div class="sigrow" style="opacity:0.55">'
-                            f'<div class="signame" title="{_e(tip)}"><b>{_e(s.label)}</b></div>'
-                            f'<div class="sigtrack"></div>'
-                            f'<div class="sigpts">—</div>'
-                            f'<div class="sigdetail">no evidence — excluded, weight renormalizes</div></div>'
-                        )
-                        continue
-                    note = ("manual override — your number" if s.manual
-                            else f"{s.n_present}/{s.n_total} criteria scored")
-                    sc_rows.append(
-                        f'<div class="sigrow"><div class="signame" title="{_e(tip)}"><b>{_e(s.label)}</b></div>'
-                        f'<div class="sigtrack"><div class="sigfill" style="width:{s.score:.0f}%"></div></div>'
-                        f'<div class="sigpts">{s.score:.0f}</div>'
-                        f'<div class="sigdetail">{_e(note)}</div></div>'
-                    )
-                    for c in s.criteria:
-                        if c.value is None:
-                            continue
-                        pips = "●" * int(round(c.value)) + "○" * (3 - int(round(c.value)))
-                        sc_rows.append(
-                            f'<div class="sigrow" style="margin-left:16px">'
-                            f'<div class="signame" title="{_e(c.purpose)}">{_e(c.label)}</div>'
-                            f'<div class="sigtrack"><div class="sigfill" style="width:{50 * (c.value - 1):.0f}%"></div></div>'
-                            f'<div class="sigpts">{pips}</div>'
-                            f'<div class="sigdetail" title="{_e(c.reason)}">{_e(c.reason)}</div></div>'
-                        )
-                    missing = [c.label for c in s.criteria if c.value is None]
-                    if missing and s.n_present:
-                        sc_rows.append(
-                            f'<div class="sigrow" style="margin-left:16px;opacity:0.55">'
-                            f'<div class="signame">not scored</div>'
-                            f'<div class="sigtrack"></div><div class="sigpts">—</div>'
-                            f'<div class="sigdetail" title="{_e(", ".join(missing))}">'
-                            f'no evidence: {_e(", ".join(missing))}</div></div>'
-                        )
-                st.markdown(f'<div style="margin-top:4px">{"".join(sc_rows)}</div>',
-                            unsafe_allow_html=True)
-                # ---- Thesis fit (F): one number, with Claude's reasoning.
-                if verdict.thesis_fit is not None:
-                    st.markdown(
-                        f'<div class="subtle" style="margin-top:10px">Thesis fit '
-                        f'<b>F {100 * min(max(verdict.thesis_fit, 0.0), 1.0):.0f}</b> · '
-                        f'{params.score_weight_fit:.0%} of the blend — '
-                        f'{_e(verdict.fit_reason or "no reasoning recorded")}</div>',
-                        unsafe_allow_html=True,
-                    )
-            elif verdict is not None:
-                weighted_dims = [(k, w) for k, w in thesis.quality_weights.items() if w > 0]
-                wsum_q = sum(w for _, w in weighted_dims) or 1.0
-                q = quality_score(verdict, thesis)
-                if q is not None:
-                    lens = CUSTOMER_TYPE_LABEL.get(verdict.customer_type or "", "")
-                    known_n = sum(1 for k, _w in weighted_dims if k in verdict.quality)
-                    st.markdown(
-                        f'<div class="subtle" style="margin-top:10px">Company quality '
-                        f'<b>Q {q:.0f}</b> · {params.score_weight_quality:.0%} of the blend — '
-                        f'legacy flat rubric, {known_n} of {len(weighted_dims)} dimensions '
-                        'evidence-backed'
-                        + (f", scored through the {_e(lens)} lens" if lens else "")
-                        + '. <b>Reclassify latest run</b> on the Thesis page re-scores it '
-                        'on the new readiness scorecard. Hover a dimension for what it '
-                        'measures.</div>',
-                        unsafe_allow_html=True,
-                    )
-                    q_rows: list[str] = []
-                    for k, w in sorted(weighted_dims,
-                                       key=lambda kw: -(verdict.quality.get(kw[0], -1.0))):
-                        label = QUALITY_DIM_LABEL.get(k, k)
-                        tip = (f"{QUALITY_DIMENSIONS.get(k, '')} — "
-                               f"{100 * w / wsum_q:.0f}% of the quality score")
-                        value = verdict.quality.get(k)
-                        if value is None:
-                            q_rows.append(
-                                f'<div class="sigrow" style="opacity:0.55">'
-                                f'<div class="signame" title="{_e(tip)}">{_e(label)}</div>'
-                                f'<div class="sigtrack"></div>'
-                                f'<div class="sigpts">—</div>'
-                                f'<div class="sigdetail">no evidence — excluded, weight renormalizes</div></div>'
-                            )
-                        else:
-                            value = min(max(value, 0.0), 1.0)
-                            reason = verdict.quality_reasons.get(k, "")
-                            q_rows.append(
-                                f'<div class="sigrow"><div class="signame" title="{_e(tip)}">{_e(label)}</div>'
-                                f'<div class="sigtrack"><div class="sigfill" style="width:{100 * value:.0f}%"></div></div>'
-                                f'<div class="sigpts">{value:.0%}</div>'
-                                f'<div class="sigdetail" title="{_e(reason)}">{_e(reason)}</div></div>'
-                            )
-                    st.markdown(f'<div style="margin-top:4px">{"".join(q_rows)}</div>',
-                                unsafe_allow_html=True)
-                else:
-                    st.markdown(
-                        '<div class="subtle" style="margin-top:10px">No scorecard on '
-                        'this verdict (older cache) — <b>Reclassify latest run</b> on the '
-                        'Thesis page scores it on the readiness scorecard, or set the '
-                        'section scores yourself in <b>Adjust scoring</b>.</div>',
-                        unsafe_allow_html=True,
-                    )
-                # ---- Thesis fit (F): one number, with Claude's reasoning.
-                if verdict.thesis_fit is not None:
-                    st.markdown(
-                        f'<div class="subtle" style="margin-top:10px">Thesis fit '
-                        f'<b>F {100 * min(max(verdict.thesis_fit, 0.0), 1.0):.0f}</b> · '
-                        f'{params.score_weight_fit:.0%} of the blend — '
-                        f'{_e(verdict.fit_reason or "no reasoning recorded")}</div>',
-                        unsafe_allow_html=True,
-                    )
-            # ---- X signals (S): the deterministic momentum score — every
-            # signal that fired, its weighted points, and the evidence.
-            hits = [s for s in lead.signals if s.value > 0]
-            if comps["signals"] is not None:
-                s_note = (f'{len(hits)} signal{"s" if len(hits) != 1 else ""} fired '
-                          f'of {len(thesis.weights)} tracked'
-                          if hits else "no signals fired")
-                st.markdown(
-                    f'<div class="subtle" style="margin-top:10px">X signals '
-                    f'<b>S {comps["signals"]:.0f}</b> · {params.score_weight_signals:.0%} '
-                    f'of the blend — {s_note}. Hover a signal for what it means; '
-                    'points = value × weight.</div>',
-                    unsafe_allow_html=True,
-                )
-            if hits:
-                max_pts = max(s.contribution for s in hits) or 1.0
-                rows = "".join(
-                    f'<div class="sigrow"><div class="signame" title="{_e(SIGNAL_HELP.get(s.name, ""))}">{_e(s.name)}</div>'
-                    f'<div class="sigtrack"><div class="sigfill" style="width:{100 * s.contribution / max_pts:.0f}%"></div></div>'
-                    f'<div class="sigpts">{s.contribution:.1f}</div>'
-                    f'<div class="sigdetail" title="{_e(s.detail)}">{_e(s.detail)}</div></div>'
-                    for s in sorted(hits, key=lambda s: -s.contribution)
-                )
-                st.markdown(rows, unsafe_allow_html=True)
-
-            # The value-add dimension: which of the firm's specific levers
-            # would accelerate this startup, per the classifier.
-            if verdict and verdict.value_add_fit is not None:
-                firm = thesis.firm_name or "Firm"
-                reason = f" — {verdict.value_add_reason}" if verdict.value_add_reason else ""
-                st.markdown(
-                    f'<div class="subtle" style="margin-top:10px">{_e(firm)} lift '
-                    f'{verdict.value_add_fit:.0%}{_e(reason)}</div>',
-                    unsafe_allow_html=True,
-                )
-                lever_labels = {x.key: x.label for x in thesis.firm_value_add}
-                lever_help = {x.key: x.description for x in thesis.firm_value_add}
-                levers = [(k, min(max(v, 0.0), 1.0))
-                          for k, v in verdict.value_add_levers.items() if v > 0]
-                if levers:
-                    rows = "".join(
-                        f'<div class="sigrow"><div class="signame" title="{_e(lever_help.get(k, ""))}">{_e(lever_labels.get(k, k))}</div>'
-                        f'<div class="sigtrack"><div class="sigfill" style="width:{100 * v:.0f}%"></div></div>'
-                        f'<div class="sigpts">{v:.0%}</div>'
-                        f'<div class="sigdetail"></div></div>'
-                        for k, v in sorted(levers, key=lambda kv: -kv[1])
-                    )
-                    st.markdown(f'<div style="margin-top:4px">{rows}</div>', unsafe_allow_html=True)
+            # ---- The per-dimension breakdown (Q scorecard + criteria, thesis
+            # fit, X signals, firm value-add) — shared with the cockpit detail
+            # pane via _score_detail_html so the two never drift.
+            st.markdown(_score_detail_html(lead, comps), unsafe_allow_html=True)
             if entry and entry.times_seen > 1 and entry.first_seen_at:
                 st.markdown(
                     f'<div class="subtle" style="margin-top:6px">Seen {entry.times_seen}× '
@@ -1648,20 +1701,8 @@ def _lead_card(
                     unsafe_allow_html=True,
                 )
 
-            # ---- The score math, step by step: how Q, F, and S blend and
-            # which multipliers moved the number. The last line IS the score.
-            st.markdown(
-                '<div class="subtle" style="margin-top:10px">Score math — the blend '
-                'renormalizes over the components this lead actually evidences, '
-                'then trust multipliers apply:</div>',
-                unsafe_allow_html=True,
-            )
-            steps = "".join(
-                f'<div class="math-step">{_e(desc)} → <b>{running:.1f}</b></div>'
-                for desc, running in score_breakdown(
-                    lead, thesis, manual_score=ov.get("score"))
-            )
-            st.markdown(f'<div style="margin-top:2px">{steps}</div>', unsafe_allow_html=True)
+            # ---- The score math, step by step. The last line IS the score.
+            st.markdown(_score_math_html(lead, ov.get("score")), unsafe_allow_html=True)
 
             link_urls = list(lead.evidence_links)
             if company_url and company_url not in link_urls:
@@ -1700,10 +1741,12 @@ def _lead_card(
 
 def _feed_row(lead: Lead, selected: bool) -> bool:
     """One compact, clickable lead row for the cockpit list (left column). The
-    whole row is a click target: an invisible full-bleed button is overlaid on
-    the markdown via CSS (scoped by the container's st-key class). Returns True
-    if this row was clicked this run. The full dossier renders in the detail
-    pane; the row shows just enough to scan and pick."""
+    whole row is a real st.button (reliable click target); the warm-row visual
+    is painted as a decorative markdown overlay on top of it (pointer-events:
+    none, scoped by the container's st-key class), so a click anywhere on the
+    row registers. Selection is shown by rendering the button as `primary`.
+    Returns True if this row was clicked this run. The full dossier renders in
+    the detail pane; the row shows just enough to scan and pick."""
     account, verdict = lead.account, lead.llm
     hk = account.handle.lower()
     identity = startup_identity(lead)
@@ -1723,7 +1766,7 @@ def _feed_row(lead: Lead, selected: bool) -> bool:
         tags.append(STAGE_LABEL.get(verdict.stage, verdict.stage))
     tag_html = "".join(f'<span class="frow-tag">{_e(t)}</span>' for t in tags[:3])
     html = (
-        f'<div class="frow{" sel" if selected else ""}">'
+        f'<div class="frow">'
         f'<div class="frow-av">{_e(_initials(title, account.handle))}</div>'
         f'<div class="frow-body"><div class="frow-nm">{_e(title)}</div>'
         f'<div class="frow-sub">@{_e(account.handle)} · {account.followers:,} followers</div>'
@@ -1733,16 +1776,20 @@ def _feed_row(lead: Lead, selected: bool) -> bool:
         f'<div class="frow-sc">{lead.score:.0f}</div></div>'
     )
     with st.container(key=f"frow_{hk}"):
+        clicked = st.button(title or account.handle, key=f"fpick_{hk}",
+                            use_container_width=True,
+                            type="primary" if selected else "secondary")
         st.markdown(html, unsafe_allow_html=True)
-        return st.button("open", key=f"fpick_{hk}", use_container_width=True)
+    return clicked
 
 
 def _detail_pane(lead: Lead) -> None:
-    """The selected lead's dossier in the cockpit's right pane. Laid out
-    full-width (header, score readout, why/audit, triage) so nothing squishes —
-    unlike _lead_card, whose narrow score sub-column wraps inside a half column.
-    Focused on the triage decision; the deep scorecard lives on Longlist/
-    Shortlist, which the lead lands on once you act."""
+    """The selected lead's full dossier in the cockpit's right pane: header,
+    score readout, why, then the complete per-dimension breakdown (How it
+    scored — readiness scorecard, thesis fit, X signals, firm lift, score math,
+    shared with the Database dossier via _score_detail_html), audit, and
+    status-aware triage. Laid out full-width so nothing squishes — unlike
+    _lead_card, whose narrow score sub-column wraps inside a half column."""
     account, verdict = lead.account, lead.llm
     hk = account.handle.lower()
     status = _status_of(lead)
@@ -1779,10 +1826,25 @@ def _detail_pane(lead: Lead) -> None:
         '<div class="dpane-legend">Quality = product &amp; founder strength · '
         'Fit = match to your thesis · Signal = smart-money follows this run.</div></div>'
         + (f'<h4 class="dpane-h">Why this score</h4><p class="dpane-p">{_e(why)}</p>' if why else "")
-        + (f'<h4 class="dpane-h">Audit</h4><p class="dpane-p">{_e(audit)}</p>' if audit else "")
         + '</div>',
         unsafe_allow_html=True,
     )
+    # How it scored — the full per-dimension breakdown (the readiness scorecard
+    # with its 1–3 criteria, thesis fit, X signals, firm lift) then the score
+    # math, via the same renderer the Database dossier uses so the two never
+    # drift. This is the dossier's analytical core: how the number was built.
+    detail_html = _score_detail_html(lead, comps)
+    if detail_html:
+        manual_score = (overrides.get(hk) or {}).get("score")
+        st.markdown(
+            '<h4 class="dpane-h">How it scored</h4>'
+            f'<div class="dscore">{detail_html}'
+            f'{_score_math_html(lead, manual_score)}</div>',
+            unsafe_allow_html=True,
+        )
+    if audit:
+        st.markdown(f'<h4 class="dpane-h">Audit</h4><p class="dpane-p">{_e(audit)}</p>',
+                    unsafe_allow_html=True)
     # Triage — status-dependent, full-width. Same funnel moves as the card face.
     ns = "feeddet"
     if status == "longlisted":
