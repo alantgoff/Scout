@@ -268,9 +268,13 @@ def _inject_css() -> None:
         [class*="st-key-frow_"] [data-testid="stButton"] > button[kind="primary"]:focus {
           background:var(--surface) !important; color:inherit;
           box-shadow:inset 3px 0 0 var(--accent) !important; }
-        /* Hide the button's own accessibility label — the overlay carries the row. */
+        /* Hide the button's own label VISUALLY but keep it in the a11y tree, so
+           the button's accessible name stays the startup title (display:none
+           would strip it and leave an unnamed button). The overlay carries the
+           visible row. */
         [class*="st-key-frow_"] [data-testid="stButton"] > button [data-testid="stMarkdownContainer"] {
-          display:none; }
+          position:absolute; width:1px; height:1px; padding:0; margin:-1px;
+          overflow:hidden; clip:rect(0,0,0,0); white-space:nowrap; border:0; }
         /* The visual row: absolutely overlaid, ignores pointer events, stretched
            to the button so its own grid can vertically center the content. */
         [class*="st-key-frow_"] [data-testid="stElementContainer"]:has(.frow) {
