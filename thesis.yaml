@@ -118,9 +118,9 @@ signal_params:
   traction_window_days: 30
   convergence_full_credit: 2
   stage_mismatch_multiplier: 0.5
-  score_weight_quality: 0.45
-  score_weight_fit: 0.35
-  score_weight_signals: 0.2
+  score_weight_quality: 0.35
+  score_weight_fit: 0.5
+  score_weight_signals: 0.15
   value_add_weight: 0.0
   ungrounded_multiplier: 0.6
 firm_name: Headline
