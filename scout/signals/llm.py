@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import threading
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
@@ -350,6 +351,29 @@ def _classify_batch(
     return []
 
 
+def _api_error_detail(exc: Exception) -> str:
+    """The server's own words. anthropic errors carry the useful sentence in
+    .message; str(exc) is the whole JSON envelope."""
+    return (getattr(exc, "message", "") or str(exc)).strip()
+
+
+def _is_fatal_api_error(exc: Exception) -> bool:
+    """True for conditions the next lead will hit identically: a bad key,
+    revoked access, or an exhausted credit balance.
+
+    Worth distinguishing because the per-lead handlers below are written to
+    survive one bad lead, and that is exactly wrong for an account-level
+    problem — it turns a single billing message into one failure per lead and
+    a long wait for verdicts that cannot arrive. The 2026-07-23 run spent 15
+    audits discovering the same exhausted balance 15 times.
+    """
+    if isinstance(
+        exc, (anthropic.AuthenticationError, anthropic.PermissionDeniedError)
+    ):
+        return True
+    return "credit balance" in _api_error_detail(exc).lower()
+
+
 def _classify_batch_safe(
     client: anthropic.Anthropic,
     model: str,
@@ -639,7 +663,13 @@ def verify_leads(
     if progress is not None:
         progress(0, len(targets))
 
+    # Set on the first account-level failure (bad key, no credit): every
+    # queued audit would hit it too, so stop asking.
+    aborted = threading.Event()
+
     def audit(lead: Lead) -> tuple[Lead, VerificationResult | None]:
+        if aborted.is_set():
+            return lead, None
         key = lead.account.handle.lower()
         try:
             return lead, _verify_one(
@@ -648,10 +678,19 @@ def verify_leads(
                 settings.web_text_max_chars,
             )
         except (anthropic.APIError, anthropic.APIConnectionError) as exc:
-            console.print(
-                f"[yellow]Audit failed for @{lead.account.handle} "
-                f"({type(exc).__name__}) — leaving the verdict as-is.[/yellow]"
-            )
+            detail = _api_error_detail(exc)
+            if _is_fatal_api_error(exc) and not aborted.is_set():
+                aborted.set()
+                console.print(
+                    f"[red]Audit stopped — {detail} Remaining verdicts are "
+                    "UNAUDITED: scores stand on the classifier alone.[/red]"
+                )
+            elif not aborted.is_set():
+                console.print(
+                    f"[yellow]Audit failed for @{lead.account.handle} "
+                    f"({type(exc).__name__}: {detail}) — "
+                    "leaving the verdict as-is.[/yellow]"
+                )
             return lead, None
 
     n_done = 0
