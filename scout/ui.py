@@ -1829,27 +1829,12 @@ def _detail_pane(lead: Lead) -> None:
         f'<div class="dpane-dims">{dim_html}</div>'
         '<div class="dpane-legend">Quality = product &amp; founder strength · '
         'Fit = match to your thesis · Signal = smart-money follows this run.</div></div>'
-        + (f'<h4 class="dpane-h">Why this score</h4><p class="dpane-p">{_e(why)}</p>' if why else "")
         + '</div>',
         unsafe_allow_html=True,
     )
-    # How it scored — the full per-dimension breakdown (the readiness scorecard
-    # with its 1–3 criteria, thesis fit, X signals, firm lift) then the score
-    # math, via the same renderer the Database dossier uses so the two never
-    # drift. This is the dossier's analytical core: how the number was built.
-    detail_html = _score_detail_html(lead, comps)
-    if detail_html:
-        manual_score = (overrides.get(hk) or {}).get("score")
-        st.markdown(
-            '<h4 class="dpane-h">How it scored</h4>'
-            f'<div class="dscore">{detail_html}'
-            f'{_score_math_html(lead, manual_score)}</div>',
-            unsafe_allow_html=True,
-        )
-    if audit:
-        st.markdown(f'<h4 class="dpane-h">Audit</h4><p class="dpane-p">{_e(audit)}</p>',
-                    unsafe_allow_html=True)
-    # Triage — status-dependent, full-width. Same funnel moves as the card face.
+    # Triage — status-dependent, full-width. Placed directly under the score so
+    # you can act the instant you select a startup, without scrolling past the
+    # reasoning below. Same funnel moves as the card face.
     ns = "feeddet"
     if status == "longlisted":
         c1, c2 = st.columns(2)
@@ -1897,6 +1882,26 @@ def _detail_pane(lead: Lead) -> None:
             store.set_pipeline(account.handle, status="passed")
             st.session_state["toast"] = f"Passed on @{account.handle}"; st.rerun()
 
+    # Reasoning lives BELOW the action: why this score, the full per-dimension
+    # breakdown (readiness scorecard + criteria, thesis fit, X signals, firm
+    # lift, score math — same renderer as the Database dossier so the two never
+    # drift), then the audit. Read it when you want it; act above when you don't.
+    if why:
+        st.markdown(f'<h4 class="dpane-h">Why this score</h4><p class="dpane-p">{_e(why)}</p>',
+                    unsafe_allow_html=True)
+    detail_html = _score_detail_html(lead, comps)
+    if detail_html:
+        manual_score = (overrides.get(hk) or {}).get("score")
+        st.markdown(
+            '<h4 class="dpane-h">How it scored</h4>'
+            f'<div class="dscore">{detail_html}'
+            f'{_score_math_html(lead, manual_score)}</div>',
+            unsafe_allow_html=True,
+        )
+    if audit:
+        st.markdown(f'<h4 class="dpane-h">Audit</h4><p class="dpane-p">{_e(audit)}</p>',
+                    unsafe_allow_html=True)
+
 
 def _render_cockpit(leads: list[Lead], sel_key: str, more=None) -> None:
     """Shared triage cockpit: a scannable warm-row list (left) drives the
@@ -1927,40 +1932,6 @@ def _render_cockpit(leads: list[Lead], sel_key: str, more=None) -> None:
     with detail_col:
         with st.container(height=640, border=False):
             _detail_pane(by_handle[sel])
-
-
-def _render_precision_pass() -> None:
-    """Paid X-API re-score of the latest run's top leads — sharpen scores before
-    outreach. Lives with the Feed (not the Thesis setup page) because it acts on
-    the latest run's leads, which is what you're looking at here."""
-    scan_active = ((store.current_scan() or {}).get("status") == "running")
-    st.markdown("---")
-    st.markdown('<div class="section-title">Precision pass</div>'
-                '<div class="section-sub">Before outreach, re-score the top leads of the latest '
-                'run with fresh official X API data. Discovery stays free — only this step '
-                'spends, and only after you confirm the cost.</div>',
-                unsafe_allow_html=True)
-    v1, v2, _v3 = st.columns([1, 1, 2])
-    with v1:
-        n_verify = st.number_input("Top leads to hydrate", 1, 200, 20)
-    with v2:
-        v_tweets = st.number_input("Tweets per lead", 0, 50, 10)
-    v_est = int(n_verify) * (settings.xapi_cost_per_user_read
-                             + int(v_tweets) * settings.xapi_cost_per_post_read)
-    v_remaining = max(settings.xapi_spend_cap_usd - store.xapi_spend_usd(), 0.0)
-    v_lo, v_hi, _vper, _vlabel = _estimate_scan("verify", n_verify=int(n_verify))
-    st.markdown(
-        f'<div class="subtle">Worst case ≈ <b>${v_est:.2f}</b> · '
-        f'<b>${v_remaining:.2f}</b> left of the cap · estimated '
-        f'<b>{_fmt_dur(v_lo)}–{_fmt_dur(v_hi)}</b>. Results land as a verify run '
-        'in the ledger.</div>',
-        unsafe_allow_html=True,
-    )
-    v_ready = st.checkbox(f"Spend up to ${v_est:.2f} of the X API budget",
-                          key="confirm_verify_spend")
-    if st.button("Run precision pass", disabled=not v_ready or scan_active):
-        _launch_scan(["verify", "--max", str(int(n_verify)), "--tweets", str(int(v_tweets))],
-                     "verify")
 
 
 def _render_startup_feed() -> None:
@@ -3750,7 +3721,6 @@ if nav == "Startups":
         _render_database()
     else:
         _render_startup_feed()
-        _render_precision_pass()
 
 
 # ============================================================ SETTINGS
