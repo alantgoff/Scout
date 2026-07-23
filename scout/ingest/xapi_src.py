@@ -42,19 +42,51 @@ _ENGAGEMENT_OPERATOR_RE = re.compile(
     r"\bmin_(?:faves|retweets|replies):\d+", re.IGNORECASE
 )
 
+# seeds.yaml is written in X advanced-search syntax so the free twscrape source
+# keeps its full operator set (including the min_faves: quality filter stripped
+# above, which has no v2 equivalent). v2 spells the same filters differently, so
+# translate here rather than maintain two query banks that would drift apart.
+_FILTER_EQUIVALENTS = {
+    "links": "has:links",
+    "media": "has:media",
+    "images": "has:images",
+    "replies": "is:reply",
+    "retweets": "is:retweet",
+    "quote": "is:quote",
+    "quotes": "is:quote",
+    "verified": "is:verified",
+}
+_FILTER_RE = re.compile(r"(-?)\bfilter:(\w+)", re.IGNORECASE)
+
+# v2 rejects an over-long query with a 400. Error responses aren't billed, but
+# the seed is still wasted, so check before sending. 512 is the Basic/Essential
+# ceiling (Pro allows 1024) — the conservative choice, since sending under the
+# limit is always safe and we cannot see which tier the token is on.
+_MAX_QUERY_LEN = 512
+
 console = Console()
 
 
 def _clean_query(query: str) -> str:
-    """Strip engagement operators the paid v2 search endpoint rejects."""
-    cleaned, n = _ENGAGEMENT_OPERATOR_RE.subn("", query)
-    if not n:
-        return query
+    """Rewrite an advanced-search query into the operator set v2 accepts.
+
+    Engagement operators have no v2 equivalent and are dropped; filter:X
+    operators are translated to their has:/is: spelling. An unrecognised
+    filter:X is passed through untouched so the resulting 400 surfaces loudly,
+    rather than us silently searching for something other than what was asked.
+    """
+
+    def _translate(match: re.Match[str]) -> str:
+        negation, name = match.group(1), match.group(2).lower()
+        equivalent = _FILTER_EQUIVALENTS.get(name)
+        return match.group(0) if equivalent is None else f"{negation}{equivalent}"
+
+    cleaned = _ENGAGEMENT_OPERATOR_RE.sub("", query)
+    cleaned = _FILTER_RE.sub(_translate, cleaned)
     cleaned = " ".join(cleaned.split())
-    console.print(
-        f"[dim]xapi: stripped unsupported engagement operator(s) — "
-        f"sending {cleaned!r}[/dim]"
-    )
+    if cleaned == query:
+        return query
+    console.print(f"[dim]xapi: rewrote query for v2 — sending {cleaned!r}[/dim]")
     return cleaned
 
 
@@ -94,6 +126,8 @@ class XApiSource(SourceAdapter):
             )
         self.settings = settings
         self.store = store
+        self._timeline_fetches = 0
+        self._timeline_cap_announced = False
 
     # ---------------------------------------------------------- budget guard
 
@@ -231,6 +265,12 @@ class XApiSource(SourceAdapter):
             if len(accounts) >= max_accounts:
                 break
             query = _clean_query(query)
+            if len(query) > _MAX_QUERY_LEN:
+                console.print(
+                    f"[red]skipping query over the {_MAX_QUERY_LEN}-char v2 "
+                    f"limit ({len(query)} chars): {query[:80]!r}…[/red]"
+                )
+                continue
 
             # TTL search cache: repeat runs of the same query are free.
             cached_handles = self.store.cached_search(query, self.settings.ttl_days)
@@ -244,10 +284,17 @@ class XApiSource(SourceAdapter):
 
             # Only request as many results as we still need (endpoint min 10);
             # worst case: a full page of tweets, each from a distinct author
-            # expanded as a user object.
+            # expanded as a user object. Capped by xapi_search_page_size —
+            # breadth is cheaper bought with more narrow queries than with a
+            # deeper page of one, since a query's 80th result is reliably worse
+            # than another query's 5th and costs exactly the same.
             page_size = max(
                 _SEARCH_PAGE_MIN,
-                min(_SEARCH_PAGE_MAX, max_accounts - len(accounts)),
+                min(
+                    _SEARCH_PAGE_MAX,
+                    self.settings.xapi_search_page_size,
+                    max_accounts - len(accounts),
+                ),
             )
             try:
                 self._guard(
@@ -297,6 +344,20 @@ class XApiSource(SourceAdapter):
         cached = self.store.get_tweets(account.id, limit=limit)
         if cached:
             return cached
+        # Cache miss: the query bank never saw this account, so it came from
+        # github/hn discovery. Checked before the id resolve below, because
+        # that resolve is itself a paid user read.
+        if self._timeline_fetches >= self.settings.xapi_max_timeline_fetches:
+            if not self._timeline_cap_announced:
+                self._timeline_cap_announced = True
+                console.print(
+                    "[dim]xapi: not paying for discovery-sourced timelines "
+                    f"(xapi_max_timeline_fetches="
+                    f"{self.settings.xapi_max_timeline_fetches}) — those "
+                    "accounts score on bio signals[/dim]"
+                )
+            return []
+        self._timeline_fetches += 1
         if not account.id.isdigit():
             # Discovery-sourced record (github/hn) with a synthetic id — resolve
             # the real X id first; without it the timeline endpoint 400s.

@@ -212,6 +212,11 @@ def run_heuristics(
         _github_evidence(account),
         _source_corroboration(account),
     ]
-    bio_lower = account.bio.lower()
-    disqualified = any(term.lower() in bio_lower for term in thesis.disqualifiers)
+    # Word-boundary matched, like every other bio signal above. A bare
+    # substring test drops the account when "VC" appears inside "VC-backed"
+    # and when "investor" appears inside "backed by investors" — company bios
+    # that describe funding, i.e. precisely the accounts worth keeping.
+    disqualified = any(
+        _keyword_pattern(term).search(account.bio) for term in thesis.disqualifiers
+    )
     return signals, disqualified

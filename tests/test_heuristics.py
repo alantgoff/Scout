@@ -105,6 +105,35 @@ def test_clean_bio_not_disqualified() -> None:
     assert disqualified is False
 
 
+@pytest.mark.parametrize(
+    ("term", "bio"),
+    [
+        ("investor", "Backed by investors — we are building our own model"),
+        ("student", "AI study tools for students, built by our team"),
+        ("consultant", "We use consultants sparingly; we are building in-house"),
+    ],
+)
+def test_disqualifier_does_not_fire_inside_a_longer_word(term: str, bio: str) -> None:
+    """Disqualifiers are word-boundary matched like every other bio signal.
+
+    Plain substring matching dropped the account when "investor" appeared
+    inside "investors" and "student" inside "students" — company bios
+    describing their funding or their customers, i.e. exactly what we want.
+    """
+    thesis = make_thesis()
+    thesis.disqualifiers = [term]
+    _, disqualified = run_heuristics(make_account(bio=bio), [], thesis)
+    assert disqualified is False
+
+
+def test_disqualifier_still_fires_on_the_exact_word() -> None:
+    thesis = make_thesis()
+    thesis.disqualifiers = ["angel investor", "PhD student"]
+    for bio in ("Angel investor and advisor", "PhD student at CUHK"):
+        _, disqualified = run_heuristics(make_account(bio=bio), [], thesis)
+        assert disqualified is True
+
+
 # --- builder_evidence -------------------------------------------------------
 
 

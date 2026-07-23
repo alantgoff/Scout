@@ -1,52 +1,74 @@
 # Managed by scout (UI / `scout strategy`). target_stages steers search + scoring;
 # signal_params and llm_prompt are editable in the UI.
-thesis: Identify technical founders building hardware or software infrastructure that enables AI model
-  deployment at the edge — inference, orchestration, networking, and silicon — outside centralized cloud
-  data centers.
+thesis: Identify startups and early-stage companies building novel model architectures or training on
+  unique, proprietary data moats — the company account, product, or launch page rather than the individual
+  researcher behind it.
 keywords:
-- edge inference
-- on-device AI
-- edge deployment
-- embedded ML
-- TinyML
-- edge computing
-- neuromorphic
-- edge orchestration
-- inference at the edge
-- building edge
+- we're building
+- we are building
+- building the
+- the platform for
+- our model
+- our platform
+- foundation model company
+- proprietary data
+- data moat
+- novel architecture
+- pretraining
+- backed by
 target_bios:
-- ex-Qualcomm
-- ex-NVIDIA
-- prev @nvidia
-- ex-Apple Silicon
-- prev @apple
-- ex-Arm
-- ex-Intel
-- prev @intel
-- ex-Google Edge
-- ex-Graphcore
-- prev @graphcore
-- ex-Cerebras
+- Y Combinator
+- YC W25
+- YC S25
+- backed by
+- we're hiring
+- ex-OpenAI
+- ex-Anthropic
+- ex-DeepMind
+- prev @openai
+- prev @deepmind
 sectors:
-- edge AI hardware
-- edge AI software
-- on-device inference
-- embedded machine learning
-- edge orchestration
-- AI silicon / custom chips
-- edge networking and connectivity
-- TinyML
-- edge MLOps
+- foundation models
+- novel model architectures
+- proprietary training data
+- machine learning research
+- generative AI
+- multimodal models
+- open source AI
+# Matched word-boundary-wise against the bio; a hit drops the account outright.
+# Keep every term specific enough that it cannot fire on a startup describing
+# its own funding: bare "VC" and "investor" used to match "VC-backed" and
+# "backed by investors" and silently discarded funded companies.
 disqualifiers:
 - crypto
 - NFT
-- blockchain
 - web3
+- blockchain
 - recruiter
-- marketing
 - consultant
-- analyst
-- student
+- journalist
+# People who invest rather than build. Phrased as roles, not as the words a
+# funded company would use about itself.
+- angel investor
+- partner at
+- partner @
+- I invest
+- we invest
+- investing in
+- venture capital fund
+# Individual-account markers. The 2026-07-20 run surfaced eight of these —
+# PhD students, a university IEEE chapter, a hobby graphics repo — because
+# nothing separated "person with a repo" from "company with a product".
+- PhD student
+- PhD candidate
+- grad student
+- undergrad
+- research assistant
+- opinions my own
+- opinions are my own
+- views are my own
+- views my own
+- personal account
 weights:
   bio_intent: 20.0
   smart_money_convergence: 20.0
@@ -57,14 +79,35 @@ weights:
   builder_evidence: 5.0
   github_evidence: 5.0
   source_corroboration: 5.0
+quality_weights:
+  team: 20
+  tech_product: 20
+  market: 15
+  defensibility: 15
+  traction: 20
+  investors: 10
+scorecard_weights:
+  b2b:
+    founders_captable: 18
+    market: 23
+    technology: 23
+    product: 18
+    traction_bm: 18
+  b2c:
+    founders_captable: 18
+    market: 23
+    product_experience: 23
+    growth_engagement: 18
+    monetization_bm: 18
 launch_phrases:
-- just launched
-- we're live
+- introducing our
 - announcing our
-- introducing our edge
-- shipping today
-- open sourcing our
-- now available on-device
+- out of stealth
+- we raised
+- now in beta
+- generally available
+- we're live
+- we trained
 target_stages:
 - idea
 - stealth
@@ -75,8 +118,11 @@ signal_params:
   traction_window_days: 30
   convergence_full_credit: 2
   stage_mismatch_multiplier: 0.5
-  thesis_fit_weight: 0.5
+  score_weight_quality: 0.45
+  score_weight_fit: 0.35
+  score_weight_signals: 0.2
   value_add_weight: 0.0
+  ungrounded_multiplier: 0.6
 firm_name: Headline
 firm_value_add:
 - key: global_expansion

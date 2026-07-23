@@ -312,6 +312,19 @@ class Settings(BaseSettings):
     xapi_spend_cap_usd: float = 20.0
     xapi_cost_per_post_read: float = 0.005  # $ per tweet returned
     xapi_cost_per_user_read: float = 0.010  # $ per user profile returned
+    # Results requested per paid search. A result can bill a post read AND its
+    # author's profile read, so each one costs up to
+    # cost_per_post + cost_per_user = $0.015 and this is the main budget lever:
+    # the endpoint's 100 ceiling would make a single query cost $1.50, where 20
+    # costs $0.30. Endpoint accepts 10-100.
+    xapi_search_page_size: int = 20
+    # Paid timeline fetches allowed per run. A search response already seeds
+    # the tweet cache for every account the query bank found, so a cache miss
+    # in the tweet phase means a discovery-sourced (github/hn) account — the
+    # most numerous and least qualified group in a run. At an id resolve plus
+    # a timeline read each, enriching them quietly outspends the entire search
+    # phase, so it is opt-in rather than default.
+    xapi_max_timeline_fetches: int = 0
 
     # Claude classification (omit key to run heuristics-only)
     anthropic_api_key: str | None = None

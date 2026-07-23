@@ -1,44 +1,60 @@
 # Managed by scout (UI / `scout strategy`). Query bank + bio search + watchlist + github topics.
+#
+# Written in X advanced-search syntax so the free twscrape source keeps its full
+# operator set; scout/ingest/xapi_src.py translates filter:X to the v2 has:/is:
+# spelling and drops min_faves: (no v2 equivalent) before any paid request.
+#
+# Three rules every paid query follows:
+#
+# 1. PARENTHESISE EVERY OR-GROUP. Implicit AND binds tighter than OR, so
+#    `"a" OR "b" C OR D` parses as `"a" OR ("b" AND C) OR D` and a post
+#    containing only D matches. Ungrouped ORs quietly widen the net to
+#    everything, and on a paid endpoint you buy every one of those results.
+#
+# 2. EXCLUDE NOISE IN THE QUERY, NOT IN SCORING. thesis.yaml disqualifiers run
+#    after the post has been fetched and billed. A -term in the query costs
+#    nothing and is never read. Every disqualifier that can move upstream should.
+#
+# 3. PREFER NARROW. Cost is per result returned, so a narrow query that matches
+#    three posts costs $0.045, not the $0.30 page ceiling. Precision lowers the
+#    bill and raises the hit rate at the same time — there is no trade here.
+#
+# The shared company-page core:
+#   filter:links      a company announcing itself links to its site or product
+#   -filter:replies   replies are where the volume and the noise live
+#   -filter:retweets  amplification duplicates cost the same as originals
+#   -filter:quote     quote-tweets are commentary about launches, not launches
+# plus first-person-plural phrasing ("we're building", "our model"), which is how
+# company accounts speak and individuals mostly don't. The author of a matching
+# post IS the company account we want, and the search response expands it (bio,
+# website, follower counts) at no extra charge.
 lists: []
 searches: []
 searches_departure:
-- ("leaving NVIDIA" OR "left NVIDIA" OR "ex-NVIDIA") ("building" OR "startup" OR "stealth")
-- ("leaving Qualcomm" OR "left Qualcomm" OR "ex-Qualcomm") ("building" OR "startup" OR "stealth")
-- ("leaving Arm" OR "left Arm" OR "ex-Arm") ("inference" OR "edge" OR "building")
-- ("leaving Apple" OR "left Apple") ("edge" OR "on-device" OR "silicon" OR "startup")
-- ("leaving Intel" OR "left Intel") ("AI" OR "edge" OR "inference") ("building" OR "startup")
-- ("leaving Graphcore" OR "leaving Cerebras" OR "leaving Groq") ("building" OR "startup" OR "new chapter")
+- '("started a company" OR "co-founded" OR "our new company") (AI OR model OR "machine learning") filter:links -filter:replies -filter:retweets -filter:quote -crypto -web3 -NFT -airdrop -giveaway -webinar -newsletter -"link in bio" min_faves:10'
+- '("YC W26" OR "YC S26" OR "Y Combinator" OR "backed by") (AI OR model OR "machine learning") filter:links -filter:replies -filter:retweets -filter:quote -crypto -web3 -NFT -airdrop -giveaway -webinar -newsletter -"link in bio" min_faves:10'
 searches_stealth_intent:
-- ("edge inference" OR "on-device inference") ("building" OR "stealth" OR "working on") min_faves:5
-- ("TinyML" OR "embedded ML") ("building" OR "startup" OR "excited to share") min_faves:5
-- ("edge AI" OR "edge deployment") "stealth" min_faves:5
-- '"on-device" ("LLM" OR "model" OR "inference") ("building" OR "working on something") min_faves:10'
-- ("edge orchestration" OR "edge runtime") ("building" OR "startup" OR "open source") min_faves:5
-- ("power budget" OR "latency at the edge" OR "memory-constrained") ("inference" OR "model") min_faves:5
+- '("we''re building" OR "we are building" OR "our team is building") ("foundation model" OR "novel architecture" OR "new architecture") filter:links -filter:replies -filter:retweets -filter:quote -crypto -web3 -NFT -airdrop -giveaway -webinar -newsletter min_faves:5'
+- '("proprietary data" OR "unique dataset" OR "data moat") ("we trained" OR "our model" OR "our training") filter:links -filter:replies -filter:retweets -filter:quote -crypto -web3 -NFT -airdrop -giveaway -webinar -newsletter min_faves:5'
+- '("pre-seed" OR "seed round" OR "founding team") ("foundation model" OR "our model" OR "training our") filter:links -filter:replies -filter:retweets -filter:quote -crypto -web3 -NFT -airdrop -giveaway -webinar -newsletter min_faves:5'
 searches_hiring:
-- ("hiring" OR "looking for") ("embedded ML" OR "edge AI" OR "TinyML") ("engineer" OR "founding engineer")
-- ("hiring" OR "join us") ("firmware engineer" OR "embedded systems") ("AI" OR "inference") min_faves:5
-- ("founding engineer" OR "first engineer") ("edge" OR "on-device" OR "inference") min_faves:5
-- ("we're hiring" OR "join our team") ("edge inference" OR "edge AI" OR "on-device") min_faves:5
-- ("hiring" OR "looking for") ("ML compiler" OR "inference runtime" OR "kernel engineer") ("edge" OR "embedded")
-  min_faves:5
+- '("we''re hiring" OR "we are hiring" OR "join our team") ("founding engineer" OR "research engineer" OR "ML engineer") filter:links -filter:replies -filter:retweets -filter:quote -crypto -web3 -NFT -airdrop -giveaway -webinar -newsletter min_faves:5'
+- '("we''re hiring" OR "join us") ("pretraining" OR "model training" OR "inference") filter:links -filter:replies -filter:retweets -filter:quote -crypto -web3 -NFT -airdrop -giveaway -webinar -newsletter min_faves:5'
 searches_launch:
-- ("just launched" OR "announcing" OR "we're live") ("edge inference" OR "on-device AI" OR "edge AI")
-  min_faves:10
-- ("open sourcing" OR "open source") ("edge" OR "on-device") ("inference" OR "runtime" OR "model") min_faves:20
-- ("TinyML" OR "embedded ML") ("launch" OR "shipped" OR "now available") min_faves:10
-- ("edge deployment" OR "edge runtime") ("launch" OR "introducing" OR "shipping") min_faves:10
+- '("out of stealth" OR "emerging from stealth" OR "launching out of stealth") (AI OR model OR data) filter:links -filter:replies -filter:retweets -filter:quote -crypto -web3 -NFT -airdrop -giveaway -webinar -newsletter min_faves:10'
+- '("we raised" OR "we''ve raised" OR "our seed round" OR "our pre-seed" OR "our Series A") (AI OR model OR dataset) filter:links -filter:replies -filter:retweets -filter:quote -crypto -web3 -NFT -airdrop -giveaway -webinar -newsletter min_faves:10'
+- '("introducing" OR "announcing") ("our model" OR "our platform" OR "our API" OR "our product") (AI OR "machine learning") filter:links -filter:replies -filter:retweets -filter:quote -crypto -web3 -NFT -airdrop -giveaway -webinar -newsletter min_faves:10'
+- '("now in beta" OR "public beta" OR "join our waitlist" OR "request early access") (AI OR model) filter:links -filter:replies -filter:retweets -filter:quote -crypto -web3 -NFT -airdrop -giveaway -webinar -newsletter min_faves:5'
+- 'url:producthunt.com (AI OR model OR "machine learning") filter:links -filter:replies -filter:retweets -filter:quote -crypto -web3 -NFT -airdrop -giveaway -webinar -newsletter min_faves:5'
 bio_searches:
-- edge AI founder
-- on-device inference
-- embedded ML
-- TinyML founder
-- edge infrastructure
-- stealth edge AI
-- ex-nvidia building
-- ex-qualcomm founder
-- edge computing startup
-- AI silicon founder
+- building foundation models
+- ai research company
+- foundation model company
+- training frontier models
+- proprietary data ai
+- stealth ai company
+- novel model architecture
+- we are building ai
 watchlist:
 - eladgil
 - natfriedman
@@ -53,9 +69,9 @@ watchlist:
 - chipstrat
 tastemakers: []
 github_topics:
-- edge-ai
-- tinyml
-- on-device-ml
-- embedded-ml
-- edge-inference
-- llm-inference
+- large-language-models
+- pretraining
+- transformer
+- model-architecture
+- foundation-models
+- self-supervised-learning
