@@ -316,6 +316,8 @@ def _inject_css() -> None:
           color:var(--ink); }
         .dpane-sub { color:var(--muted); font-size:12.5px; margin-top:3px; }
         .dpane-summary { font-size:13.5px; line-height:1.5; color:var(--ink-2); margin-top:12px; }
+        .dpane-meta { font-size:11px; letter-spacing:.04em; text-transform:uppercase;
+          color:var(--muted); font-weight:600; margin-top:9px; }
         .dpane-readout { margin:16px 0 4px; border:1px solid var(--hair); border-radius:14px;
           background:var(--bg); padding:16px; }
         .dpane-top { display:flex; align-items:baseline; justify-content:space-between; }
@@ -1813,6 +1815,18 @@ def _detail_pane(lead: Lead) -> None:
     link = f'<a href="{_e(company_url or account.url)}" target="_blank">↗ site</a>'
     summary = ((verdict.product_summary if verdict else "")
                or (verdict.one_line_summary if verdict else "") or account.bio or "")
+    # Sector context, lost when the feed moved from chip-laden cards to dense
+    # rows. "What space is this in" is the first question asked of any lead,
+    # and the dense row has no room for it — so it belongs here, right under
+    # the summary and above the score.
+    meta_line = " · ".join(
+        x for x in (
+            (verdict.stage if verdict else "") or "",
+            (verdict.sector if verdict else "") or "",
+            (verdict.subsector if verdict else "") or "",
+            (verdict.business_model if verdict else "") or "",
+        ) if x
+    )
     why = (verdict.why_interesting if verdict else "") or ""
     audit = (verdict.verification_note if verdict else "") or ""
     st.markdown(
@@ -1822,6 +1836,7 @@ def _detail_pane(lead: Lead) -> None:
         f'<div class="dpane-sub">@{_e(account.handle)} · {account.followers:,} followers · {link}</div>'
         f'</div></div>'
         + (f'<div class="dpane-summary">{_e(summary)}</div>' if summary else "")
+        + (f'<div class="dpane-meta">{_e(meta_line)}</div>' if meta_line else "")
         + '<div class="dpane-readout"><div class="dpane-top">'
         f'<div class="dpane-big">{lead.score:.0f}<small> / 100</small></div>'
         '<div style="text-align:right"><div class="scorecap">Thesis fit</div>'

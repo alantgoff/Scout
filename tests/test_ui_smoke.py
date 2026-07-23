@@ -89,8 +89,10 @@ def test_ui_renders_without_exceptions(tmp_path, monkeypatch) -> None:
     at.session_state["sdb_raw"] = True  # open the raw-tables toggle too
     at.run()
     assert not at.exception, at.exception[0].message if at.exception else ""
-    tab_labels = [t.label for t in at.tabs]
-    assert {"Latest run", "Database"} <= set(tab_labels)
+    # Feed and Database are a rail-level View switch, not st.tabs: only ONE
+    # body renders per run (st.tabs rendered both server-side and leaked the
+    # feed's sidebar controls onto the Database view). Feed is the default.
+    assert at.session_state["startups_view"] == "Feed"
     page_text = _page_text(at)
     # The seeded lead renders in the default Startups track (stage=launched),
     # titled by its COMPANY — startups-first presentation.
@@ -98,8 +100,11 @@ def test_ui_renders_without_exceptions(tmp_path, monkeypatch) -> None:
     assert "smoke_founder" in page_text
     # Startup-first: the unnamed launched founder gets a synthesized identity
     assert "Nora Vale&#x27;s unnamed startup" in page_text
-    # Fine-grained fields render on the card face
-    assert "Fit 80%" in page_text
+    # The detail pane carries what the dense row has no room for: thesis fit
+    # as its own readout, the three scoring dimensions, and the sector line.
+    assert "Thesis fit" in page_text
+    for dimension in ("Quality", "Fit", "Signal"):
+        assert f'dpane-dlab">{dimension}<' in page_text
     assert "agent evals" in page_text
     # The firm value-add dimension renders (chip + lever bars in Details)
     assert "lift 70%" in page_text
@@ -112,8 +117,12 @@ def test_ui_renders_without_exceptions(tmp_path, monkeypatch) -> None:
     assert "12 logos" in page_text
     assert "no evidence — excluded" in page_text
     assert "Score math" in page_text
-    # The startup database sub-page renders the dossier table with the
-    # seeded user columns and their filter/manager plumbing…
+    # ---- Database is a separate body, not a sibling tab: it only renders
+    # when the rail switch selects it (st.tabs used to render both at once).
+    at.session_state["startups_view"] = "Database"
+    at.run()
+    assert not at.exception, at.exception[0].message if at.exception else ""
+    page_text = _page_text(at)
     assert "Startup database" in page_text
     assert "select a row for the full dossier" in page_text
     assert at.session_state["sdb_mode"] in (None, "Browse")
@@ -219,6 +228,9 @@ def test_database_edit_mode_renders_editor_with_user_columns(tmp_path, monkeypat
     store.set_attrs("smoke_founder", {"vertical": "AI infrastructure",
                                       "use_case": ["Evals / observability"]})
     at.session_state["nav"] = "Startups"
+    # Must select the Database view explicitly: the rail switch renders one
+    # body per run, so the editor is not on screen while the feed is showing.
+    at.session_state["startups_view"] = "Database"
     at.session_state["sdb_mode"] = "Edit"
     at.run()
     assert not at.exception, at.exception[0].message if at.exception else ""
