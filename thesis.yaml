@@ -69,6 +69,19 @@ disqualifiers:
 - views are my own
 - views my own
 - personal account
+# Checked AFTER classification against the product summary and sector, not the
+# bio. AntSeed cleared the bio pass in the 2026-07-23 run — its bio says "AI
+# inference marketplace" and only its product settles in on-chain USDC — and
+# ranked 3rd under a thesis that excludes crypto outright.
+product_disqualifiers:
+- crypto
+- NFT
+- web3
+- blockchain
+- on-chain
+- token sale
+- airdrop
+- stablecoin
 weights:
   bio_intent: 20.0
   smart_money_convergence: 20.0
@@ -117,7 +130,7 @@ signal_params:
   traction_saturation: 0.25
   traction_window_days: 30
   convergence_full_credit: 2
-  stage_mismatch_multiplier: 0.5
+  stage_mismatch_multiplier: 0.3
   score_weight_quality: 0.35
   score_weight_fit: 0.5
   score_weight_signals: 0.15

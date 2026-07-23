@@ -196,6 +196,37 @@ def _builder_evidence(account: Account) -> Signal:
     return Signal(name="builder_evidence", value=0.0)
 
 
+def verdict_disqualified(verdict: object | None, thesis: Thesis) -> str | None:
+    """The disqualifier hit in what the classifier learned, or None.
+
+    The bio pass in `run_heuristics` runs before classification, so it can only
+    see how an account describes itself in a 160-character bio. A company whose
+    bio reads "AI inference marketplace" and whose product settles in on-chain
+    USDC clears that check and lands in the report — the disqualifying fact
+    belongs to the product, and the product is only known afterwards.
+
+    Matched against thesis.product_disqualifiers, NOT thesis.disqualifiers:
+    see the note on that field for why the two lists cannot be merged.
+    """
+    if verdict is None or not thesis.product_disqualifiers:
+        return None
+    haystack = " ".join(
+        text for text in (
+            getattr(verdict, "product_summary", "") or "",
+            getattr(verdict, "one_line_summary", "") or "",
+            getattr(verdict, "sector", "") or "",
+            getattr(verdict, "subsector", "") or "",
+            getattr(verdict, "business_model", "") or "",
+        ) if text
+    )
+    if not haystack:
+        return None
+    for term in thesis.product_disqualifiers:
+        if _keyword_pattern(term).search(haystack):
+            return term
+    return None
+
+
 def run_heuristics(
     account: Account, tweets: list[Tweet], thesis: Thesis
 ) -> tuple[list[Signal], bool]:

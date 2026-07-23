@@ -204,6 +204,14 @@ class Thesis(BaseModel):
     target_bios: list[str] = Field(default_factory=list)
     sectors: list[str] = Field(default_factory=list)
     disqualifiers: list[str] = Field(default_factory=list)
+    # Disqualifiers for what the CLASSIFIER learned about the company, checked
+    # after classification against the product summary / sector rather than
+    # the X bio. Deliberately a separate list: `disqualifiers` is full of
+    # person markers ("angel investor", "PhD student", "opinions my own") that
+    # describe an ACCOUNT, and matching those against product text would drop
+    # a fintech whose summary happens to mention investing. Keep this list to
+    # domains the thesis excludes outright.
+    product_disqualifiers: list[str] = Field(default_factory=list)
     weights: dict[str, float] = Field(default_factory=dict)
     # LEGACY (v7) per-dimension weights behind score.quality_score — still
     # applied to pre-scorecard cached verdicts; new verdicts score via

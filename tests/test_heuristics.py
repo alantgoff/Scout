@@ -126,6 +126,38 @@ def test_disqualifier_does_not_fire_inside_a_longer_word(term: str, bio: str) ->
     assert disqualified is False
 
 
+def test_product_disqualifier_catches_what_the_bio_hid() -> None:
+    """The bio pass cannot see the product. AntSeed's bio said "AI inference
+    marketplace"; only its product summary mentioned on-chain settlement."""
+    from scout.models import LLMVerdict
+    from scout.signals.heuristics import verdict_disqualified
+
+    thesis = make_thesis()
+    thesis.product_disqualifiers = ["crypto", "on-chain"]
+    verdict = LLMVerdict(
+        handle="antseed", is_founder=True,
+        one_line_summary="Peer-to-peer AI inference marketplace with on-chain USDC payments",
+    )
+    assert verdict_disqualified(verdict, thesis) == "on-chain"
+
+
+def test_product_disqualifiers_do_not_borrow_the_bio_list() -> None:
+    """The two lists stay separate on purpose: `disqualifiers` is full of
+    person markers that describe an ACCOUNT, and matching those against
+    product text would drop a fintech for describing what it does."""
+    from scout.models import LLMVerdict
+    from scout.signals.heuristics import verdict_disqualified
+
+    thesis = make_thesis()
+    thesis.disqualifiers = ["angel investor", "I invest", "investing in"]
+    thesis.product_disqualifiers = ["crypto", "web3"]
+    verdict = LLMVerdict(
+        handle="fintechco", is_founder=True,
+        product_summary="Helps funds automate diligence when investing in startups",
+    )
+    assert verdict_disqualified(verdict, thesis) is None
+
+
 def test_disqualifier_still_fires_on_the_exact_word() -> None:
     thesis = make_thesis()
     thesis.disqualifiers = ["angel investor", "PhD student"]

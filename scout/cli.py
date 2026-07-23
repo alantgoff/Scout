@@ -33,7 +33,11 @@ from scout.ingest.base import DiscoverySource, SourceAdapter
 from scout.ingest.xapi_src import BudgetExceededError
 from scout.models import Account, Lead, Signal, SitePage, Tweet, UnlinkedLead
 from scout.score import score_breakdown, score_leads
-from scout.signals.heuristics import intent_appeared, run_heuristics
+from scout.signals.heuristics import (
+    intent_appeared,
+    run_heuristics,
+    verdict_disqualified,
+)
 from scout.signals.llm import classify, verify_leads
 from scout.store import Store
 
@@ -600,6 +604,19 @@ def _run_pipeline(
         )
         for lead in leads:
             lead.llm = verdicts.get(lead.account.handle.lower())
+        # Second disqualifier pass, now that the product is known. Runs before
+        # the audit so a lead we are dropping never costs an audit call.
+        hits = [(x, term) for x in leads
+                if (term := verdict_disqualified(x.llm, thesis))]
+        if hits:
+            shown = ", ".join(f"@{x.account.handle} ({term})" for x, term in hits[:4])
+            console.print(
+                f"Dropped [bold]{len(hits)}[/bold] disqualified on the "
+                f"classified product: {shown}"
+                f"{'…' if len(hits) > 4 else ''}."
+            )
+            dropped_handles = {x.account.handle for x, _ in hits}
+            leads = [x for x in leads if x.account.handle not in dropped_handles]
 
     _verification_pass(leads, tweets_by_handle, sites, thesis, settings, store)
 
