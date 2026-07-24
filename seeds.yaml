@@ -33,10 +33,13 @@ searches: []
 searches_departure:
 - '("started a company" OR "co-founded" OR "our new company") (AI OR model OR "machine learning") filter:links -filter:replies -filter:retweets -filter:quote -crypto -web3 -NFT -airdrop -giveaway -webinar -newsletter -"link in bio" min_faves:10'
 - '("YC W26" OR "YC S26" OR "Y Combinator" OR "backed by") (AI OR model OR "machine learning") filter:links -filter:replies -filter:retweets -filter:quote -crypto -web3 -NFT -airdrop -giveaway -webinar -newsletter -"link in bio" min_faves:10'
+- '("Demo Day" OR "our batch" OR "Techstars" OR "AI Grant" OR "Neo accelerator") (AI OR model OR "machine learning") filter:links -filter:replies -filter:retweets -filter:quote -crypto -web3 -NFT -airdrop -giveaway -webinar -newsletter min_faves:5'
 searches_stealth_intent:
 - '("we''re building" OR "we are building" OR "our team is building") ("foundation model" OR "novel architecture" OR "new architecture") filter:links -filter:replies -filter:retweets -filter:quote -crypto -web3 -NFT -airdrop -giveaway -webinar -newsletter min_faves:5'
 - '("proprietary data" OR "unique dataset" OR "data moat") ("we trained" OR "our model" OR "our training") filter:links -filter:replies -filter:retweets -filter:quote -crypto -web3 -NFT -airdrop -giveaway -webinar -newsletter min_faves:5'
 - '("pre-seed" OR "seed round" OR "founding team") ("foundation model" OR "our model" OR "training our") filter:links -filter:replies -filter:retweets -filter:quote -crypto -web3 -NFT -airdrop -giveaway -webinar -newsletter min_faves:5'
+- '("what we''ve been working on" OR "excited to finally share" OR "we''ve been heads down") (AI OR model OR "machine learning") filter:links -filter:replies -filter:retweets -filter:quote -crypto -web3 -NFT -airdrop -giveaway -webinar -newsletter min_faves:5'
+- '("our dataset" OR "we collected" OR "data we''ve gathered" OR "our training data") (model OR training OR "machine learning") filter:links -filter:replies -filter:retweets -filter:quote -crypto -web3 -NFT -airdrop -giveaway -webinar -newsletter min_faves:5'
 searches_hiring:
 - '("we''re hiring" OR "we are hiring" OR "join our team") ("founding engineer" OR "research engineer" OR "ML engineer") filter:links -filter:replies -filter:retweets -filter:quote -crypto -web3 -NFT -airdrop -giveaway -webinar -newsletter min_faves:5'
 - '("we''re hiring" OR "join us") ("pretraining" OR "model training" OR "inference") filter:links -filter:replies -filter:retweets -filter:quote -crypto -web3 -NFT -airdrop -giveaway -webinar -newsletter min_faves:5'
@@ -45,6 +48,9 @@ searches_launch:
 - '("we raised" OR "we''ve raised" OR "our seed round" OR "our pre-seed" OR "our Series A") (AI OR model OR dataset) filter:links -filter:replies -filter:retweets -filter:quote -crypto -web3 -NFT -airdrop -giveaway -webinar -newsletter min_faves:10'
 - '("introducing" OR "announcing") ("our model" OR "our platform" OR "our API" OR "our product") (AI OR "machine learning") filter:links -filter:replies -filter:retweets -filter:quote -crypto -web3 -NFT -airdrop -giveaway -webinar -newsletter min_faves:10'
 - '("now in beta" OR "public beta" OR "join our waitlist" OR "request early access") (AI OR model) filter:links -filter:replies -filter:retweets -filter:quote -crypto -web3 -NFT -airdrop -giveaway -webinar -newsletter min_faves:5'
+- '("our model" OR "we trained" OR "our benchmark") ("state of the art" OR "SOTA" OR "outperforms" OR "beats") filter:links -filter:replies -filter:retweets -filter:quote -crypto -web3 -NFT -airdrop -giveaway -webinar -newsletter min_faves:10'
+- '("our first customers" OR "our first users" OR "our early customers" OR "first design partners") (AI OR model OR platform) filter:links -filter:replies -filter:retweets -filter:quote -crypto -web3 -NFT -airdrop -giveaway -webinar -newsletter min_faves:5'
+- '("how we built" OR "our architecture" OR "technical deep dive") ("our model" OR inference OR training OR "our system") filter:links -filter:replies -filter:retweets -filter:quote -crypto -web3 -NFT -airdrop -giveaway -webinar -newsletter min_faves:10'
 - 'url:producthunt.com (AI OR model OR "machine learning") filter:links -filter:replies -filter:retweets -filter:quote -crypto -web3 -NFT -airdrop -giveaway -webinar -newsletter min_faves:5'
 bio_searches:
 - building foundation models

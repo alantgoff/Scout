@@ -39,6 +39,27 @@ def test_rank_candidates_orders_by_pre_score_and_caps() -> None:
     assert skipped == 1
 
 
+def test_rank_candidates_keeps_paid_signalless_search_leads() -> None:
+    """A company account fires none of the founder-shaped signals, and the
+    search that found it was already paid for. @BiggerMax19 had no bio, no
+    followers and no signal, and classified at thesis fit 0.70."""
+    thesis = Thesis(weights={"bio_intent": 20.0})
+    strong = make_lead("strong", ("bio_intent", 1.0))
+    company = make_lead("company")
+    company.account.source = "search"
+    scraped = make_lead("scraped")
+    scraped.account.source = "github"  # bulk discovery, free to skip
+
+    ranked, skipped = _rank_candidates([scraped, company, strong], thesis, cap=10)
+    assert [x.account.handle for x in ranked] == ["strong", "company"]
+    assert skipped == 0
+
+    # The cap still protects spend, and signal-bearing leads still win it.
+    ranked, skipped = _rank_candidates([scraped, company, strong], thesis, cap=1)
+    assert [x.account.handle for x in ranked] == ["strong"]
+    assert skipped == 1
+
+
 # --- _fetch_tweets ----------------------------------------------------------------
 
 

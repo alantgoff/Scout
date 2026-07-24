@@ -294,17 +294,58 @@ def _run_discovery(
     return accounts, unlinked
 
 
+def _drop_product_disqualified(leads: list[Lead], thesis: Thesis) -> list[Lead]:
+    """Drop leads the classified product disqualifies (thesis.
+    product_disqualifiers), reporting what went and why.
+
+    Belongs everywhere a verdict is produced — `run` and `reclassify` both —
+    or reclassifying would quietly resurrect the crypto companies the run had
+    already dropped. Call it BEFORE the audit so a dropped lead never costs an
+    audit call.
+    """
+    hits = [(x, term) for x in leads if (term := verdict_disqualified(x.llm, thesis))]
+    if not hits:
+        return leads
+    shown = ", ".join(f"@{x.account.handle} ({term})" for x, term in hits[:4])
+    console.print(
+        f"Dropped [bold]{len(hits)}[/bold] disqualified on the classified "
+        f"product: {shown}{'…' if len(hits) > 4 else ''}."
+    )
+    dropped = {x.account.handle for x, _ in hits}
+    return [x for x in leads if x.account.handle not in dropped]
+
+
 def _rank_candidates(
     leads: list[Lead], thesis: Thesis, cap: int
 ) -> tuple[list[Lead], int]:
-    """Leads worth Claude tokens: signal-bearing, ranked by deterministic
-    pre-score (the base step of score_breakdown), capped. Returns
-    (candidates, skipped_count). Pure — unit-tested."""
-    with_signals = sorted(
-        (lead for lead in leads if lead.signals_hit),
-        key=lambda lead: -score_breakdown(lead, thesis)[0][1],
+    """Leads worth Claude tokens, ranked by deterministic pre-score and
+    capped. Returns (candidates, skipped_count). Pure — unit-tested.
+
+    Signal-bearing leads rank first. Search-sourced leads with NO signal
+    follow, because the deterministic signals describe a FOUNDER account —
+    bio_intent reads a personal bio, departure_signal wants an ex-employer,
+    smart_money_follow wants investors following a person — and the query
+    bank now hunts COMPANY accounts, which fire none of them. A company
+    posting "we're hiring ML engineers" from a bio-less account scores zero
+    signals and is not thereby uninteresting: @BiggerMax19 (no bio, 0
+    followers) classified at thesis fit 0.70 once it finally reached Claude.
+
+    They are also already paid for. A search-sourced account cost a post
+    read plus a user read to discover, and the query that surfaced it
+    already encoded the thesis; dropping it before classification spends
+    that money for nothing. Discovery-sourced (github/hn) leads without a
+    signal stay excluded — those arrive in bulk and cost nothing to skip.
+    """
+    def pre_score(lead: Lead) -> float:
+        return -score_breakdown(lead, thesis)[0][1]
+
+    with_signals = sorted((x for x in leads if x.signals_hit), key=pre_score)
+    paid_signalless = sorted(
+        (x for x in leads if not x.signals_hit and x.account.source == "search"),
+        key=pre_score,
     )
-    return with_signals[:cap], max(len(with_signals) - cap, 0)
+    ordered = with_signals + paid_signalless
+    return ordered[:cap], max(len(ordered) - cap, 0)
 
 
 def _fetch_candidate_sites(
@@ -604,19 +645,7 @@ def _run_pipeline(
         )
         for lead in leads:
             lead.llm = verdicts.get(lead.account.handle.lower())
-        # Second disqualifier pass, now that the product is known. Runs before
-        # the audit so a lead we are dropping never costs an audit call.
-        hits = [(x, term) for x in leads
-                if (term := verdict_disqualified(x.llm, thesis))]
-        if hits:
-            shown = ", ".join(f"@{x.account.handle} ({term})" for x, term in hits[:4])
-            console.print(
-                f"Dropped [bold]{len(hits)}[/bold] disqualified on the "
-                f"classified product: {shown}"
-                f"{'…' if len(hits) > 4 else ''}."
-            )
-            dropped_handles = {x.account.handle for x, _ in hits}
-            leads = [x for x in leads if x.account.handle not in dropped_handles]
+        leads = _drop_product_disqualified(leads, thesis)
 
     _verification_pass(leads, tweets_by_handle, sites, thesis, settings, store)
 
@@ -832,6 +861,7 @@ def reclassify(
             )
             for lead in leads:
                 lead.llm = verdicts.get(lead.account.handle.lower())
+            leads = _drop_product_disqualified(leads, thesis)
 
         if not skip_verify:
             _verification_pass(leads, tweets_by_handle, sites, thesis, settings, store)
