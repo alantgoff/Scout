@@ -61,6 +61,7 @@ def seed_store(db_path: Path) -> None:
     store.save_leads("run-smoke", [lead, unnamed])
     store.record_run("run-smoke", source="twscrape", strategy_hash="smoke-hash",
                      thesis_statement="smoke thesis")
+    return store
 
 
 def _app(tmp_path, monkeypatch) -> AppTest:
@@ -240,6 +241,48 @@ def test_database_edit_mode_renders_editor_with_user_columns(tmp_path, monkeypat
     at.session_state["sdb_mode"] = "Browse"
     at.run()
     assert not at.exception, at.exception[0].message if at.exception else ""
+
+
+def test_score_names_the_thesis_it_was_measured_against(tmp_path, monkeypatch) -> None:
+    """A score is meaningless without the thesis behind it, and stale when the
+    thesis has been retuned since. Both must be visible, not inferred."""
+    from scout.config import ensure_thesis_id, load_thesis, thesis_version
+    from scout.config import load_seeds
+
+    db = tmp_path / "smoke.db"
+    project = Path(__file__).resolve().parents[1]
+    active = load_thesis(project / "thesis.yaml")
+    thesis_id = ensure_thesis_id(active)
+    current = thesis_version(active, load_seeds(project / "seeds.yaml"))
+
+    at = _app(tmp_path, monkeypatch)
+    store = Store(db)
+    store.upsert_thesis(thesis_id, name=active.name or thesis_id,
+                        statement=active.thesis, version=current)
+    # Scored under the version that is current → named, not flagged.
+    store.record_verdict("smoke_founder", "fp", LLMVerdict(handle="smoke_founder",
+                         thesis_fit=0.8, confidence=0.9),
+                         thesis_id=thesis_id, thesis_version=current)
+    at.session_state["nav"] = "Startups"
+    at.run()
+    assert not at.exception, at.exception[0].message if at.exception else ""
+    assert "Scored against" in _page_text(at)
+    assert "thesis has changed since" not in _page_text(at)
+
+    # A lead scored under an EARLIER tuning of the same thesis is stale — the
+    # live thesis.yaml is the source of truth for "what the thesis is now",
+    # so staleness is the verdict's version disagreeing with it.
+    at = _app(tmp_path, monkeypatch)
+    store = Store(db)
+    store.upsert_thesis(thesis_id, name=active.name or thesis_id,
+                        statement=active.thesis, version=current)
+    store.record_verdict("smoke_founder", "fp", LLMVerdict(handle="smoke_founder",
+                         thesis_fit=0.8, confidence=0.9),
+                         thesis_id=thesis_id, thesis_version="an-earlier-version")
+    at.session_state["nav"] = "Startups"
+    at.run()
+    assert not at.exception, at.exception[0].message if at.exception else ""
+    assert "thesis has changed since" in _page_text(at)
 
 
 def test_regenerate_without_key_never_clobbers_existing_memo(tmp_path, monkeypatch) -> None:

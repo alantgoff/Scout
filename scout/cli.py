@@ -14,8 +14,10 @@ from typing import Annotated
 import typer
 import yaml
 from pydantic import ValidationError
+from rich import box
 from rich.console import Console
 from rich.progress import Progress
+from rich.table import Table
 from rich.progress_bar import ProgressBar
 from rich.table import Table
 
@@ -23,10 +25,17 @@ from scout.config import (
     Seeds,
     Settings,
     Thesis,
+    ensure_thesis_id,
     load_seeds,
     load_thesis,
-    strategy_fingerprint,
+    save_thesis,
+    slugify,
+    switch_thesis,
+    thesis_version,
 )
+# `thesis_path` is a local variable name throughout this module (the --thesis
+# option); alias the library-path helper so the two can never shadow.
+from scout.config import thesis_path as thesis_library_path
 from scout import web
 from scout.export import print_top_table, write_csv, write_markdown
 from scout.ingest.base import DiscoverySource, SourceAdapter
@@ -108,12 +117,29 @@ def _load_seeds_or_default(path: Path = Path("seeds.yaml")) -> Seeds:
 def _record_run(
     store: Store, run_id: str, source_name: str, thesis: Thesis, seeds: Seeds
 ) -> None:
-    """Stamp run provenance so the ledger can group runs by strategy."""
+    """Stamp run provenance: which thesis, at which version, produced this run.
+
+    Registering the thesis here (rather than in a separate bookkeeping step)
+    keeps the registry correct for free — every run declares the identity and
+    version it ran under, which is what later makes staleness computable.
+    """
+    thesis_id = ensure_thesis_id(thesis)
+    version = thesis_version(thesis, seeds)
+    store.adopt_history(thesis_id, thesis.thesis)
+    store.upsert_thesis(
+        thesis_id,
+        name=thesis.name or thesis_id,
+        statement=thesis.thesis,
+        version=version,
+        make_active=True,
+    )
     store.record_run(
         run_id,
         source=source_name,
-        strategy_hash=strategy_fingerprint(thesis, seeds),
+        strategy_hash=version,
         thesis_statement=thesis.thesis,
+        thesis_id=thesis_id,
+        thesis_version=version,
         config_json=json.dumps(
             {
                 "thesis": thesis.model_dump(mode="json"),
@@ -122,6 +148,15 @@ def _record_run(
             sort_keys=True,
         ),
     )
+
+
+def _thesis_banner(thesis: Thesis, seeds: Seeds, store: Store) -> str:
+    """`Novel Architectures · v3` — the header line for run/reclassify."""
+    thesis_id = ensure_thesis_id(thesis)
+    version = thesis_version(thesis, seeds)
+    history = store.thesis_version_history(thesis_id)
+    n = next((h["n"] for h in history if h["version"] == version), len(history) + 1)
+    return f"{thesis.name or thesis_id} · v{n}"
 
 
 async def _fetch_tweets(
@@ -476,6 +511,7 @@ def _run_pipeline(
     min_score: float,
     ttl_days: int,
 ) -> None:
+    console.print(f"Thesis: [bold]{_thesis_banner(thesis, seeds, store)}[/bold]")
     console.print(
         f"Targeting stages: [bold]{', '.join(thesis.target_stages)}[/bold] → "
         f"queries: {', '.join(sorted(thesis.active_search_categories))}"
@@ -776,6 +812,12 @@ def reclassify(
     skip_verify: Annotated[
         bool, typer.Option("--skip-verify", help="Skip the adversarial audit pass.")
     ] = False,
+    stale_only: Annotated[
+        bool,
+        typer.Option("--stale-only", help="Only startups scored under an older "
+                     "version of this thesis — the cheap way to bring the "
+                     "database current after a tuning change."),
+    ] = False,
     thesis_path: Annotated[
         Path, typer.Option("--thesis", help="Path to thesis.yaml.")
     ] = Path("thesis.yaml"),
@@ -784,15 +826,28 @@ def reclassify(
     fetching. Cache-first everywhere (tweets, websites, unchanged verdicts),
     so this is the fast loop for iterating on the thesis or prompt: minutes
     and cents, not an hour. Defaults to the LATEST run's leads; --all covers
-    every distinct startup across the whole ledger."""
+    every distinct startup across the whole ledger; --stale-only covers just
+    what the current thesis has outgrown."""
     settings = Settings()
     thesis = _load_thesis_or_exit(thesis_path)
     store = Store(settings.db_path)
+    seeds = _load_seeds_or_default()
+    console.print(f"Thesis: [bold]{_thesis_banner(thesis, seeds, store)}[/bold]")
     scope_label = "the whole ledger" if all_runs else "the latest run"
+    if stale_only:
+        all_runs, scope_label = True, "the stale set"
     prior = (
         [e.lead for e in store.load_lead_ledger(include_demo=False)]
         if all_runs else store.load_latest_leads()
     )
+    if stale_only:
+        stale = set(store.stale_handles(ensure_thesis_id(thesis)))
+        if not stale:
+            console.print("[green]Nothing stale[/green] — every startup is scored "
+                          "under the current version of this thesis.")
+            return
+        prior = [x for x in prior if x.account.handle.lower() in stale]
+        console.print(f"[bold]{len(prior)}[/bold] startup(s) scored under an older version.")
     if not prior:
         console.print("[red]No leads yet[/red] — run `scout run` first.")
         raise typer.Exit(1)
@@ -1775,6 +1830,168 @@ def ui(
             "(or [bold]pip install streamlit[/bold]) first."
         )
         raise typer.Exit(1)
+
+
+# --------------------------------------------------------------------- thesis
+
+thesis_app = typer.Typer(
+    help="Manage the thesis library: what you source and score against.",
+    no_args_is_help=True,
+)
+app.add_typer(thesis_app, name="thesis")
+
+
+def _thesis_store() -> Store:
+    return Store(Settings().db_path)
+
+
+@thesis_app.command("list")
+def thesis_list(
+    archived: Annotated[
+        bool, typer.Option("--archived", help="Include archived theses.")
+    ] = False,
+) -> None:
+    """Every thesis, with the runs and startups each produced."""
+    store = _thesis_store()
+    store.backfill_thesis_ids()
+    path = Path("thesis.yaml")
+    if path.exists():
+        active = load_thesis(path)
+        active_id = ensure_thesis_id(active)
+        store.adopt_history(active_id, active.thesis)
+        store.upsert_thesis(
+            active_id, name=active.name or active_id,
+            statement=active.thesis,
+            version=thesis_version(active, _load_seeds_or_default()),
+            make_active=True,
+        )
+    rows = store.list_theses(include_archived=archived)
+    if not rows:
+        console.print("[yellow]No theses recorded yet[/yellow] — run `scout run`.")
+        return
+    table = Table(title="Theses", box=box.SIMPLE)
+    for col in ("", "Id", "Name", "Runs", "Startups", "Version", "Last run"):
+        table.add_column(col)
+    for row in rows:
+        versions = store.thesis_version_history(row["id"])
+        n = next(
+            (v["n"] for v in versions if v["version"] == row["current_version"]),
+            len(versions),
+        )
+        table.add_row(
+            "●" if row["is_active"] else "",
+            row["id"],
+            (row["name"] or "")[:34],
+            str(row["run_count"]),
+            str(row["lead_count"]),
+            f"v{n}",
+            (row["last_run_at"] or "—")[:10],
+        )
+    console.print(table)
+
+
+@thesis_app.command("show")
+def thesis_show(
+    thesis_id: Annotated[str, typer.Argument(help="Thesis id (see `scout thesis list`).")],
+) -> None:
+    """One thesis: its statement, version history, and staleness."""
+    store = _thesis_store()
+    row = store.get_thesis(thesis_id)
+    if row is None:
+        console.print(f"[red]No thesis {thesis_id!r}[/red] — see `scout thesis list`.")
+        raise typer.Exit(1)
+    console.print(f"[bold]{row['name']}[/bold] ({row['id']})")
+    console.print(f"  {row['statement']}\n")
+    for version in store.thesis_version_history(thesis_id):
+        marker = " ← current" if version["version"] == row["current_version"] else ""
+        console.print(
+            f"  v{version['n']}  {version['version'][:12]}  "
+            f"{version['run_count']} run(s)  {version['created_at'][:10]}{marker}"
+        )
+    stale = store.stale_handles(thesis_id)
+    if stale:
+        console.print(
+            f"\n[yellow]{len(stale)} startup(s) scored under an older version[/yellow]"
+            " — `scout reclassify --stale-only` to bring them current."
+        )
+
+
+@thesis_app.command("new")
+def thesis_new(
+    name: Annotated[str, typer.Argument(help="Display name, e.g. 'Novel Architectures'.")],
+    statement: Annotated[
+        str, typer.Option("--statement", help="The thesis in plain language.")
+    ] = "",
+) -> None:
+    """Start a new thesis from the current one, then edit it in the UI."""
+    path = Path("thesis.yaml")
+    base = load_thesis(path) if path.exists() else Thesis()
+    base.id = slugify(name)
+    base.name = name
+    if statement:
+        base.thesis = statement
+    save_thesis(base, path)
+    _thesis_store().upsert_thesis(
+        base.id, name=name, statement=base.thesis, version="", make_active=True
+    )
+    console.print(
+        f"Created [bold]{name}[/bold] ({base.id}) and made it active — "
+        f"library copy at [bold]{thesis_library_path(base.id, path)}[/bold]."
+    )
+
+
+@thesis_app.command("use")
+def thesis_use(
+    thesis_id: Annotated[str, typer.Argument(help="Thesis id to activate.")],
+) -> None:
+    """Switch the active thesis. The one you leave is saved, not lost."""
+    try:
+        activated = switch_thesis(thesis_id, Path("thesis.yaml"))
+    except FileNotFoundError as exc:
+        console.print(f"[red]{exc}[/red]")
+        raise typer.Exit(1) from None
+    store = _thesis_store()
+    store.set_active_thesis(ensure_thesis_id(activated))
+    console.print(f"Now sourcing and scoring against [bold]{activated.name or thesis_id}[/bold].")
+    stale = store.stale_handles(ensure_thesis_id(activated))
+    if stale:
+        console.print(
+            f"[yellow]{len(stale)} startup(s) were scored under an older version "
+            "of this thesis[/yellow] — `scout reclassify --stale-only` to update."
+        )
+
+
+@thesis_app.command("clone")
+def thesis_clone(
+    thesis_id: Annotated[str, typer.Argument(help="Thesis id to copy.")],
+    name: Annotated[str, typer.Argument(help="Name for the copy.")],
+) -> None:
+    """Fork a thesis so you can diverge without losing the original."""
+    source = thesis_library_path(thesis_id, Path("thesis.yaml"))
+    if not source.exists():
+        console.print(f"[red]No thesis {thesis_id!r}[/red] — see `scout thesis list`.")
+        raise typer.Exit(1)
+    clone = load_thesis(source)
+    clone.id = slugify(name)
+    clone.name = name
+    save_thesis(clone, Path("thesis.yaml"))
+    _thesis_store().upsert_thesis(
+        clone.id, name=name, statement=clone.thesis, version="", make_active=True
+    )
+    console.print(f"Cloned [bold]{thesis_id}[/bold] → [bold]{name}[/bold] ({clone.id}), now active.")
+
+
+@thesis_app.command("archive")
+def thesis_archive(
+    thesis_id: Annotated[str, typer.Argument(help="Thesis id to archive.")],
+    undo: Annotated[bool, typer.Option("--undo", help="Un-archive instead.")] = False,
+) -> None:
+    """Hide a thesis from the pickers. Its runs and startups are kept."""
+    _thesis_store().archive_thesis(thesis_id, archived=not undo)
+    console.print(
+        f"{'Un-archived' if undo else 'Archived'} [bold]{thesis_id}[/bold]"
+        f"{'' if undo else ' — its history is kept.'}"
+    )
 
 
 if __name__ == "__main__":

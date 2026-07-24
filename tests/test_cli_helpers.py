@@ -39,6 +39,53 @@ def test_rank_candidates_orders_by_pre_score_and_caps() -> None:
     assert skipped == 1
 
 
+def test_thesis_identity_survives_the_tuning_that_changes_its_version() -> None:
+    """The exact bug: `strategy_fingerprint` hashes the whole config, so every
+    weight tweak minted a new 'strategy' and one thesis fragmented across
+    several — the live database had 7 hashes for 4 theses. Identity must hold
+    still while the version moves."""
+    from scout.config import Seeds, ensure_thesis_id, thesis_version
+
+    thesis = Thesis(name="Novel Architectures", thesis="Novel model architectures",
+                    weights={"bio_intent": 20.0})
+    seeds = Seeds()
+    id_before, version_before = ensure_thesis_id(thesis), thesis_version(thesis, seeds)
+
+    thesis.weights["bio_intent"] = 25.0  # the kind of tuning that fragmented it
+    assert ensure_thesis_id(thesis) == id_before
+    assert thesis_version(thesis, seeds) != version_before
+
+
+def test_naming_a_thesis_does_not_mark_its_work_stale() -> None:
+    """Identity is not tuning. Hashing id/name meant that giving a running
+    thesis a proper name flagged all 602 of its startups stale — a rename
+    changes nothing about how anything scores."""
+    from scout.config import Seeds, thesis_version
+
+    thesis = Thesis(thesis="Edge AI", weights={"bio_intent": 20.0})
+    seeds = Seeds()
+    before = thesis_version(thesis, seeds)
+
+    thesis.id, thesis.name = "edge-ai", "Edge AI Infrastructure"
+    assert thesis_version(thesis, seeds) == before
+
+    thesis.weights["bio_intent"] = 25.0
+    assert thesis_version(thesis, seeds) != before
+
+
+def test_ensure_thesis_id_falls_back_through_name_then_statement() -> None:
+    """Statement fallback is also the backfill rule for runs recorded before
+    identity existed."""
+    from scout.config import ensure_thesis_id
+
+    assert ensure_thesis_id(Thesis(id="edge-ai")) == "edge-ai"
+    assert ensure_thesis_id(Thesis(name="Edge AI!")) == "edge-ai"
+    assert ensure_thesis_id(
+        Thesis(thesis="Identify technical founders building hardware")
+    ) == "identify-technical-founders-building-hardware"
+    assert ensure_thesis_id(Thesis()) == "untitled-thesis"
+
+
 def test_rank_candidates_keeps_paid_signalless_search_leads() -> None:
     """A company account fires none of the founder-shaped signals, and the
     search that found it was already paid for. @BiggerMax19 had no bio, no

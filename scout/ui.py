@@ -73,10 +73,14 @@ from scout.config import (
     Settings,
     SignalParams,
     Thesis,
+    ensure_thesis_id,
     load_seeds,
     load_thesis,
     save_seeds,
     save_thesis,
+    slugify,
+    switch_thesis,
+    thesis_version,
 )
 from scout.companies import display_name, group_by_company, startup_identity
 from scout.dbfields import (
@@ -318,6 +322,12 @@ def _inject_css() -> None:
         .dpane-summary { font-size:13.5px; line-height:1.5; color:var(--ink-2); margin-top:12px; }
         .dpane-meta { font-size:11px; letter-spacing:.04em; text-transform:uppercase;
           color:var(--muted); font-weight:600; margin-top:9px; }
+        /* Stale = scored under an older tuning of the active thesis. Warned,
+           not hidden: the number is still the best available, just older. */
+        .stale-flag { color:#8a6d1f; font-weight:600; }
+        .stale-banner { border:1px solid #d9b83f; background:rgba(217,184,63,.12);
+          border-radius:12px; padding:11px 14px; margin:4px 0 12px;
+          font-size:13px; color:var(--ink-2); }
         .dpane-readout { margin:16px 0 4px; border:1px solid var(--hair); border-radius:14px;
           background:var(--bg); padding:16px; }
         .dpane-top { display:flex; align-items:baseline; justify-content:space-between; }
@@ -894,6 +904,59 @@ counts = store.pipeline_counts()
 latest_is_demo = bool(leads) and all(x.account.source == "demo" for x in leads)
 ledger = store.load_lead_ledger(include_demo=latest_is_demo)
 
+# --- thesis provenance ------------------------------------------------------
+# Runs recorded before thesis identity existed carry only a strategy hash;
+# backfilling on load means the pickers and provenance lines are populated for
+# an existing database without a migration step the investor has to run.
+store.backfill_thesis_ids()
+ACTIVE_THESIS_ID = ensure_thesis_id(thesis)
+ACTIVE_VERSION = thesis_version(thesis, seeds)
+# Naming a thesis that has already been running must not strand its history
+# under the slug the backfill derived from its statement.
+store.adopt_history(ACTIVE_THESIS_ID, thesis.thesis)
+store.backfill_verdict_provenance()
+store.upsert_thesis(
+    ACTIVE_THESIS_ID,
+    name=thesis.name or ACTIVE_THESIS_ID,
+    statement=thesis.thesis,
+    version=ACTIVE_VERSION,
+    make_active=True,
+)
+_THESIS_ROWS = store.list_theses()
+
+
+def _version_number(thesis_id: str, version: str) -> int:
+    """1-based version ordinal — 'v3' reads where a 16-char hash does not."""
+    history = store.thesis_version_history(thesis_id)
+    return next(
+        (h["n"] for h in history if h["version"] == version), len(history) + 1
+    )
+
+
+def _active_thesis_label() -> str:
+    name = thesis.name or ACTIVE_THESIS_ID.replace("-", " ").title()
+    return f"{name} · v{_version_number(ACTIVE_THESIS_ID, ACTIVE_VERSION)}"
+
+
+def _lead_scored_under(lead: Lead) -> tuple[str, str] | None:
+    """(thesis_id, version) a lead's current verdict was produced under."""
+    row = store.verdict_provenance(lead.account.handle)
+    if not row or not row.get("thesis_id"):
+        return None
+    return row["thesis_id"], row.get("thesis_version") or ""
+
+
+def _is_stale(lead: Lead) -> bool:
+    """True when this lead's score predates the active thesis's current tuning."""
+    under = _lead_scored_under(lead)
+    if under is None:
+        return False
+    thesis_id, version = under
+    return thesis_id == ACTIVE_THESIS_ID and bool(version) and version != ACTIVE_VERSION
+
+
+STALE_HANDLES = set(store.stale_handles(ACTIVE_THESIS_ID, ACTIVE_VERSION))
+
 # The investor's manual scoring, layered on top of every loaded lead BEFORE
 # anything renders or ranks — adjusted dims/fit re-enter the score math, a
 # pinned score wins outright (score.apply_override).
@@ -944,7 +1007,8 @@ _hdr_l, _hdr_r = st.columns([1, 1.35], vertical_alignment="center")
 with _hdr_l:
     st.markdown(
         f'<div class="masthead"><span class="brand">Scout</span>'
-        f'<span class="thesis-line">{_e(thesis.thesis) or "No thesis yet — open Thesis and describe one."}</span></div>',
+        f'<span class="thesis-line">{_e(_active_thesis_label())} · '
+        f'{_e(thesis.thesis) or "No thesis yet — open Thesis and describe one."}</span></div>',
         unsafe_allow_html=True,
     )
 with _hdr_r:
@@ -1287,6 +1351,26 @@ def _score_detail_html(lead: Lead, comps: dict) -> str:
     verdict = lead.llm
     params = thesis.signal_params
     parts: list[str] = []
+    # ---- Provenance. A score is meaningless without the thesis behind it:
+    # "58.9" answers nothing until you know it was measured against THIS
+    # thesis at THIS tuning. Rendered first, and flagged when the thesis has
+    # moved on since — a stale number is still shown, never silently trusted.
+    under = _lead_scored_under(lead)
+    if under is not None:
+        thesis_id, version = under
+        row = next((r for r in _THESIS_ROWS if r["id"] == thesis_id), None)
+        label = (row or {}).get("name") or thesis_id.replace("-", " ").title()
+        vlabel = f" · v{_version_number(thesis_id, version)}" if version else ""
+        stale = _is_stale(lead)
+        parts.append(
+            f'<div class="subtle" style="margin-top:10px">Scored against '
+            f'<b>{_e(label)}{_e(vlabel)}</b>'
+            + (
+                ' · <span class="stale-flag">thesis has changed since</span>'
+                if stale else ""
+            )
+            + "</div>"
+        )
     # ---- Company quality (Q): the readiness scorecard, section by section with
     # the 1–3 criteria under each — hover a name for what it measures; the note
     # is the evidence each score rests on. Sections/criteria Claude could NOT
@@ -1916,6 +2000,32 @@ def _detail_pane(lead: Lead) -> None:
     if audit:
         st.markdown(f'<h4 class="dpane-h">Audit</h4><p class="dpane-p">{_e(audit)}</p>',
                     unsafe_allow_html=True)
+    # What this company scored under earlier theses. A verdict is overwritten
+    # on every rescore, so without this the fact that a company was judged
+    # 0.20 under one thesis and 0.75 under the next simply disappears — and
+    # that contrast is the most useful thing a thesis change produces.
+    history = store.verdict_history(account.handle)
+    if history:
+        rows = []
+        for past in history[:4]:
+            prior = past["verdict"]
+            if prior.thesis_fit is None:
+                continue
+            row = next((r for r in _THESIS_ROWS if r["id"] == past["thesis_id"]), None)
+            label = (row or {}).get("name") or (
+                past["thesis_id"].replace("-", " ").title() or "an earlier thesis"
+            )
+            when = (past["created_at"] or "")[:10]
+            rows.append(
+                f'<div class="sigrow"><span>{_e(label)}</span>'
+                f'<b>fit {prior.thesis_fit:.0%}</b>'
+                f'<span class="subtle">{_e(when)}</span></div>'
+            )
+        if rows:
+            st.markdown(
+                '<h4 class="dpane-h">Under earlier theses</h4>' + "".join(rows),
+                unsafe_allow_html=True,
+            )
 
 
 def _render_cockpit(leads: list[Lead], sel_key: str, more=None) -> None:
@@ -1994,27 +2104,49 @@ def _render_startup_feed() -> None:
                 "Scope", ["Latest run", "All runs"], default="Latest run",
                 key="leads_time_scope",
             ) or "Latest run"
+            # Thesis, not strategy. A strategy is one exact configuration, so
+            # every weight tweak minted a new one and a single thesis
+            # fragmented across several — the picker listed the same statement
+            # three times. Grouping by thesis identity asks the question an
+            # investor actually has ("what did Edge AI find?"); version is the
+            # drill-down below, for when the tuning itself is the question.
+            thesis_filter = None
             strategy_hash = None
-            if scope == "All runs" and len(strategies) >= 2:
-                def _strategy_label(h: str | None) -> str:
-                    if h is None:
-                        return "All strategies"
-                    s = next(x for x in strategies if x["strategy_hash"] == h)
-                    statement = (s["thesis_statement"] or "(no thesis statement)")[:60]
-                    plural = "s" if s["run_count"] != 1 else ""
-                    return f"{statement} · {s['run_count']} run{plural}"
-                strategy_hash = st.selectbox(
-                    "Strategy", [None] + [s["strategy_hash"] for s in strategies],
-                    format_func=_strategy_label, key="leads_strategy",
-                    help="Runs made with identical thesis + seeds group into one strategy.",
+            if scope == "All runs" and len(_THESIS_ROWS) >= 2:
+                def _thesis_label(tid: str | None) -> str:
+                    if tid is None:
+                        return "All theses"
+                    row = next(x for x in _THESIS_ROWS if x["id"] == tid)
+                    name = row["name"] or tid.replace("-", " ").title()
+                    return f"{name[:44]} · {row['lead_count']} startups"
+                thesis_filter = st.selectbox(
+                    "Thesis", [None] + [x["id"] for x in _THESIS_ROWS],
+                    format_func=_thesis_label, key="leads_thesis",
+                    help="Every run of that thesis, across all its tuning.",
                 )
+                versions = (
+                    store.thesis_version_history(thesis_filter) if thesis_filter else []
+                )
+                if len(versions) >= 2:
+                    def _version_label(h: str | None) -> str:
+                        if h is None:
+                            return "All versions"
+                        v = next(x for x in versions if x["version"] == h)
+                        return f"v{v['n']} · {v['run_count']} run(s)"
+                    strategy_hash = st.selectbox(
+                        "Version", [None] + [v["version"] for v in versions],
+                        format_func=_version_label, key="leads_version",
+                        help="One exact tuning of this thesis.",
+                    )
 
         # (lead, ledger entry) pairs for the chosen time scope
         if scope == "Latest run":
             pairs = [(x, entry_by_handle.get(x.account.handle.lower())) for x in leads]
-        elif strategy_hash:
+        elif strategy_hash or thesis_filter:
             filtered = store.load_lead_ledger(
-                include_demo=latest_is_demo, strategy_hash=strategy_hash
+                include_demo=latest_is_demo,
+                strategy_hash=strategy_hash,
+                thesis_id=thesis_filter,
             )
             pairs = [(e.lead, e) for e in filtered]
         else:
@@ -2169,9 +2301,30 @@ def _render_startup_feed() -> None:
             unsafe_allow_html=True,
         )
 
+        # Stale banner: the thesis has been retuned since these were scored.
+        # Surfaced as an offer, never an automatic rescore — reclassifying is
+        # a Claude call per startup, and that bill is the investor's to opt
+        # into (two runs today died mid-pass on an exhausted balance).
+        if STALE_HANDLES:
+            visible_stale = sum(
+                1 for x, _ in pairs if x.account.handle.lower() in STALE_HANDLES
+            )
+            if visible_stale:
+                st.markdown(
+                    f'<div class="stale-banner"><b>{visible_stale} startup'
+                    f'{"s" if visible_stale != 1 else ""}</b> scored under an '
+                    f'older version of {_e(thesis.name or "this thesis")}. '
+                    'Their numbers came from weights or a prompt that have '
+                    'since changed.</div>',
+                    unsafe_allow_html=True,
+                )
+                if st.button(f"Rescore {visible_stale} stale", key="rescore_stale"):
+                    _launch_scan(["reclassify", "--stale-only"], "reclassify")
+
         # Reset pagination whenever the view changes (track, scope, filters…)
         page_size = 25
-        view_key = repr((track, scope, strategy_hash, tuple(type_filter), tuple(stage_filter),
+        view_key = repr((track, scope, strategy_hash, thesis_filter,
+                         tuple(type_filter), tuple(stage_filter),
                          tuple(ctype_filter), min_score, min_fit, hide_passed, query, sort_by))
         if st.session_state.get("leads_view_key") != view_key:
             st.session_state["leads_view_key"] = view_key
@@ -2665,6 +2818,62 @@ if nav == "Memos":
 
 
 if nav == "Thesis":
+    # --- The library ----------------------------------------------------------
+    # A thesis is a durable thing you return to, not a config file you
+    # overwrite. Switching preserves the one you leave, so exploring a second
+    # thesis never costs you the first.
+    if _THESIS_ROWS:
+        st.markdown('<div class="section-title">Your theses</div>'
+                    '<div class="section-sub">What Scout sources and scores against. '
+                    'Switching keeps every thesis and everything it found — '
+                    'startups stay attributed to the thesis that surfaced them.</div>',
+                    unsafe_allow_html=True)
+        for row in _THESIS_ROWS:
+            is_active = row["id"] == ACTIVE_THESIS_ID
+            versions = store.thesis_version_history(row["id"])
+            n_stale = (
+                len(STALE_HANDLES) if is_active
+                else len(store.stale_handles(row["id"]))
+            )
+            c_name, c_stats, c_act = st.columns([3, 2, 1], vertical_alignment="center")
+            with c_name:
+                name = row["name"] or row["id"].replace("-", " ").title()
+                st.markdown(
+                    f'<div class="dpane-nm">{"● " if is_active else ""}{_e(name)}</div>'
+                    f'<div class="subtle">{_e((row["statement"] or "")[:96])}</div>',
+                    unsafe_allow_html=True,
+                )
+            with c_stats:
+                last = (row["last_run_at"] or "")[:10] or "never run"
+                st.markdown(
+                    f'<div class="subtle">{row["lead_count"]} startups · '
+                    f'{row["run_count"]} runs · v{len(versions) or 1} · {last}'
+                    + (f' · <span class="stale-flag">{n_stale} stale</span>'
+                       if n_stale else "")
+                    + "</div>",
+                    unsafe_allow_html=True,
+                )
+            with c_act:
+                if is_active:
+                    st.markdown('<div class="subtle">active</div>',
+                                unsafe_allow_html=True)
+                elif st.button("Switch", key=f"use_{row['id']}"):
+                    try:
+                        switch_thesis(row["id"], THESIS_PATH)
+                        store.set_active_thesis(row["id"])
+                        st.session_state["toast"] = f"Now scoring against {name}"
+                        st.rerun()
+                    except FileNotFoundError:
+                        # Backfilled from run history: the thesis is known but
+                        # was never written to the library, so there is no file
+                        # to restore. Saving the active one adopts it.
+                        st.warning(
+                            f"“{name}” came from run history and has no saved "
+                            "configuration to switch to. Its startups are still "
+                            "listed under it in Startups → All runs."
+                        )
+        st.divider()
+
     # --- AI strategy designer -------------------------------------------------
     st.markdown('<div class="section-title">Define the thesis</div>'
                 '<div class="section-sub">Describe your thesis in plain language. The agent writes '

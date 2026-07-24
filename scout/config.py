@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 from pathlib import Path
 
 import yaml
@@ -199,6 +200,15 @@ class SignalParams(BaseModel):
 class Thesis(BaseModel):
     """The investment thesis that drives all targeting (thesis.yaml)."""
 
+    # IDENTITY — durable across tuning. `strategy_fingerprint` changes whenever
+    # any weight or query moves, which makes it a version, not an identity: the
+    # edge-AI thesis fragmented into three "strategies" purely from weight
+    # edits. `id` is what survives, so "which thesis scored this" stays
+    # answerable while the thesis is being refined. Both default empty, so a
+    # thesis.yaml written before this existed still validates (see
+    # `ensure_thesis_id` for how those are backfilled).
+    id: str = ""  # stable slug, e.g. "novel-architectures"
+    name: str = ""  # display name, e.g. "Novel Architectures"
     thesis: str = ""
     keywords: list[str] = Field(default_factory=list)
     target_bios: list[str] = Field(default_factory=list)
@@ -416,8 +426,91 @@ def strategy_fingerprint(thesis: Thesis, seeds: Seeds) -> str:
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()[:16]
 
 
+# The thesis library. thesis.yaml stays THE active thesis — every existing
+# code path (`load_thesis(Path("thesis.yaml"))`, `--thesis PATH`) is unchanged —
+# and this directory holds the saved copy of each thesis so switching away from
+# one does not lose it.
+THESES_DIR = Path("theses")
+
+
+def slugify(text: str, max_len: int = 48) -> str:
+    """Lowercase, hyphenated, filesystem- and URL-safe id fragment."""
+    cleaned = re.sub(r"[^a-z0-9]+", "-", (text or "").lower()).strip("-")
+    return cleaned[:max_len].strip("-")
+
+
+def thesis_version(thesis: Thesis, seeds: Seeds) -> str:
+    """The TUNING fingerprint: what a lead was actually scored under.
+
+    Deliberately blind to `id` and `name`. Those are identity, not targeting —
+    renaming "Edge AI" changes nothing about how a startup scores, and hashing
+    them would mark every lead stale the moment a thesis is given a proper
+    name, which is the opposite of the point. Everything that does move a
+    score (weights, disqualifiers, prompt, queries) is included.
+    """
+    payload = json.dumps(
+        {
+            "thesis": thesis.model_dump(mode="json", exclude={"id", "name"}),
+            "seeds": seeds.model_dump(mode="json"),
+        },
+        sort_keys=True,
+        ensure_ascii=False,
+    )
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()[:16]
+
+
+def ensure_thesis_id(thesis: Thesis) -> str:
+    """This thesis's stable id, derived when it was never given one.
+
+    Falls back through name, then the statement's opening words. The
+    statement fallback is also the backfill rule for runs recorded before
+    identity existed: grouping historical runs by `thesis_statement` recovers
+    exactly the theses a human would name, because the statement is the one
+    field that stays put while weights and queries churn.
+    """
+    for candidate in (thesis.id, thesis.name, thesis.thesis):
+        slug = slugify(candidate)
+        if slug:
+            return slug
+    return "untitled-thesis"
+
+
+def thesis_path(thesis_id: str, active_path: Path = Path("thesis.yaml")) -> Path:
+    """Library file for a thesis, kept beside the active thesis.yaml."""
+    return active_path.parent / THESES_DIR.name / f"{slugify(thesis_id)}.yaml"
+
+
 def save_thesis(thesis: Thesis, path: Path = Path("thesis.yaml")) -> None:
+    """Write the active thesis, and mirror it into the library.
+
+    The mirror is what makes switching non-destructive: the library copy is
+    always current, so moving to another thesis and back returns the same
+    configuration rather than whatever thesis.yaml last happened to hold.
+    """
+    thesis.id = thesis.id or ensure_thesis_id(thesis)
     _save_yaml(path, thesis.model_dump(), _THESIS_HEADER)
+    library = thesis_path(thesis.id, path)
+    library.parent.mkdir(parents=True, exist_ok=True)
+    _save_yaml(library, thesis.model_dump(), _THESIS_HEADER)
+
+
+def switch_thesis(thesis_id: str, path: Path = Path("thesis.yaml")) -> Thesis:
+    """Make a library thesis active, preserving the one being left.
+
+    Saves the outgoing thesis back to its own library file first, so an
+    unsaved tweak made while it was active is not lost by the switch.
+    """
+    library = thesis_path(thesis_id, path)
+    if not library.exists():
+        raise FileNotFoundError(f"no thesis {thesis_id!r} in {library.parent}/")
+    if path.exists():
+        outgoing = load_thesis(path)
+        if ensure_thesis_id(outgoing) != slugify(thesis_id):
+            save_thesis(outgoing, path)
+    incoming = load_thesis(library)
+    incoming.id = incoming.id or slugify(thesis_id)
+    _save_yaml(path, incoming.model_dump(), _THESIS_HEADER)
+    return incoming
 
 
 def save_seeds(seeds: Seeds, path: Path = Path("seeds.yaml")) -> None:

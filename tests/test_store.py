@@ -225,6 +225,74 @@ def test_ledger_strategy_filter(tmp_path: Path) -> None:
     assert {e.lead.account.handle for e in only_b} == {"alice", "bob"}
 
 
+def test_ledger_thesis_filter_spans_every_version(tmp_path: Path) -> None:
+    """Thesis identity, not tuning: both runs belong to one thesis even
+    though a weight change gave them different versions."""
+    store = make_store(tmp_path)
+    seed_run(store, "r1", T1, [("alice", 10.0)])
+    seed_run(store, "r2", T2, [("bob", 20.0)])
+    store.record_run("r1", source="xapi", strategy_hash="v1", thesis_statement="A",
+                     thesis_id="edge-ai", thesis_version="v1")
+    store.record_run("r2", source="xapi", strategy_hash="v2", thesis_statement="A",
+                     thesis_id="edge-ai", thesis_version="v2")
+
+    both = store.load_lead_ledger(thesis_id="edge-ai")
+    assert {e.lead.account.handle for e in both} == {"alice", "bob"}
+    # …while the version filter still isolates one exact tuning.
+    assert {e.lead.account.handle
+            for e in store.load_lead_ledger(strategy_hash="v1")} == {"alice"}
+    assert store.load_lead_ledger(thesis_id="other") == []
+
+
+def test_stale_handles_flip_when_the_thesis_is_retuned(tmp_path: Path) -> None:
+    store = make_store(tmp_path)
+    seed_run(store, "r1", T1, [("alice", 10.0)])
+    store.record_run("r1", source="xapi", strategy_hash="v1", thesis_statement="A",
+                     thesis_id="edge-ai", thesis_version="v1")
+    store.upsert_thesis("edge-ai", name="Edge AI", statement="A", version="v1")
+    assert store.stale_handles("edge-ai") == []
+
+    store.upsert_thesis("edge-ai", name="Edge AI", statement="A", version="v2")
+    assert store.stale_handles("edge-ai") == ["alice"]
+
+
+def test_verdict_history_survives_a_rescore(tmp_path: Path) -> None:
+    """One row per handle, so the overwrite must archive first — otherwise
+    'what did this score under the old thesis' is unanswerable."""
+    store = make_store(tmp_path)
+    store.record_verdict("acme", "fp1", LLMVerdict(handle="acme", thesis_fit=0.2),
+                         thesis_id="edge-ai", thesis_version="v1")
+    store.record_verdict("acme", "fp2", LLMVerdict(handle="acme", thesis_fit=0.75),
+                         thesis_id="novel-arch", thesis_version="v1")
+
+    assert store.cached_verdict("acme", "fp2", 30).thesis_fit == 0.75
+    history = store.verdict_history("acme")
+    assert [(h["thesis_id"], h["verdict"].thesis_fit) for h in history] == [
+        ("edge-ai", 0.2)
+    ]
+    assert store.verdict_provenance("acme")["thesis_id"] == "novel-arch"
+
+
+def test_backfill_groups_legacy_runs_by_statement_and_is_idempotent(
+    tmp_path: Path,
+) -> None:
+    """The real database had 7 strategy hashes for 4 theses — one thesis
+    fragmented across every weight tweak it ever had. The statement is what
+    stayed put, so grouping on it recovers the theses a human would name."""
+    store = make_store(tmp_path)
+    for run_id, hash_ in (("r1", "h1"), ("r2", "h2"), ("r3", "h3")):
+        store.record_run(run_id, source="xapi", strategy_hash=hash_,
+                         thesis_statement="Edge AI infrastructure")
+    store.record_run("r4", source="xapi", strategy_hash="h4",
+                     thesis_statement="Novel model architectures")
+
+    assert store.backfill_thesis_ids() == 4
+    assert {t["id"] for t in store.list_theses()} == {
+        "edge-ai-infrastructure", "novel-model-architectures"
+    }
+    assert store.backfill_thesis_ids() == 0  # nothing left to fill
+
+
 def test_list_strategies_groups_and_excludes_demo(tmp_path: Path) -> None:
     store = make_store(tmp_path)
     store.record_run("r1", source="twscrape", strategy_hash="hash-A", thesis_statement="A")

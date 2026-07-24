@@ -28,7 +28,7 @@ from tenacity import (
 from urllib.parse import urlparse
 
 from scout import rubric
-from scout.config import Settings, Thesis
+from scout.config import Settings, Thesis, ensure_thesis_id
 from scout.models import Account, Lead, LLMVerdict, SitePage, Tweet
 from scout.store import Store
 
@@ -508,7 +508,10 @@ def classify(
             key = verdict.handle.lstrip("@").lower()
             results[key] = verdict
             if store is not None and key in fingerprints:
-                store.record_verdict(key, fingerprints[key], verdict)
+                store.record_verdict(
+                    key, fingerprints[key], verdict,
+                    thesis_id=ensure_thesis_id(thesis),
+                )
     return results
 
 
@@ -709,6 +712,9 @@ def verify_leads(
                         lead.account, tweets_by_handle.get(key, []),
                         thesis, settings, sites.get(key),
                     )
-                    store.record_verdict(key, fingerprint, lead.llm)
+                    store.record_verdict(
+                        key, fingerprint, lead.llm,
+                        thesis_id=ensure_thesis_id(thesis),
+                    )
             if progress is not None:
                 progress(n_done, len(targets))

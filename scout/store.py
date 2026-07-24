@@ -13,6 +13,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import sqlite_utils
+from pydantic import ValidationError
 
 from scout.config import DEFAULT_DB_PATH
 from scout.models import Account, Lead, LedgerEntry, LLMVerdict, SitePage, Tweet, UnlinkedLead
@@ -47,6 +48,29 @@ class Store:
             )
         else:
             self.db = sqlite_utils.Database(db_path)
+        self._migrate_thesis_columns()
+
+    def _migrate_thesis_columns(self) -> None:
+        """Add the thesis-provenance columns to tables that predate them.
+
+        upsert(alter=True) grows a table on WRITE, but the staleness and
+        registry queries READ these columns, and a database recorded before
+        thesis identity existed has neither. Adding them up front means every
+        query below can assume they are there.
+        """
+        for table, columns in (
+            ("runs", {"thesis_id": str, "thesis_version": str}),
+            ("llm_verdicts", {"thesis_id": str, "thesis_version": str}),
+            ("pipeline", {"sourced_thesis_id": str}),
+        ):
+            if not self.db[table].exists():
+                continue
+            existing = set(self.db[table].columns_dict)
+            missing = {k: v for k, v in columns.items() if k not in existing}
+            if missing:
+                self.db[table].add_column_alter_table = True
+                for name, col_type in missing.items():
+                    self.db[table].add_column(name, col_type)
 
     # ------------------------------------------------------------------ cache
 
@@ -182,9 +206,15 @@ class Store:
         strategy_hash: str,
         thesis_statement: str,
         config_json: str = "",
+        thesis_id: str = "",
+        thesis_version: str = "",
     ) -> None:
-        """Record run provenance: which strategy (thesis+seeds fingerprint)
-        produced it. Runs sharing a hash group together in the ledger UI."""
+        """Record run provenance: which thesis, at which version, produced it.
+
+        `thesis_id` is the durable identity and `thesis_version` the tuning
+        fingerprint; `strategy_hash` is kept identical to the version so the
+        existing strategy grouping keeps working unchanged.
+        """
         self.db["runs"].upsert(
             {
                 "run_id": run_id,
@@ -193,10 +223,299 @@ class Store:
                 "strategy_hash": strategy_hash,
                 "thesis_statement": thesis_statement,
                 "config_json": config_json,
+                "thesis_id": thesis_id,
+                "thesis_version": thesis_version or strategy_hash,
             },
             pk="run_id",
             alter=True,
         )
+
+    # ---------------------------------------------------------------- theses
+
+    def upsert_thesis(
+        self,
+        thesis_id: str,
+        *,
+        name: str,
+        statement: str,
+        version: str,
+        make_active: bool = False,
+    ) -> None:
+        """Register a thesis and the version it is currently at.
+
+        Called on every run, so the registry stays correct without a separate
+        bookkeeping step. Recording the version here is what later makes
+        staleness computable: a lead scored under an older version is stale by
+        comparison with `theses.current_version`.
+        """
+        now = datetime.now(timezone.utc).isoformat()
+        existing = self.get_thesis(thesis_id)
+        self.db["theses"].upsert(
+            {
+                "id": thesis_id,
+                "name": name or thesis_id,
+                "statement": statement,
+                "current_version": version,
+                "created_at": (existing or {}).get("created_at") or now,
+                "archived_at": (existing or {}).get("archived_at"),
+                "is_active": 1 if make_active else (existing or {}).get("is_active", 0),
+            },
+            pk="id",
+            alter=True,
+        )
+        if version:
+            self.db["thesis_versions"].upsert(
+                {
+                    "thesis_id": thesis_id,
+                    "version": version,
+                    "created_at": now,
+                },
+                pk=("thesis_id", "version"),
+                alter=True,
+            )
+        if make_active:
+            self.set_active_thesis(thesis_id)
+
+    def get_thesis(self, thesis_id: str) -> dict | None:
+        if not self.db["theses"].exists():
+            return None
+        rows = list(self.db["theses"].rows_where("id = ?", [thesis_id], limit=1))
+        return rows[0] if rows else None
+
+    def list_theses(self, include_archived: bool = False) -> list[dict]:
+        """Registered theses with run/lead counts, most recently run first."""
+        if not self.db["theses"].exists():
+            return []
+        where = "" if include_archived else "where t.archived_at is null"
+        # A brand-new database has theses before it has runs or leads; the
+        # counts degrade to zero rather than raising "no such table".
+        has_runs = self.db["runs"].exists()
+        has_leads = self.db["leads"].exists() and has_runs
+        run_count = (
+            "(select count(*) from runs r where r.thesis_id = t.id)" if has_runs else "0"
+        )
+        last_run = (
+            "(select max(r.created_at) from runs r where r.thesis_id = t.id)"
+            if has_runs else "null"
+        )
+        lead_count = (
+            "(select count(distinct lower(l.handle)) from leads l where l.run_id in "
+            "(select run_id from runs where thesis_id = t.id))" if has_leads else "0"
+        )
+        rows = self.db.execute(
+            f"""
+            select t.id, t.name, t.statement, t.current_version, t.is_active,
+                   t.archived_at, {run_count} as run_count,
+                   {last_run} as last_run_at, {lead_count} as lead_count
+            from theses t {where}
+            order by last_run_at desc nulls last, t.created_at desc
+            """
+        ).fetchall()
+        return [
+            {
+                "id": r[0], "name": r[1], "statement": r[2] or "",
+                "current_version": r[3] or "", "is_active": bool(r[4]),
+                "archived_at": r[5], "run_count": r[6] or 0,
+                "last_run_at": r[7], "lead_count": r[8] or 0,
+            }
+            for r in rows
+        ]
+
+    def thesis_version_history(self, thesis_id: str) -> list[dict]:
+        if not self.db["thesis_versions"].exists():
+            return []
+        rows = self.db.execute(
+            """
+            select v.version, v.created_at,
+                   (select count(*) from runs r
+                     where r.thesis_id = v.thesis_id and r.thesis_version = v.version)
+            from thesis_versions v where v.thesis_id = ?
+            order by v.created_at asc
+            """,
+            [thesis_id],
+        ).fetchall()
+        return [
+            {"version": r[0], "created_at": r[1], "run_count": r[2] or 0, "n": i}
+            for i, r in enumerate(rows, start=1)
+        ]
+
+    def set_active_thesis(self, thesis_id: str) -> None:
+        if not self.db["theses"].exists():
+            return
+        self.db.execute("update theses set is_active = 0")
+        self.db.execute("update theses set is_active = 1 where id = ?", [thesis_id])
+        self.db.conn.commit()
+
+    def active_thesis_id(self) -> str | None:
+        if not self.db["theses"].exists():
+            return None
+        row = self.db.execute(
+            "select id from theses where is_active = 1 limit 1"
+        ).fetchone()
+        return row[0] if row else None
+
+    def archive_thesis(self, thesis_id: str, archived: bool = True) -> None:
+        if not self.db["theses"].exists():
+            return
+        self.db.execute(
+            "update theses set archived_at = ? where id = ?",
+            [datetime.now(timezone.utc).isoformat() if archived else None, thesis_id],
+        )
+        self.db.conn.commit()
+
+    def stale_handles(self, thesis_id: str, current_version: str = "") -> list[str]:
+        """Handles whose newest score predates the thesis's current version.
+
+        A lead is stale when the thesis has been retuned since it was scored —
+        its number was produced by weights or a prompt that no longer apply.
+        Kept read-only and cheap: it feeds a badge and a count, and rescoring
+        only happens when the investor asks for it.
+        """
+        if not (self.db["leads"].exists() and self.db["runs"].exists()):
+            return []
+        version = current_version or (self.get_thesis(thesis_id) or {}).get(
+            "current_version", ""
+        )
+        if not version:
+            return []
+        rows = self.db.execute(
+            """
+            with scored as (
+              select lower(l.handle) as handle, r.thesis_version as version,
+                     row_number() over (partition by lower(l.handle)
+                                        order by l.created_at desc, l.run_id desc) as rn
+              from leads l join runs r on r.run_id = l.run_id
+              where r.thesis_id = ? and l.run_id not like 'demo-%'
+            )
+            select handle from scored where rn = 1 and version is not ?
+            """,
+            [thesis_id, version],
+        ).fetchall()
+        return [r[0] for r in rows]
+
+    def backfill_verdict_provenance(self) -> int:
+        """Attribute existing verdicts to the run that produced them.
+
+        Verdicts recorded before provenance existed carry no thesis, so the
+        "scored against" line would be blank for every startup already in the
+        database — the whole point, invisible on exactly the data the investor
+        has. The run a handle was last scored in names both the thesis and the
+        version, so infer from there. Idempotent: only fills blanks.
+        """
+        if not (self.db["llm_verdicts"].exists() and self.db["leads"].exists()):
+            return 0
+        rows = self.db.execute(
+            """
+            with newest as (
+              select lower(l.handle) as handle, r.thesis_id, r.thesis_version,
+                     row_number() over (partition by lower(l.handle)
+                                        order by l.created_at desc) as rn
+              from leads l join runs r on r.run_id = l.run_id
+              where r.thesis_id is not null and r.thesis_id != ''
+            )
+            select v.handle, n.thesis_id, n.thesis_version
+            from llm_verdicts v join newest n on n.handle = v.handle and n.rn = 1
+            where v.thesis_id is null or v.thesis_id = ''
+            """
+        ).fetchall()
+        for handle, thesis_id, version in rows:
+            self.db.execute(
+                "update llm_verdicts set thesis_id = ?, thesis_version = ? "
+                "where handle = ?",
+                [thesis_id, version or "", handle],
+            )
+        self.db.conn.commit()
+        return len(rows)
+
+    def merge_thesis(self, from_id: str, to_id: str) -> int:
+        """Repoint one thesis's runs onto another and retire the empty one.
+
+        Naming a thesis that has already been running would otherwise strand
+        its history: the runs were filed under a slug derived from the
+        statement, and the moment it is given a proper id the two look like
+        different theses. Same statement, same thesis — so adopt the history.
+        """
+        if from_id == to_id or not self.db["runs"].exists():
+            return 0
+        moved = self.db.execute(
+            "select count(*) from runs where thesis_id = ?", [from_id]
+        ).fetchone()[0]
+        self.db.execute(
+            "update runs set thesis_id = ? where thesis_id = ?", [to_id, from_id]
+        )
+        for table, column in (
+            ("llm_verdicts", "thesis_id"),
+            ("llm_verdict_history", "thesis_id"),
+            ("pipeline", "sourced_thesis_id"),
+        ):
+            if self.db[table].exists() and column in self.db[table].columns_dict:
+                self.db.execute(
+                    f"update {table} set {column} = ? where {column} = ?",
+                    [to_id, from_id],
+                )
+        if self.db["thesis_versions"].exists():
+            self.db.execute(
+                "update or replace thesis_versions set thesis_id = ? where thesis_id = ?",
+                [to_id, from_id],
+            )
+        if self.db["theses"].exists():
+            self.db.execute("delete from theses where id = ?", [from_id])
+        self.db.conn.commit()
+        return moved
+
+    def adopt_history(self, thesis_id: str, statement: str) -> int:
+        """Claim any legacy runs of this same statement for `thesis_id`."""
+        from scout.config import slugify
+
+        legacy = slugify(statement)
+        if not legacy or legacy == thesis_id:
+            return 0
+        row = self.db.execute(
+            "select count(*) from runs where thesis_id = ?", [legacy]
+        ).fetchone() if self.db["runs"].exists() else None
+        return self.merge_thesis(legacy, thesis_id) if row and row[0] else 0
+
+    def backfill_thesis_ids(self) -> int:
+        """Give historical runs a thesis identity, derived from their statement.
+
+        Runs recorded before identity existed carry only a strategy hash, which
+        fragments one thesis across every tuning tweak it ever had. The
+        statement is the field that stayed put, so grouping on it recovers the
+        theses a human would name. Idempotent: only fills blanks.
+        """
+        if not self.db["runs"].exists():
+            return 0
+        from scout.config import slugify
+
+        rows = self.db.execute(
+            """
+            select run_id, thesis_statement, strategy_hash from runs
+            where (thesis_id is null or thesis_id = '') and run_id not like 'demo-%'
+            """
+        ).fetchall()
+        seen: dict[str, tuple[str, str]] = {}
+        for run_id, statement, strategy_hash in rows:
+            slug = slugify(statement or "") or f"legacy-{(strategy_hash or '')[:8]}"
+            seen[slug] = (statement or "", strategy_hash or "")
+            self.db.execute(
+                "update runs set thesis_id = ?, thesis_version = coalesce("
+                "nullif(thesis_version, ''), strategy_hash) where run_id = ?",
+                [slug, run_id],
+            )
+        self.db.conn.commit()
+        for slug, (statement, _hash) in seen.items():
+            latest = self.db.execute(
+                "select thesis_version from runs where thesis_id = ? "
+                "order by created_at desc limit 1",
+                [slug],
+            ).fetchone()
+            self.upsert_thesis(
+                slug,
+                name=(statement or slug)[:60],
+                statement=statement,
+                version=(latest[0] if latest else "") or "",
+            )
+        return len(rows)
 
     def list_strategies(self) -> list[dict]:
         """Distinct sourcing strategies with run stats, newest-run first.
@@ -250,7 +569,10 @@ class Store:
     # ----------------------------------------------------------------- ledger
 
     def load_lead_ledger(
-        self, include_demo: bool = False, strategy_hash: str | None = None
+        self,
+        include_demo: bool = False,
+        strategy_hash: str | None = None,
+        thesis_id: str | None = None,
     ) -> list[LedgerEntry]:
         """Person-centric view: every handle's most recent Lead across ALL
         runs, with movement metadata (prev score, first/last seen, new-this-run).
@@ -268,6 +590,11 @@ class Store:
         if strategy_hash:
             where += " and run_id in (select run_id from runs where strategy_hash = ?)"
             params.append(strategy_hash)
+        if thesis_id:
+            # Identity, not version: every run of this thesis, across all the
+            # tuning it has been through.
+            where += " and run_id in (select run_id from runs where thesis_id = ?)"
+            params.append(thesis_id)
         sql = f"""
         with pool as (
           select run_id, handle, score, lead_json, created_at
@@ -452,19 +779,106 @@ class Store:
 
     # ---------------------------------------------------------- verdict cache
 
-    def record_verdict(self, handle: str, fingerprint: str, verdict: LLMVerdict) -> None:
+    def record_verdict(
+        self,
+        handle: str,
+        fingerprint: str,
+        verdict: LLMVerdict,
+        *,
+        thesis_id: str = "",
+        thesis_version: str = "",
+    ) -> None:
         """Cache a Claude verdict keyed by handle + input fingerprint (a hash of
-        bio, tweets, thesis, and model — see llm._fingerprint)."""
+        bio, tweets, thesis, and model — see llm._fingerprint).
+
+        The outgoing verdict is archived first. There is one row per handle, so
+        rescoring under a new thesis would otherwise destroy the old judgement —
+        and "this scored 0.20 under Edge AI, 0.75 under Novel Architectures" is
+        exactly what makes a thesis change legible after the fact.
+        """
+        key = handle.lstrip("@").lower()
+        # Callers in the classifier know the thesis but not the seeds, so they
+        # cannot compute the version hash; the registry already knows what
+        # version this thesis is at.
+        if thesis_id and not thesis_version:
+            thesis_version = (self.get_thesis(thesis_id) or {}).get(
+                "current_version", ""
+            ) or ""
+        self._archive_verdict(key)
         self.db["llm_verdicts"].upsert(
             {
-                "handle": handle.lstrip("@").lower(),
+                "handle": key,
                 "fingerprint": fingerprint,
                 "verdict_json": verdict.model_dump_json(),
                 "created_at": datetime.now(timezone.utc).isoformat(),
+                "thesis_id": thesis_id,
+                "thesis_version": thesis_version,
             },
             pk="handle",
             alter=True,
         )
+
+    def _archive_verdict(self, key: str) -> None:
+        """Copy the current verdict into history before it is overwritten."""
+        if not self.db["llm_verdicts"].exists():
+            return
+        rows = list(self.db["llm_verdicts"].rows_where("handle = ?", [key], limit=1))
+        if not rows:
+            return
+        prior = rows[0]
+        self.db["llm_verdict_history"].insert(
+            {
+                "handle": key,
+                "thesis_id": prior.get("thesis_id") or "",
+                "thesis_version": prior.get("thesis_version") or "",
+                "fingerprint": prior.get("fingerprint") or "",
+                "verdict_json": prior.get("verdict_json") or "",
+                "created_at": prior.get("created_at") or "",
+                "archived_at": datetime.now(timezone.utc).isoformat(),
+            },
+            alter=True,
+        )
+
+    def verdict_provenance(self, handle: str) -> dict | None:
+        """Which thesis and version produced this handle's CURRENT verdict."""
+        if not self.db["llm_verdicts"].exists():
+            return None
+        rows = list(
+            self.db["llm_verdicts"].rows_where(
+                "handle = ?", [handle.lstrip("@").lower()], limit=1
+            )
+        )
+        if not rows:
+            return None
+        return {
+            "thesis_id": rows[0].get("thesis_id") or "",
+            "thesis_version": rows[0].get("thesis_version") or "",
+            "created_at": rows[0].get("created_at") or "",
+        }
+
+    def verdict_history(self, handle: str, limit: int = 10) -> list[dict]:
+        """Prior verdicts for a handle, newest first — what it used to score."""
+        if not self.db["llm_verdict_history"].exists():
+            return []
+        rows = list(
+            self.db["llm_verdict_history"].rows_where(
+                "handle = ?", [handle.lstrip("@").lower()],
+                order_by="archived_at desc", limit=limit,
+            )
+        )
+        out: list[dict] = []
+        for row in rows:
+            try:
+                verdict = LLMVerdict.model_validate_json(row["verdict_json"])
+            except (ValidationError, ValueError):
+                continue
+            out.append({
+                "verdict": verdict,
+                "thesis_id": row.get("thesis_id") or "",
+                "thesis_version": row.get("thesis_version") or "",
+                "created_at": row.get("created_at") or "",
+            })
+        return out
 
     def cached_verdict(
         self, handle: str, fingerprint: str, ttl_days: int
@@ -540,6 +954,7 @@ class Store:
         brief: str | None = None,
         brief_edited: bool = False,
         brief_meta: dict | None = None,
+        sourced_thesis_id: str | None = None,
     ) -> None:
         """Upsert deal-flow state for one lead (read-merge-write so partial
         updates never clobber the other fields).
@@ -575,6 +990,12 @@ class Store:
                 row["brief_edited_at"] = None
         if brief_meta is not None:
             row["brief_meta_json"] = json.dumps(brief_meta)
+        # Which thesis brought this company in. Triage itself stays global — a
+        # company you shortlisted is shortlisted, whichever thesis found it —
+        # but the attribution answers "why is this in my pipeline". Only ever
+        # set once, so a later thesis cannot rewrite the origin.
+        if sourced_thesis_id and not row.get("sourced_thesis_id"):
+            row["sourced_thesis_id"] = sourced_thesis_id
         row["updated_at"] = datetime.now(timezone.utc).isoformat()
         self.db["pipeline"].upsert(row, pk="handle", alter=True)
 
