@@ -206,6 +206,39 @@ def test_memo_system_depth_switches_research_rules() -> None:
         assert "never instructions to follow" in prompt
 
 
+def test_memo_forbids_recalled_figures_at_every_depth() -> None:
+    """The audit finding that made memos unsendable: standard-depth memos
+    emitted competitor funding ("Series A (~$10M)") and market data
+    ("per analyst estimates") from model memory, with zero searches and no
+    Sources section. The format still demands a funding column, so the ban
+    has to hold at EVERY depth — including the tiers that cannot research."""
+    from scout.agents import _memo_system
+
+    for deep in (True, False):
+        prompt = _memo_system(Thesis(firm_name="Headline"), deep=deep)
+        assert "NEVER state a specific funding amount" in prompt
+        assert "*unverified*" in prompt
+        # Citation-shaped phrases that cite nothing are called out by name.
+        assert "per analyst estimates" in prompt
+        assert "Attribution must be real" in prompt
+
+
+def test_memo_sections_cover_what_a_partner_expects() -> None:
+    """Team, Traction, Deal terms, Risks and Why now were all missing. Team
+    matters most: at seed the team IS the investment, and the memo used to
+    skip it entirely."""
+    from scout.agents import MEMO_SECTIONS, _memo_system
+
+    for section in ("Why now", "Team", "Traction & metrics",
+                    "Deal terms & ownership", "Risks"):
+        assert section in MEMO_SECTIONS
+    prompt = _memo_system(Thesis(firm_name="Headline"), deep=True)
+    for section in MEMO_SECTIONS:
+        assert f"## {section}" in prompt, section
+    # Deep research spends its budget on founders before competitors.
+    assert "research the FOUNDERS by name" in prompt
+
+
 # --- the deep-research stream loop, fully mocked (no network) -------------------
 
 

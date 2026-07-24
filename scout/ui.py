@@ -2449,10 +2449,13 @@ def _memo_pdf_cached(memo_md: str, title: str, subtitle: str) -> bytes:
 # Depth tiers for memo generation: label → (agents depth key, what it adds,
 # time estimate, cost estimate). Captions keep the spend decision informed.
 MEMO_DEPTH_INFO = {
-    "Quick": ("quick", "dossier only — no fetching, no search", "~30s", "~$0.02"),
-    "Standard": ("standard", "+ multi-page website crawl", "~1–2 min", "~$0.05"),
-    "Deep research": ("deep", "+ live web search & fetch, cited sources",
-                      "~3–6 min", "~$0.15–0.40"),
+    "Quick": ("quick", "dossier only — funding figures stay *unverified*",
+              "~30s", "~$0.02"),
+    "Standard": ("standard", "+ website crawl — still no external verification",
+                 "~1–2 min", "~$0.05"),
+    "Deep research": ("deep", "+ founder background, verified funding, cited sources "
+                      "— the only depth to send to a human",
+                      "~4–8 min", "~$0.20–0.50"),
 }
 MEMO_DEPTH_LABEL = {v[0]: k for k, v in MEMO_DEPTH_INFO.items()}
 
@@ -2476,8 +2479,12 @@ def _memo_parts(md: str) -> tuple[str, str]:
 
 
 def _selected_depth() -> str:
-    label = st.session_state.get("memo_depth") or "Standard"
-    return MEMO_DEPTH_INFO.get(label, MEMO_DEPTH_INFO["Standard"])[0]
+    # Deep by default. Only deep verifies funding figures and researches
+    # founders; the cheaper tiers must mark those *unverified*, which is
+    # honest but not what you send to a partner. The 4x cost ($0.05 -> $0.20)
+    # is trivial against one memo that gets spot-checked and fails.
+    label = st.session_state.get("memo_depth") or "Deep research"
+    return MEMO_DEPTH_INFO.get(label, MEMO_DEPTH_INFO["Deep research"])[0]
 
 
 def _site_evidence(lead: Lead, depth: str) -> tuple[str, str]:
@@ -2684,14 +2691,14 @@ if nav == "Memos":
         st.write("")
         dc1, dc2 = st.columns([2.15, 3.85])
         with dc1:
-            st.session_state.setdefault("memo_depth", "Standard")
+            st.session_state.setdefault("memo_depth", "Deep research")
             depth_pick = st.segmented_control(
                 "Memo depth", list(MEMO_DEPTH_INFO), key="memo_depth",
                 label_visibility="collapsed",
-            ) or "Standard"
+            ) or "Deep research"
         with dc2:
             _key, d_desc, d_time, d_cost = MEMO_DEPTH_INFO.get(
-                depth_pick, MEMO_DEPTH_INFO["Standard"])
+                depth_pick, MEMO_DEPTH_INFO["Deep research"])
             st.markdown(
                 f'<div class="subtle" style="margin-top:7px">{_e(d_desc)} · '
                 f'{_e(d_time)} · {_e(d_cost)} per memo</div>',

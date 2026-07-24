@@ -17,6 +17,7 @@ from pathlib import Path
 
 from streamlit.testing.v1 import AppTest
 
+from scout.agents import MEMO_SECTIONS
 from scout.models import Account, Lead, LLMVerdict, Signal
 from scout.store import Store
 
@@ -198,20 +199,20 @@ def test_memo_button_routes_and_generates_named_by_startup(tmp_path, monkeypatch
     # section skeleton.
     row = Store(db).get_pipeline("smoke_founder")
     assert row.get("brief")
-    for heading in ("## Overview", "## Product & differentiation",
-                    "## Technology & architecture", "## Competitive landscape",
-                    "## Market sizing",
-                    "## Strategic capital & acquisition dynamics",
-                    "## Recommendation"):
-        assert heading in row["brief"], heading
-    assert row["brief_meta"]["depth"] == "standard"  # session default depth
+    # The full section contract, including the four a partner expects and the
+    # memo used to omit: Why now, Team, Traction, Deal terms, Risks.
+    for section in MEMO_SECTIONS:
+        assert f"## {section}" in row["brief"], section
+    # Deep by default: it is the only depth that verifies funding figures and
+    # researches founders, and an unverified number is what sinks a memo.
+    assert row["brief_meta"]["depth"] == "deep"
     page_text = _page_text(at)
     # Startup-named everywhere: page header, memo title, and the toast.
     assert "Investment memos" in page_text
     assert "SmokeCo" in page_text
     # Depth UX renders: selector state + cost caption + verdict chip from
     # the template's VERDICT line.
-    assert at.session_state["memo_depth"] == "Standard"
+    assert at.session_state["memo_depth"] == "Deep research"
     assert "per memo" in page_text
     assert ">TRACK</span>" in page_text
     toasts = " ".join(t.value for t in at.toast)
