@@ -102,7 +102,13 @@ _attr_display = attr_display
 _DB_COMPUTED_LABELS = DB_COMPUTED_LABELS
 from scout.export import memo_pdf_bytes, pipeline_rows, write_pipeline_csv
 from scout.insights import stats_prompt, triage_stats
-from scout.models import Lead, LedgerEntry, LLMVerdict
+from scout.models import (
+    FUNDING_STAGE_LABELS,
+    FUNDING_STAGE_ORDER,
+    Lead,
+    LedgerEntry,
+    LLMVerdict,
+)
 from scout.outreach import CHANNELS, draft_outreach
 from scout import rubric as rubric_mod
 from scout.score import (
@@ -152,6 +158,21 @@ FUNNEL_STAGES = ["longlisted", *WIN_STAGES]
 STAGE_LABEL = {"idea": "Idea", "stealth": "Stealth", "launched": "Launched", "scaling": "Scaling"}
 TYPE_LABEL = {"founder": "Founder", "startup": "Startup", "other": "Other"}
 CUSTOMER_TYPE_LABEL = {"b2b": "B2B", "b2c": "B2C", "b2b2c": "B2B2C", "mixed": "B2B+B2C"}
+
+
+def _funding_label(verdict, with_amount: bool = True) -> str:
+    """"Seed · $10M" — the round and what was raised, or "" when unknown.
+
+    Unknown renders as nothing rather than the word "Unknown": most companies
+    have not announced, so printing it on every row would be noise on the
+    common case and would dilute the rounds that ARE known.
+    """
+    stage = getattr(verdict, "funding_stage", None) if verdict else None
+    if not stage or stage == "unknown":
+        return ""
+    label = FUNDING_STAGE_LABELS.get(stage, stage)
+    amount = (getattr(verdict, "funding_amount", None) or "").strip()
+    return f"{label} · {amount}" if with_amount and amount else label
 QUALITY_DIM_LABEL = {
     "team": "Team", "tech_product": "Tech & product", "market": "Market",
     "defensibility": "Defensibility", "traction": "Traction", "investors": "Investors",
@@ -1845,16 +1866,22 @@ def _feed_row(lead: Lead, selected: bool) -> bool:
     fit_pct = f"{fit:.0%}" if fit is not None else "—"
     fit_w = fit * 100 if fit is not None else 0
     gold = " gold" if (fit is not None and fit >= 0.7) else ""
-    # 2-3 orientation tags: B2B/B2C, funnel status (or stage if still new).
+    # 2-4 orientation tags: B2B/B2C, funding round, funnel status (or stage).
     tags: list[str] = []
     if verdict and verdict.customer_type:
         tags.append(CUSTOMER_TYPE_LABEL.get(verdict.customer_type, verdict.customer_type))
+    # The round earns a slot whenever it is known: "is this already priced,
+    # and past our entry point" is the question a scan of the list should
+    # answer without opening anything.
+    round_label = _funding_label(verdict, with_amount=False)
+    if round_label:
+        tags.append(round_label)
     status = _status_of(lead)
     if status != "new":
         tags.append(STATUS_LABELS.get(status, status))
     elif verdict and verdict.stage:
         tags.append(STAGE_LABEL.get(verdict.stage, verdict.stage))
-    tag_html = "".join(f'<span class="frow-tag">{_e(t)}</span>' for t in tags[:3])
+    tag_html = "".join(f'<span class="frow-tag">{_e(t)}</span>' for t in tags[:4])
     html = (
         f'<div class="frow">'
         f'<div class="frow-av">{_e(_initials(title, account.handle))}</div>'
@@ -1903,9 +1930,11 @@ def _detail_pane(lead: Lead) -> None:
     # rows. "What space is this in" is the first question asked of any lead,
     # and the dense row has no room for it — so it belongs here, right under
     # the summary and above the score.
+    funding = _funding_label(verdict)
     meta_line = " · ".join(
         x for x in (
             (verdict.stage if verdict else "") or "",
+            funding,
             (verdict.sector if verdict else "") or "",
             (verdict.subsector if verdict else "") or "",
             (verdict.business_model if verdict else "") or "",
@@ -2177,7 +2206,7 @@ def _render_startup_feed() -> None:
         # Reset must land BEFORE the filter widgets instantiate.
         FILTER_DEFAULTS: dict = {
             "f_type": ["founder", "startup"], "f_stage": list(STAGES),
-            "f_ctype": list(CUSTOMER_TYPES),
+            "f_round": list(FUNDING_STAGE_LABELS), "f_ctype": list(CUSTOMER_TYPES),
             "f_minscore": 0, "f_minfit": 0, "f_hidepassed": True,
         }
         if st.session_state.pop("filters_reset", False):
@@ -2186,6 +2215,8 @@ def _render_startup_feed() -> None:
         n_active = sum([
             set(st.session_state.get("f_type", FILTER_DEFAULTS["f_type"])) != {"founder", "startup"},
             set(st.session_state.get("f_stage", FILTER_DEFAULTS["f_stage"])) != set(STAGES),
+            (set(st.session_state.get("f_round", FILTER_DEFAULTS["f_round"]))
+             != set(FUNDING_STAGE_LABELS)),
             set(st.session_state.get("f_ctype", FILTER_DEFAULTS["f_ctype"])) != set(CUSTOMER_TYPES),
             st.session_state.get("f_minscore", 0) > 0,
             st.session_state.get("f_minfit", 0) > 0,
@@ -2205,6 +2236,13 @@ def _render_startup_feed() -> None:
                 stage_filter = st.multiselect("Stage", list(STAGES),
                                               default=FILTER_DEFAULTS["f_stage"], key="f_stage",
                                               format_func=lambda s: STAGE_LABEL[s])
+                round_filter = st.multiselect(
+                    "Funding round", list(FUNDING_STAGE_LABELS),
+                    default=FILTER_DEFAULTS["f_round"], key="f_round",
+                    format_func=lambda r: FUNDING_STAGE_LABELS[r],
+                    help="The announced round. Most companies never announce, so "
+                         "pick 'Unknown' to include them — filtering to Seed alone "
+                         "hides every unannounced seed company.")
                 ctype_filter = st.multiselect("Customer type", list(CUSTOMER_TYPES),
                                               default=FILTER_DEFAULTS["f_ctype"], key="f_ctype",
                                               format_func=lambda c: CUSTOMER_TYPE_LABEL[c],
@@ -2218,8 +2256,9 @@ def _render_startup_feed() -> None:
                     st.rerun()
 
         HIDE_LABELS = {"type": "type filter", "stage": "stage filter",
-                       "ctype": "customer type", "score": "min score",
-                       "fit": "min fit", "passed": "passed", "search": "search"}
+                       "round": "funding round", "ctype": "customer type",
+                       "score": "min score", "fit": "min fit",
+                       "passed": "passed", "search": "search"}
 
         def _hide_reason(lead: Lead) -> str | None:
             """None = visible; otherwise which filter hides this lead."""
@@ -2233,6 +2272,14 @@ def _render_startup_feed() -> None:
                     return "type"
             if stage_filter and stage and stage not in stage_filter:
                 return "stage"
+            # An unset round is "unknown", not missing: a company that never
+            # announced still has a cap-table answer, and hiding it silently
+            # would drop most of the funnel.
+            if round_filter:
+                round_val = (getattr(verdict, "funding_stage", None)
+                             if verdict else None) or "unknown"
+                if round_val not in round_filter:
+                    return "round"
             # Same unknown-is-never-hidden semantics for the B2B/B2C lens.
             if (verdict is not None and verdict.customer_type is not None
                     and verdict.customer_type not in ctype_filter):
@@ -2324,7 +2371,7 @@ def _render_startup_feed() -> None:
         # Reset pagination whenever the view changes (track, scope, filters…)
         page_size = 25
         view_key = repr((track, scope, strategy_hash, thesis_filter,
-                         tuple(type_filter), tuple(stage_filter),
+                         tuple(type_filter), tuple(stage_filter), tuple(round_filter),
                          tuple(ctype_filter), min_score, min_fit, hide_passed, query, sort_by))
         if st.session_state.get("leads_view_key") != view_key:
             st.session_state["leads_view_key"] = view_key
@@ -3628,6 +3675,7 @@ def _render_database() -> None:
                          if comps["scorecard"] else ""),
                 "What they do": summary_by_handle[handle],
                 "Stage": (STAGE_LABEL.get(v.stage, v.stage) if v and v.stage else ""),
+                "Round": _funding_label(v),
                 "Sector": (" · ".join(x for x in [v.sector or "", v.subsector or ""] if x)
                            if v else ""),
                 "Customers": (CUSTOMER_TYPE_LABEL.get(v.customer_type, "")

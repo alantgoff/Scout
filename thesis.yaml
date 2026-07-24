@@ -2,66 +2,51 @@
 # signal_params and llm_prompt are editable in the UI.
 id: novel-architectures
 name: Novel Architectures & Data Moats
-thesis: Identify startups and early-stage companies building novel model architectures or training on
-  unique, proprietary data moats — the company account, product, or launch page rather than the individual
-  researcher behind it.
+thesis: Identify founders building agentic AI systems with genuine domain expertise and proprietary or
+  novel model capabilities — not wrappers, but defensible technical moats.
 keywords:
-- we're building
-- we are building
-- building the
-- the platform for
-- our model
-- our platform
-- foundation model company
-- proprietary data
-- data moat
+- building in stealth
+- proprietary model
+- domain-specific AI
+- agentic
+- fine-tuned on
+- trained on proprietary
+- autonomous agent
+- vertical AI
 - novel architecture
-- pretraining
-- backed by
+- domain expert
 target_bios:
-- Y Combinator
-- YC W25
-- YC S25
-- backed by
-- we're hiring
 - ex-OpenAI
+- prev @OpenAI
 - ex-Anthropic
+- prev @Anthropic
 - ex-DeepMind
-- prev @openai
-- prev @deepmind
+- prev @DeepMind
+- ex-Google Brain
+- ex-Meta AI
+- prev @MetaAI
+- ex-Mistral
+- ex-Cohere
+- prev @Scale AI
 sectors:
-- foundation models
-- novel model architectures
+- agentic AI
+- domain-specific foundation models
 - proprietary training data
-- machine learning research
-- generative AI
-- multimodal models
-- open source AI
+- AI for life sciences
+- AI for legal
+- AI for finance
+- AI for robotics
+- novel model architectures
+- vertical AI SaaS
 disqualifiers:
+- ChatGPT wrapper
+- prompt engineer
+- AI influencer
+- no-code AI
 - crypto
 - NFT
-- web3
-- blockchain
-- recruiter
-- consultant
-- journalist
-- angel investor
-- partner at
-- partner @
-- I invest
-- we invest
-- investing in
-- venture capital fund
-- PhD student
-- PhD candidate
-- grad student
-- undergrad
-- research assistant
-- opinions my own
-- opinions are my own
-- views are my own
-- views my own
-- personal account
+- seeking opportunities
+- open to work
 product_disqualifiers:
 - crypto
 - NFT
@@ -102,16 +87,15 @@ scorecard_weights:
     growth_engagement: 18.0
     monetization_bm: 18.0
 launch_phrases:
+- we just launched
 - introducing our
-- announcing our
-- out of stealth
-- we raised
+- excited to announce
 - now in beta
-- generally available
 - we're live
-- we trained
+- try it now
+- sign up for early access
+- launching today
 target_stages:
-- idea
 - stealth
 - launched
 signal_params:

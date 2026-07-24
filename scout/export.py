@@ -40,6 +40,9 @@ CSV_COLUMNS = [
     "value_add_reason",
     "value_add_levers",
     "stage",
+    "funding_stage",
+    "funding_amount",
+    "funding_investors",
     "sector",
     "subsector",
     "business_model",
@@ -146,6 +149,17 @@ def write_csv(leads: list[Lead], out_dir: Path, thesis: Thesis | None = None) ->
                         else ""
                     ),
                     "stage": (llm.stage or "") if llm else "",
+                    # Blank rather than "unknown" for an unannounced round:
+                    # a spreadsheet filter should treat it as missing data,
+                    # which it is, not as a category.
+                    "funding_stage": (
+                        (llm.funding_stage or "") if llm
+                        and llm.funding_stage != "unknown" else ""
+                    ),
+                    "funding_amount": (llm.funding_amount or "") if llm else "",
+                    "funding_investors": (
+                        ";".join(llm.funding_investors) if llm else ""
+                    ),
                     "sector": (llm.sector or "") if llm else "",
                     "subsector": (llm.subsector or "") if llm else "",
                     "business_model": (llm.business_model or "") if llm else "",

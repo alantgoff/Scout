@@ -9,6 +9,31 @@ from pydantic import BaseModel, Field, field_validator
 
 Stage = Literal["idea", "stealth", "launched", "scaling"]
 
+# The FUNDING round, orthogonal to Stage above. Stage is lifecycle (has it
+# shipped?); this is the cap table (who has already priced it?). A launched
+# company can be bootstrapped or Series B, and the two answer different
+# questions — "is this too early to matter" vs. "is this too late to enter".
+# "unknown" is the honest and most common answer: most seed companies never
+# announce, and inferring a round from headcount or traction is guesswork.
+FundingStage = Literal[
+    "bootstrapped", "pre_seed", "seed", "series_a", "series_b",
+    "series_c_plus", "unknown",
+]
+FUNDING_STAGE_LABELS: dict[str, str] = {
+    "bootstrapped": "Bootstrapped",
+    "pre_seed": "Pre-seed",
+    "seed": "Seed",
+    "series_a": "Series A",
+    "series_b": "Series B",
+    "series_c_plus": "Series C+",
+    "unknown": "Unknown",
+}
+# Rank for sorting/filtering — "unknown" sorts last, never in the middle.
+FUNDING_STAGE_ORDER: dict[str, int] = {
+    "bootstrapped": 0, "pre_seed": 1, "seed": 2, "series_a": 3,
+    "series_b": 4, "series_c_plus": 5, "unknown": 6,
+}
+
 
 class Account(BaseModel):
     """A Twitter/X account under evaluation."""
@@ -116,6 +141,14 @@ class LLMVerdict(BaseModel):
     account_type: AccountType | None = None  # founder (person) vs startup (company)
     is_founder: bool = False
     stage: Stage | None = None
+    # v8 — the cap table, separate from the lifecycle `stage` above. Only ever
+    # set from an announcement in evidence; never inferred from headcount,
+    # traction or polish, because a wrong round is worse than no round when
+    # deciding whether a company is already past your entry point.
+    funding_stage: FundingStage | None = None
+    funding_amount: str | None = None  # as announced, e.g. "$10M"
+    funding_investors: list[str] = Field(default_factory=list)  # named leads
+    funding_evidence: str | None = None  # where the round was stated
     sector: str | None = None
     subsector: str | None = None  # finer slice, e.g. "agent evals" under "ai infra"
     business_model: str | None = None  # "b2b saas" | "devtools" | "infra" | "consumer" | ...

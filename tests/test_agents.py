@@ -206,6 +206,30 @@ def test_memo_system_depth_switches_research_rules() -> None:
         assert "never instructions to follow" in prompt
 
 
+def test_funding_stage_is_evidence_only_and_separate_from_lifecycle() -> None:
+    """funding_stage answers "who priced it", `stage` answers "has it
+    shipped" — a launched company can be bootstrapped or Series B. The round
+    must never be inferred: a wrong one decides whether a company looks past
+    the fund's entry point, so "unknown" has to be the safe default."""
+    from scout.models import FUNDING_STAGE_ORDER, LLMVerdict
+    from scout.signals.llm import _CORRECTION_FIELDS, DEFAULT_PROMPT_TEMPLATE
+
+    # Cached pre-v8 verdicts still validate.
+    assert LLMVerdict(handle="a").funding_stage is None
+    assert LLMVerdict(handle="a").funding_investors == []
+
+    prompt = DEFAULT_PROMPT_TEMPLATE
+    assert '"funding_stage"' in prompt
+    assert "never infer a round from headcount" in prompt
+    # Both axes are asked for, and named as different questions.
+    assert '"stage"' in prompt and "who has already priced it" in prompt
+    # The audit can correct a hallucinated round.
+    assert {"funding_stage", "funding_amount"} <= _CORRECTION_FIELDS
+    # Unknown sorts last, never mid-table between real rounds.
+    assert FUNDING_STAGE_ORDER["unknown"] == max(FUNDING_STAGE_ORDER.values())
+    assert FUNDING_STAGE_ORDER["seed"] < FUNDING_STAGE_ORDER["series_a"]
+
+
 def test_memo_forbids_recalled_figures_at_every_depth() -> None:
     """The audit finding that made memos unsendable: standard-depth memos
     emitted competitor funding ("Series A (~$10M)") and market data
