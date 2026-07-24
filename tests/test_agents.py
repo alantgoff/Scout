@@ -230,6 +230,46 @@ def test_funding_stage_is_evidence_only_and_separate_from_lifecycle() -> None:
     assert FUNDING_STAGE_ORDER["seed"] < FUNDING_STAGE_ORDER["series_a"]
 
 
+def test_a_round_without_evidence_is_discarded() -> None:
+    """Asking the prompt for evidence is not enforcing it. The first live run
+    tagged Perplexity "series_c_plus" from a bio reading "Everything is
+    Computer." — recalled from model memory, no evidence string. A round
+    decides whether a company is past the fund's entry point, so it has to be
+    checkable; unevidenced rounds collapse to unknown and take the amount and
+    investors with them."""
+    from scout.models import LLMVerdict
+
+    recalled = LLMVerdict(handle="p", funding_stage="series_c_plus",
+                          funding_amount="$1.5B", funding_investors=["a16z"])
+    assert recalled.funding_stage == "unknown"
+    assert recalled.funding_amount is None and recalled.funding_investors == []
+
+    # Whitespace is not evidence either.
+    assert LLMVerdict(handle="p", funding_stage="seed",
+                      funding_evidence="   ").funding_stage == "unknown"
+
+    evidenced = LLMVerdict(handle="w", funding_stage="seed",
+                           funding_amount="$300M",
+                           funding_evidence="website: press release")
+    assert evidenced.funding_stage == "seed"
+    assert evidenced.funding_amount == "$300M"
+
+
+def test_funding_stage_vocabulary_is_normalized_not_rejected() -> None:
+    """A bare Literal would throw inside _parse_verdicts on one off-vocabulary
+    answer and burn the whole batch's corrective retries."""
+    from scout.models import LLMVerdict
+
+    def stage(raw):
+        return LLMVerdict(handle="h", funding_stage=raw,
+                          funding_evidence="press page").funding_stage
+
+    assert stage("Series A") == "series_a"
+    assert stage("series_d") == "series_c_plus"   # D+ folds into the C+ bucket
+    assert stage("self funded") == "bootstrapped"
+    assert stage("megaround") == "unknown"        # degrades, never raises
+
+
 def test_memo_forbids_recalled_figures_at_every_depth() -> None:
     """The audit finding that made memos unsendable: standard-depth memos
     emitted competitor funding ("Series A (~$10M)") and market data

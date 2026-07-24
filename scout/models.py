@@ -5,7 +5,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Literal
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 Stage = Literal["idea", "stealth", "launched", "scaling"]
 
@@ -201,6 +201,53 @@ class LLMVerdict(BaseModel):
     # Section-level manual overrides (section key → 0..100) — written only
     # by score.apply_override at load time, never by the classifier.
     scorecard_manual: dict[str, float] = Field(default_factory=dict)
+
+    @field_validator("funding_stage", mode="before")
+    @classmethod
+    def _norm_funding_stage(cls, value):  # noqa: ANN001 — pydantic hook
+        """Normalize the round; unrecognised spellings become "unknown".
+
+        Same reasoning as customer_type below: a bare Literal would throw
+        inside _parse_verdicts on one off-vocabulary answer and burn the
+        batch. "Series A" and "seriesA" are the same round as "series_a".
+        """
+        if not isinstance(value, str):
+            return None
+        cleaned = value.strip().lower().replace(" ", "_").replace("-", "_")
+        aliases = {
+            "preseed": "pre_seed", "pre_seed_round": "pre_seed",
+            "seriesa": "series_a", "seriesb": "series_b",
+            "series_c": "series_c_plus", "series_d": "series_c_plus",
+            "series_e": "series_c_plus", "seriesc": "series_c_plus",
+            "growth": "series_c_plus", "late_stage": "series_c_plus",
+            "self_funded": "bootstrapped", "none": "unknown", "": "unknown",
+        }
+        cleaned = aliases.get(cleaned, cleaned)
+        return cleaned if cleaned in FUNDING_STAGE_LABELS else "unknown"
+
+    @model_validator(mode="after")
+    def _round_requires_evidence(self):
+        """A round without a source is downgraded to "unknown".
+
+        The prompt asks for funding_evidence, but asking is not enforcing:
+        the first live run tagged Perplexity "series_c_plus" off a bio
+        reading "Everything is Computer." — recalled from model memory, with
+        no evidence string, exactly the failure the field exists to prevent.
+        A stated round decides whether a company looks past the fund's entry
+        point, so it has to be checkable, and the cheapest check is that the
+        classifier had to name where it read it.
+
+        This also drops the occasional CORRECT tag whose evidence line was
+        simply not filled in. That trade is deliberate: an unknown round
+        costs one reclassify to recover, while a confident wrong one is
+        never questioned.
+        """
+        if self.funding_stage and self.funding_stage != "unknown":
+            if not (self.funding_evidence or "").strip():
+                self.funding_stage = "unknown"
+                self.funding_amount = None
+                self.funding_investors = []
+        return self
 
     @field_validator("customer_type", mode="before")
     @classmethod
