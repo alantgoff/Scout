@@ -232,8 +232,34 @@ def _inject_css() -> None:
         }
         .stApp { background:var(--bg); }
         .block-container { padding-top:1.4rem; padding-bottom:4rem; max-width:1080px; }
-        #MainMenu, footer, header[data-testid="stHeader"], [data-testid="stToolbar"],
+        #MainMenu, footer, [data-testid="stToolbar"],
         [data-testid="stDecoration"] { visibility:hidden; height:0; }
+        /* The header is hidden for chrome, NOT collapsed away: it carries the
+           sidebar expand arrow, and the Startups rail is the only route to
+           track, scope, thesis, search, sort, filters and the Feed/Database
+           switch. Zeroing its height took that arrow with it, so collapsing
+           the rail once left the page with no visible way to get it back. */
+        header[data-testid="stHeader"] { background:transparent !important;
+          height:0 !important; pointer-events:none; }
+        header[data-testid="stHeader"] > * { visibility:hidden; }
+        /* …except the » that reopens it. Streamlit 1.59 names this
+           stExpandSidebarButton and renders it INSIDE the header, so the
+           blanket rule above hid the only way back to the rail. */
+        [data-testid="stExpandSidebarButton"] {
+          visibility:visible !important; pointer-events:auto !important;
+          position:fixed !important; top:14px; left:14px; z-index:1000; }
+        /* The testid sits ON the button in 1.59, not on a wrapper — style the
+           element itself, and the collapse side via its wrapper's child. */
+        [data-testid="stExpandSidebarButton"],
+        [data-testid="stSidebarCollapseButton"] button {
+          background:var(--surface) !important; border:1px solid var(--hair) !important;
+          border-radius:9px !important; color:var(--ink) !important;
+          box-shadow:0 1px 3px rgba(0,0,0,.07); }
+        [data-testid="stExpandSidebarButton"]:hover,
+        [data-testid="stSidebarCollapseButton"] button:hover {
+          background:var(--bg) !important; border-color:var(--accent) !important; }
+        /* The « that closes it, styled to match so the pair reads as one control. */
+        [data-testid="stSidebarCollapseButton"] { visibility:visible !important; }
 
         /* Typography — serif display over sans body, like the Headline site */
         h1,h2,h3,h4 { font-family:var(--serif) !important; font-weight:600;
@@ -902,7 +928,14 @@ def _estimate_scan(kind: str, max_accounts: int | None = None,
 # ----------------------------------------------------------------------- page
 
 
-st.set_page_config(page_title="Scout", page_icon="🔭", layout="wide")
+# initial_sidebar_state="expanded": the Startups rail holds the ONLY controls
+# for track, scope, thesis, search, sort and filters, and the Feed/Database
+# switch. Streamlit's default ("auto") remembers a collapse across reloads and
+# collapses on narrow viewports, which leaves that page looking like it simply
+# has no controls — the reopen affordance is one small arrow. Forcing expanded
+# means every fresh load starts usable; collapsing it by hand still works.
+st.set_page_config(page_title="Scout", page_icon="🔭", layout="wide",
+                   initial_sidebar_state="expanded")
 _inject_css()
 
 # Toasts queued before an st.rerun() would be lost with a direct call —
