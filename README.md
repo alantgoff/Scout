@@ -22,11 +22,6 @@ assert things it cannot evidence.
 | Theses tracked in parallel | 4, with version history |
 | X API spend | **$3.21** of a $25 grant |
 
-That audit row is the honest headline: when a second pass checks the first
-pass against its own evidence, it finds something to fix every time. That is
-the argument for the audit existing, and the reason nothing here is presented
-as certain when it isn't.
-
 ### The three ideas worth your time
 
 **1. Evidence or nothing.** Every figure a partner might repeat in a meeting —
