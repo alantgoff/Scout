@@ -1,626 +1,181 @@
 # Scout
 
-**A thesis-driven sourcing engine: from a thesis in plain English to an
-investment memo, with every number traceable to evidence.**
+A thesis-driven sourcing engine for early-stage VC. Describe an investment
+thesis in plain English; Scout searches X, GitHub and Hacker News for
+companies that match it, scores them against the thesis, and drafts the
+investment memo.
 
-Scout watches X, GitHub, and Hacker News for companies matching a stated
-investment thesis, scores them against it, and writes the first-draft memo.
-It is built around one conviction: **a sourcing tool that guesses is worse
-than no sourcing tool**, because a wrong number is acted on with the same
-confidence as a right one. Most of the engineering here is spent refusing to
-assert things it cannot evidence.
-
-### Where it stands today
+Every figure it reports traces to something it actually read. Where it has no
+evidence it says so rather than estimating — that constraint is enforced in
+code, not just asked for in a prompt.
 
 | | |
 |---|---|
 | Startups in the database | **942** across 13 runs |
 | Classified with a thesis-fit score | **643** |
 | Strong fit (≥ 70%) | **28** |
-| Adversarially audited | 43 — **every one returned corrections** |
-| Funding rounds tagged | 17, **all evidence-cited** |
+| Adversarially audited | 43 — every one returned corrections |
+| Funding rounds tagged | 17, all evidence-cited |
 | Theses tracked in parallel | 4, with version history |
 | X API spend | **$3.21** of a $25 grant |
 
-### The three ideas worth your time
-
-**1. Evidence or nothing.** Every figure a partner might repeat in a meeting —
-funding round, competitor's raise, market size — must trace to something the
-system actually read. A funding round with no cited source is *discarded in
-code*, not merely discouraged in a prompt ([why](#evidence-or-nothing)). A
-live run tagged Perplexity "Series C+" from a bio reading *"Everything is
-Computer."*; that class of error now cannot reach the output.
-
-**2. A thesis is an object, not a config file.** Change your thesis and every
-score computed under the old one is marked stale rather than silently
-reinterpreted. Scores name the thesis and version that produced them
-("Scored against Novel Architectures · v3"), and companies stay attributed to
-the thesis that surfaced them ([why](#the-thesis-is-a-first-class-object)).
-
-**3. Cost is a designed constraint.** The X API is pay-per-use. The spend
-guard refuses a request *before* making it, never retries anything that might
-have already been billed, and caps a full run at **$3.60** — down from $30 —
-by buying breadth through many narrow queries rather than one deep page
-([why](#cost-discipline)).
-
-### Try it in 30 seconds
-
 ```bash
-git clone https://github.com/alantgoff/X-Sourcing-Tool.git scout && cd scout
+git clone https://github.com/alantgoff/Scout.git scout && cd scout
 ./start
 ```
 
-No API keys needed to look around — it seeds a sample dataset and opens the
-workspace. macOS: double-click **`Scout.command`** in Finder instead.
+No API keys needed to look around — `./start` seeds a sample dataset and opens
+the workspace at `localhost:8501`. On macOS, double-click **`Scout.command`**
+in Finder instead.
 
-- **A finished memo** is at [`out/memo_Walden_Robotics.pdf`](out/) — or open
-  Memos in the app and read Octen's.
-- **The scoring is legible**: click any startup, then "How it scored" — every
-  point is attributed, and the arithmetic is shown.
+---
+
+## The six pages
+
+**Thesis** — the control room. Write your thesis in plain language and the
+strategy agent generates the whole sourcing configuration: X query bank, bio
+searches, GitHub topics, an investor watchlist (handles are existence-checked;
+fabrications are dropped), and scoring weights. You review before anything
+saves. This page also holds the thesis library — switch between theses without
+losing either, and see how many startups each one found. Runs launch from here,
+with a worst-case cost estimate and an explicit confirmation before any paid
+run.
+
+**Startups** — everything sourcing found, newest run or all runs, as a triage
+cockpit: a dense scannable list on the left, full dossier on the right. Each row
+shows thesis fit, score, funding round and B2B/B2C at a glance. The dossier
+gives you the product summary, the sector line, "How it scored" with every point
+attributed, and one-click Longlist / Pass. Filter by round, stage, customer
+type, fit or score. A **Database** view of the same data adds editable CRM
+columns (vertical, use case, priority, your own custom fields) with AI
+auto-categorisation.
+
+**Longlist** — companies you've marked worth a closer look. Same cockpit,
+narrower set, with the next action being shortlist or pass.
+
+**Shortlist** — the ones you're seriously considering. This is where memos get
+written and outreach gets drafted.
+
+**Memos** — a 12-section first-draft investment memo per company: *Overview ·
+Why now · Team · Product & differentiation · Technology & architecture ·
+Traction & metrics · Competitive landscape · Market sizing · Strategic capital
+& acquisition dynamics · Deal terms & ownership · Risks · Recommendation*,
+opening with a TL;DR and closing with a **VERDICT: PURSUE / TRACK / PASS**,
+tripwires, and first-call questions. Deep research is the default: it finds the
+real company site, researches founders by name, verifies funding, and cites its
+sources. Memos are editable in place and export as Markdown or styled PDF.
+AI-drafted outreach sits below each one.
+
+**Settings** — API keys, the X spend ledger, and defaults.
+
+## How it works
+
+```
+DISCOVER            SCORE                      DECIDE
+X search queries    9 deterministic signals    Longlist / Shortlist / Pass
+bio search       →  + Claude classification  → Memo
+GitHub topics       + adversarial audit        Outreach
+Hacker News         + thesis fit
+investor follows
+```
+
+A run sources candidate accounts, folds a founder and their company account
+into one entry, and scores each on three components:
+
+- **Quality** — a readiness scorecard (B2B or B2C rubric), criteria scored 1–3
+  from cited evidence only, rolled up 0–100
+- **Fit** — how squarely the *product* matches your thesis, 0–1
+- **Signal** — X momentum: investor follow-graph convergence, bio changes,
+  departure language, launch traction
+
+These blend (currently 35 / 50 / 15 — fit outweighs quality deliberately, so a
+well-built off-thesis company can't outrank an on-thesis one), then pass
+through multipliers for classifier confidence, evidence grounding, and stage
+match. A second adversarial pass audits the top verdicts against their own
+evidence and corrects what the first pass overstated.
+
+Runs are incremental: everything fetched is cached, and accounts scored within
+the last 7 days are skipped, so re-running while you tune a thesis is fast and
+mostly free.
+
+## Why it's built this way
+
+**Evidence or nothing.** An LLM asked for a competitor's funding round will
+produce one — plausible, specific, often a year stale, and indistinguishable
+from a real one. A live run tagged Perplexity "Series C+" off a bio reading
+*"Everything is Computer."* Rounds without a cited source are now discarded by
+a model validator, and the memo prompt bans recalled figures and
+citation-shaped phrases (*"per analyst estimates"*) at every research depth.
+
+**A thesis is an object, not a config file.** Identity is kept separate from
+version, so editing weights bumps the version while the thesis stays itself.
+Scores name their origin ("Scored against Novel Architectures · v3"), changing
+a thesis marks old scores stale rather than silently reinterpreting them, and
+previous verdicts are archived — so "0.20 under Edge AI, 0.75 under Novel
+Architectures" stays answerable.
+
+**Cost is a correctness problem.** The X API is pay-per-use against a fixed
+grant. The guard pre-checks worst-case cost before each request, never retries
+anything that may already have been billed, and buys breadth through many
+narrow queries rather than one deep page — worst case per run fell from $30 to
+$3.60, measured actual $1.55.
+
+## Configuration
+
+Two files, both editable in the UI:
+
+- **`thesis.yaml`** — the thesis statement, target stages, keywords, sectors,
+  disqualifiers, signal weights, scorecard weights, and scoring parameters
+- **`seeds.yaml`** — the X query bank (departure / stealth-intent / hiring /
+  launch), bio searches, investor watchlist, GitHub topics
+
+Optional keys in `.env`: `ANTHROPIC_API_KEY` (classification and memos —
+without it, heuristics-only), `TW_COOKIES` (free X scraping),
+`X_BEARER_TOKEN` + `XAPI_SPEND_CAP_USD` (paid X API), `GITHUB_TOKEN`
+(raises GitHub's rate limit from 60/hr to 5,000).
+
+## CLI
+
+```
+run          Full pipeline → out/leads_*.csv + report_*.md
+  --source twscrape|xapi   free scraping (default) or the paid X API
+  --max-accounts N · --min-score N · --ttl-days N
+
+reclassify   Re-score without discovery — no X spend, cache-first
+  --all                    every startup in the ledger
+  --stale-only             only those scored under an older thesis version
+
+thesis       list · show <id> · new <name> · use <id> · clone <id> <name> · archive <id>
+source       Discovery preview — raw accounts per strategy, no scoring or cost
+inspect <handle>   Score one account, print the per-signal breakdown
+verify       Hydrate the shortlist with fresh paid X data and re-score
+budget       X API spend against the cap
+demo         $0 offline end-to-end test
+ui           Launch the workspace
+```
+
+Use `./scout-cli <cmd>`. On macOS, uv marks `.venv` hidden and CPython then
+skips the editable-install `.pth`, which breaks the bare `scout` command;
+`./scout-cli` runs `python -m scout.cli` and is immune.
+
+## Known limitations
+
+- **ToS risk:** scraping X via twscrape violates X's Terms of Service. Use a
+  burner account.
+- **The follow-graph signal is twscrape-only** — via the official API it always
+  scores 0, as engagement operators (`min_faves:`) are also unsupported there
+  and get stripped.
+- **Confidence is biased against stealth.** Classifier confidence multiplies the
+  score, and stealth companies are inherently less legible (0.57 average vs
+  0.83–0.93) despite carrying the highest thesis fit. Flooring it was tried and
+  reverted — it also lifts companies whose product claims never traced to
+  evidence. Documented in `AGENTS.md` as an open thread.
+- **X API cost constants are unverified.** Spend figures derive from hardcoded
+  per-read prices, never reconciled against X's actual rate card.
+- **Without `ANTHROPIC_API_KEY`** you get heuristics-only ranking: no
+  stage/sector/summary enrichment, and memos fall back to a data-only skeleton.
 
 ---
 
 > **Working on the code?** [`AGENTS.md`](AGENTS.md) is the map — architecture,
 > data flow, invariants, and the gotchas that will bite you.
-
-## Open the app
-
-```bash
-git clone https://github.com/alantgoff/X-Sourcing-Tool.git scout && cd scout
-./start
-```
-
-`./start` does everything: syncs dependencies (uv), creates `.env` on first
-run, seeds the free offline sample dataset when the workspace would otherwise
-be empty, launches the UI, and opens your browser. Run it again anytime — if
-scout is already up it just opens the page. On macOS you can skip the terminal
-entirely: **double-click `Scout.command` in Finder** (first time:
-right-click → Open, to satisfy Gatekeeper).
-
-## Quickstart (the manual pieces)
-
-```bash
-cp .env.example .env            # ./start does this too — fill in TW_COOKIES (and optionally the keys)
-$EDITOR thesis.yaml             # thesis: stages, keywords, orgs, weights
-$EDITOR seeds.yaml              # seeds: query bank, watchlist, github topics
-./scout-cli demo                # $0 offline end-to-end test on sample founders
-./scout-cli ui                  # the workspace without the ./start conveniences (localhost:8501)
-./scout-cli run                 # full pipeline → ./out/leads_*.csv + report_*.md
-```
-
-**Use `./scout-cli <cmd>`, not the bare `scout` console script.** On macOS, uv
-marks `.venv` hidden and CPython then skips the editable-install `.pth` after a
-dependency sync, breaking `uv run scout` with `ModuleNotFoundError`. `./scout-cli`
-runs `python -m scout.cli` from the repo root, which is immune. (If the bare
-command ever breaks: `chflags -R nohidden .venv`.) No `uv`?
-`python3.12 -m venv .venv && source .venv/bin/activate && pip install -e .`.
-
-Runs are incremental: everything fetched is cached in `~/.scout/scout.db`
-(override the location with `DB_PATH` in `.env`), and accounts scored within
-the last `--ttl-days` (default 7) are skipped, so re-running while you tune
-the thesis is fast and (in xapi mode) free. A legacy `./scout.db` in the
-working directory is migrated to the home location automatically on first run.
-
-## How judgment is enforced
-
-The three sections below are the design decisions I would defend in a
-partner meeting. Each exists because the obvious implementation was wrong in
-a way that mattered.
-
-### Evidence or nothing
-
-An LLM asked for a competitor's funding round will produce one. It is
-plausible, it is specific, and it is frequently a year stale. The failure is
-silent: a memo reading *"Deeplite | Series A (~$10M)"* looks identical
-whether that came from a press release or from the model's memory.
-
-Three layers now prevent it, escalating in strength:
-
-1. **Prompt.** No funding amount, valuation, revenue, headcount, or market
-   datapoint that was not read in the dossier or verified in *this* memo.
-   No citation-shaped phrasing — *"per analyst estimates"*, *"industry
-   consensus per Gartner"* — without a real citation. Attribution that cites
-   nothing is worse than a blank, because it reads as sourced and cannot be
-   checked.
-2. **Format.** Competitor *names* may come from model knowledge; their
-   *stage and funding* may not. Market-size inputs must be labelled
-   `*verified*` (cited) or `*analyst assumption*` (reasoning, owned as such).
-3. **Code.** A `funding_stage` arriving without a `funding_evidence` string
-   is downgraded to `unknown` and loses its amount and investors on the way
-   through. This is a model validator, so it holds regardless of what the
-   classifier returns.
-
-Layer 3 exists because layers 1 and 2 were not enough. A live run over 942
-startups tagged 20 rounds; **3 had no evidence**, one of them Perplexity at
-"Series C+" inferred from a bio that says nothing about funding. The rule
-also discards the occasional *correct* tag whose source line was left blank —
-a deliberate trade, because an unknown round costs one reclassify to recover
-while a confident wrong one is never questioned.
-
-The same instinct runs through scoring. An adversarial second pass audits the
-top verdicts against their own evidence and rewrites what the first pass
-overstated; a product claim that never traced to evidence is multiplied down;
-and the memo's Risks section is required to name *"the risk you would be
-least comfortable raising in a partner meeting."*
-
-### The thesis is a first-class object
-
-A sourcing tool's thesis changes — that is the job. The naive design stores
-it in a config file, and every score silently becomes a claim about a thesis
-that no longer exists.
-
-Scout separates a thesis's **identity** (durable) from its **version** (the
-exact weights and queries). Editing weights bumps the version; the thesis
-stays itself. That yields three properties:
-
-- **Scores name their origin.** Every startup shows *"Scored against Novel
-  Architectures · v3"*. A number without that is not interpretable.
-- **Changing the thesis marks work stale, never rewrites it.** A rewrite left
-  602 startups flagged; a single `reclassify --stale-only` brought them
-  current. Nothing rescores automatically, because rescoring costs money and
-  that call is the investor's.
-- **Prior judgments survive.** Verdicts are archived before being
-  overwritten, so *"0.20 under Edge AI, 0.75 under Novel Architectures"* is
-  still answerable — often the most useful thing a thesis change produces.
-
-The existing database had 7 configuration hashes for 4 real theses, one
-thesis fragmented across every tuning it had ever had. Splitting identity
-from version collapsed them correctly, with history intact.
-
-### Cost discipline
-
-The X API is pay-per-use against a fixed grant, which makes spend a
-correctness problem rather than an optimisation.
-
-- **The guard refuses before it spends.** Every request is pre-checked
-  against a persistent cross-run ledger using the *worst-case* cost of the
-  response. It never requests-then-checks.
-- **It never double-bills.** Retries are limited to failures that provably
-  happened before X served anything (connect errors, 429/5xx). A read
-  timeout — where the response may already have been billed — is allowed to
-  fail rather than risk paying twice.
-- **Narrow beats deep.** Cost is per result returned, so a precise query
-  matching 3 posts costs $0.045, not the $0.30 page ceiling. Precision lowers
-  the bill *and* raises the hit rate — there is no trade-off. Worst case per
-  run fell from **$30 to $3.60**; measured actual was **$1.55**.
-- **Enrichment is opt-in.** Bulk-discovered accounts don't get paid timeline
-  fetches by default; that leak would have quietly outspent the entire search
-  phase.
-
-Total spend to date across 13 runs and 942 startups: **$3.21**.
-
-## The workspace: Thesis · Startups · Longlist · Shortlist · Memos · Settings
-
-The UI (`./scout-cli ui`) is a content-first workspace, ordered like the
-funnel — define the thesis, review what sourcing found, longlist, shortlist,
-write the memo. Navigation is session-state-driven, so actions can route
-across pages (a card's **Memo** button lands on the Memos page with the memo
-being written):
-
-1. **Thesis** — how the scrape runs. The **strategy agent** front and center:
-   describe the thesis in plain language, review the proposed targeting /
-   query bank / watchlist (handles are **existence-checked** via twscrape;
-   fabrications are struck through and dropped on apply). Below: run controls
-   — the paid X API path shows a **worst-case cost estimate and requires an
-   explicit confirmation** before the Run button enables — a **Precision
-   pass** section (paid verify with the same confirm-the-cost gate), and
-   every manual knob behind disclosure. The Signals & scoring panel opens
-   with **triage insights** (how your longlist/shortlist/pass decisions
-   cluster) and can ask Claude to **suggest weight adjustments**, reviewed
-   before apply.
-2. **Startups** — what sourcing found, in two sub-pages. **Latest run** is
-   the feed: the STARTUP is the first-class object in every view — cards are
-   titled by the company (founder + company accounts folded into one entry,
-   founders as the byline); a founder whose company isn't named yet still
-   renders as a startup with a synthesized identity ("Ada Lin's stealth
-   startup"). Three tracks: **Startups** (default — launched companies),
-   **Pre-launch watch** (departures, stealth language, bio changes), and
-   **Everything**. Two time scopes: **Latest run** (default) and **All runs**
-   (the ledger — every handle ever scored, best-known state, with
-   **score-change arrows**, **New** chips, and a "seen N× since" history
-   line); a strategy filter appears once runs group into more than one
-   strategy. Cards carry the thesis-fit chip, taxonomy chips, and triage
-   buttons (**Longlist / Pass**) on the face. Details break the score fully
-   open — **Company quality Q** (every rubric dimension with its blend share,
-   the evidence citation behind each score, and unevidenced dims shown as
-   excluded rather than guessed), **Thesis fit F** with Claude's reasoning,
-   **X signals S** with per-signal bars, then the step-by-step score math —
-   plus **Adjust scoring**: slide any quality dimension or the fit, pin the
-   final score outright, attach a note; adjustments persist per startup
-   (`score_overrides`), re-enter the same math everywhere (cards, ranks,
-   exports), and show an **Adjusted** chip until cleared. Search, sort, and
-   filters live in one toolbar; a quiet banner nudges you when the last real
-   run is >24h old. **Database** is a working startup
-   CRM: one row per tracked startup across all runs (product, score with
-   Q/F/S components, stage, sector, status, history) in two modes —
-   **Browse** (row-select opens the full dossier card) and **Edit** (fill
-   Status, Notes, and your own fields inline; changes save on the spot).
-   Every startup carries **user-owned columns**: curated **Vertical**,
-   **Use case**, and **Priority** seeds (option lists editable) plus any
-   custom column you add — single/multi select, text, number, or checkbox —
-   managed (add/delete/edit options) from the **Columns** popover.
-   **Filters** cover stage, status, score, and every select column;
-   **Categorize** fills the empty AI-fillable cells for the filtered view
-   with Claude, strictly from your option lists (judgment columns like
-   Priority are manual-only; hand-set values are never touched;
-   ≈$0.05–0.15 per 100 startups). Your categorization shows as chips on
-   every card, rides into the view CSV, the pipeline CSV, and the memo
-   dossier. The raw SQLite browser (any table, full-text search, auto
-   filters, CSV, read-only SQL console) sits behind a toggle below.
-3. **Longlist** — the first cut. Everything you longlisted, score-ranked,
-   with Claude's per-dimension scoring **open on every card** (signal bars,
-   score math, thesis fit, value-add levers). Promote the best to the
-   shortlist or drop them.
-4. **Shortlist** — the working set. Stage tiles and an inline editor
-   (Shortlisted → Contacted → Meeting → Diligence → Allocated) with notes,
-   the same per-dimension scoring cards, and a one-click **pipeline CSV
-   export** (CRM-import-ready).
-5. **Memos** — a 12-section first-draft investment memo per startup:
-   **Overview · Why now · Team · Product & differentiation · Technology &
-   architecture · Traction & metrics · Competitive landscape (table) ·
-   Market sizing (arithmetic shown) · Strategic capital & acquisition
-   dynamics · Deal terms & ownership · Risks · Recommendation** (a
-   **VERDICT: PURSUE/TRACK/PASS** line with tripwires and first-call
-   questions), opening with a 3-bullet TL;DR.
-
-   The section list is opinionated about what a partner actually asks.
-   **Team** carries the most weight — at seed the team *is* the investment,
-   so it demands the specific thing in a founder's background that earns
-   them the right to build this, and names the bench gap rather than
-   padding with praise. **Risks** are severity-ranked with a retirement
-   path each, and must include the one you would least want to raise in a
-   partner meeting — the memo's job is to surface it, not to sell the deal.
-   **Deal terms** does the ownership arithmetic: at a plausible check, what
-   ownership, and what exit clears the fund.
-
-   **Deep research is the default**, because it is the only depth that
-   verifies funding and researches founders by name. Quick and Standard say
-   so in their own captions — they cannot verify, so their figures stay
-   marked `*unverified*`. Deep spends its budget on the company site, then
-   founders, then funding, then competitors (~4-8 min, ~$0.20-0.50), and
-   narrates its searches live. A real run produced **65 citations across 11
-   sources**, with every competitor's round either cited or explicitly
-   `*unverified*`.
-
-   An optional **Focus** box steers the memo ("dig into the moat"). The
-   dossier labels WHOSE pages were captured, so a founder's personal site is
-   never dressed up as product evidence. Memos are **editable in place**
-   (generation and edit each timestamped, depth + source count shown),
-   **named after the startup** (stealth identities for unnamed ones), and
-   export as **Markdown or a styled PDF**. The **AI-drafted outreach**
-   message lives below the memo.
-6. **Settings** — keys, the budget ledger, and defaults.
-
-Deal-flow state (longlist/shortlist status, notes, outreach, memos) persists
-in `scout.db`.
-
-## Stage targeting
-
-`thesis.target_stages` (e.g. `[launched]`) is the master switch — it decides
-**which search strategies run** and **how leads are scored**:
-
-| Stage | Runs these searches | Discovery | Bio search + follow-graph |
-|---|---|---|---|
-| idea | departure | — | ✓ |
-| stealth | departure, stealth, hiring | github | ✓ |
-| launched | launch, hiring | github, hn | ✓ |
-| scaling | launch | hn | — |
-
-A lead whose Claude-classified stage falls outside your target stages is scored
-× `signal_params.stage_mismatch_multiplier` (default 0.5) — so targeting
-"launched" pushes idea/stealth accounts down without hiding them. Toggle stages
-in the UI's **Targeting** tab; the preview line shows what each activates.
-
-Every score input is inspectable and editable: **Sourcing → Signals & scoring**
-exposes the weights, the calculation parameters (traction floor/saturation/
-window, convergence threshold, stage multiplier, thesis-fit weight), and the
-full Claude classification prompt. Each lead card in **Leads** tags the account
-**Founder / Startup / Other** and expands to the signal bars and the score
-computed step by step.
-
-## Sourcing architecture (v2)
-
-scout finds founders with a **person-centric, staged funnel** — the same shape
-commercial signal platforms (Harmonic, Specter) use, built from free parts:
-
-```
-WATCH ──▶ DISCOVER ──▶ FUSE ──▶ VERIFY ──▶ SCORE
-(free)      (free)     (local)  (paid, tiny)  (Claude + heuristics)
-```
-
-| Stage | What runs | Cost |
-|---|---|---|
-| **Discover — X** | Query bank (departure / stealth-intent / hiring tweets), **bio/people search** (`bio_searches` — the paid API can't do this), list members | $0 (twscrape) |
-| **Discover — GitHub** | Recent repos in `github_topics` (created <90d, ≥10 stars); owners bridged to X via their GitHub profile | $0 (`GITHUB_TOKEN` optional) |
-| **Discover — HN** | Show HN launches + "Who wants to be hired?" comments matching your sectors | $0 (keyless) |
-| **Watch** | Each run snapshots every `watchlist` investor's following list; **new follows** (vs the last snapshot) become candidates. 2+ watchers newly following the same account fires `smart_money_convergence` — the strongest X signal. Bios of known accounts are also snapshotted; intent language newly appearing fires `bio_change`. | $0 (twscrape) |
-| **Verify** | `scout verify` re-fetches the top shortlist with the official X API (fresh profile + ~10 tweets each) | ~$0.01/profile + $0.005/tweet, hard-capped |
-
-Key commands:
-
-- `scout source` — **discovery preview**: raw accounts per strategy, no scoring.
-  Use `--strategy searches,bio,graph,github,hn,lists` to test one at a time.
-- `scout run` — full pipeline (discovery → signals → Claude → score → export).
-- `scout verify --max 50` — paid hydration of the current shortlist (~$3).
-- `scout probe` — one-time ~$0.50 check of X API capabilities on your tier.
-
-Cadence: **one batched run per day** is the sweet spot — it keeps twscrape
-usage human-ish, matches the X API's 24h billing dedup, and gives follow-diffing
-a meaningful baseline. Note the graph strategy needs **two runs** before it
-yields anything (run 1 records the baseline snapshots).
-
-The `watchlist` in seeds.yaml ships with well-known AI-infra investors as
-**suggested defaults** — replace them with your own tastemakers; the quality of
-this list drives the quality of the convergence signal.
-
-## Cookie setup (twscrape — the default, free source)
-
-twscrape authenticates with cookies from a logged-in x.com browser session.
-
-1. **Use a burner account.** Scraping violates X's ToS and accounts do get
-   banned — don't risk one you care about.
-2. Log into x.com with that account in your browser.
-3. Export the x.com cookies:
-   - **Easiest:** a cookies-export extension (e.g. Cookie-Editor or "Get
-     cookies.txt LOCALLY") → export the x.com cookies as **JSON**.
-   - **Manual:** DevTools → Application → Cookies → `https://x.com`, copy the
-     `auth_token` and `ct0` values into a JSON file yourself.
-4. Save as `cookies.json` and point `TW_COOKIES` in `.env` at it.
-
-`TW_COOKIES` expects a JSON file: either the array-of-objects format the
-extensions produce (`[{"name": "auth_token", "value": "...", ...}, ...]`) or a
-flat object (`{"auth_token": "...", "ct0": "..."}`). Only `auth_token` and
-`ct0` are actually required.
-
-## Editing `thesis.yaml`
-
-All targeting lives here — the code never hardcodes keywords.
-
-| Key | What it does |
-|---|---|
-| `thesis` | One-line statement; passed to the LLM classifier as context. |
-| `target_stages` | Which company stages to hunt (`idea`/`stealth`/`launched`/`scaling`). **The master switch** — decides which searches/sources run and applies a scoring penalty to off-target leads. See [Stage targeting](#stage-targeting). |
-| `keywords` | Founder-intent phrases matched against bios ("stealth", "day 1"). Drives `bio_intent` (and `bio_change` when they newly appear). |
-| `target_bios` | Departure markers matched as **literal substrings** of the bio (case-insensitive). Include the marker in the entry itself — `"ex-OpenAI"` matches "ex-OpenAI", but a bare `"OpenAI"` would also match current employees. Fires `departure_signal`. |
-| `launch_phrases` | Launch-y tweet phrases ("launching", "waitlist", …) that gate `launch_traction`. Whole-word/phrase, case-insensitive ("day 1" won't match "day 10"). Omit the key to keep the stock list. |
-| `sectors` | Sectors you care about; LLM context + HN search terms. |
-| `disqualifiers` | Any of these in a bio → account dropped entirely (no score). |
-| `weights` | Per-signal weights for the 0–100 score (relative). |
-| `signal_params` | Tunable constants: traction floor/saturation/window, convergence full-credit threshold, off-target stage multiplier, thesis-fit weight, value-add weight. |
-| `firm_name` | The firm whose value-add leads are scored against (default: Headline). |
-| `firm_value_add` | The firm's strategic value-add levers (`key`/`label`/`description`), fed verbatim to the classifier. Ships with Headline's four levers; edit to re-target. |
-| `llm_prompt` | Optional override of the Claude classification prompt (placeholders `{thesis}` `{sectors}` `{stages}` `{firm}` `{value_add}`). Empty = built-in default. |
-
-**How the score works** (see it stepped out live in each lead card): three
-components, each 0–100 —
-**company quality** (Claude scores six evidence-backed dimensions — team,
-tech & product, market, defensibility, traction, investors — through the
-company's **B2B or B2C lens**; dimensions without evidence are omitted and
-the quality score renormalizes over what's actually evidenced),
-**thesis fit** (100 × `thesis_fit`), and
-**X signals** (`100 × Σ(weight_i × value_i) / Σ(all weights)` — smart-money
-follows, launch traction, departures). Final base =
-`Σ(w_c × component) / Σ(weights of present components)` with default weights
-**45/35/20** (`signal_params.score_weight_*`, editable in the UI). Then, when
-a verdict is attached: `× confidence`, `× 0.2` if classified not-a-founder,
-`× stage multiplier` (default 0.5) when off-target, `× value-add multiplier`
-(weight defaults to **0** — informational unless opted in), and
-`× signal_params.ungrounded_multiplier` (default 0.6) when the product claim
-never traced to real evidence — speculation sinks, verified leads don't.
-And the last word is yours: **Adjust scoring** on any card persists your own
-numbers per startup (slide quality dimensions or fit back into the same math,
-or pin the final score outright, with a note) — an **Adjusted** chip shows
-until you clear it, and rankings and CSV exports follow your numbers.
-
-**Grounded classification.** The classifier doesn't take the bio's word for
-anything: each candidate's **company website is fetched** (cached in the
-store, TTL 7 days) and the extracted product copy leads the evidence dossier
-(website > pinned tweet > tweets > GitHub > bio). Hard prompt rules forbid
-inferring the product from the founder's past employers, and when the
-evidence doesn't establish the product the verdict says so honestly (null
-sector, low confidence) instead of guessing. After scoring, the top
-`VERIFY_TOP_N` (25) verdicts get an **adversarial audit** — a second Claude
-pass that re-reads the dossier and corrects anything the evidence
-contradicts; cards show the outcome (`✓ verified · raindrop.ai`,
-`✓ corrected`, `⚠ unverifiable`). After editing the thesis, prompt, or
-weights, **`./scout-cli reclassify`** (or the Thesis-page button) re-runs
-classification + audit + scoring on the latest run's leads in minutes — no
-discovery, cache-first, so unchanged verdicts and already-fetched sites are
-free.
-
-### Headline value-add fit — which startups benefit from what Headline offers
-
-Beyond "does this startup match the thesis?", every classified lead also gets a
-**value-add fit**: would *Headline's* specific strategic value-add accelerate
-this particular startup? The firm's levers live in `thesis.yaml →
-firm_value_add` (edit them there; the classifier receives them verbatim) and
-ship pre-filled from Headline's own materials:
-
-1. **Local-to-global expansion** — autonomous local funds (US, Europe, LatAm,
-   Asia) on one global platform; benefits startups that must cross borders early.
-2. **Multi-stage follow-on capital** — $1.5–15M early checks chaining into the
-   $865M Global Growth IV fund ($20–70M from Series B); benefits
-   capital-intensive trajectories.
-3. **Data-driven growth benchmarking** — Headline's in-house systems (EVA
-   sourcing, ATHENA analytics, Searchlight, the founder-facing Deepdive);
-   benefits metrics-rich models the platform can benchmark and coach.
-4. **Sector depth & portfolio network** — fintech, commerce/consumer, B2B SaaS,
-   AI infra (Mistral AI, NGINX, Sonos, Bumble, Gopuff…); benefits startups in
-   those lanes.
-
-Each verdict returns a 0–1 `value_add_fit`, a per-lever breakdown, and a
-one-line reason. It surfaces as a **"Headline lift" chip** on lead cards (with
-per-lever bars and the reason under Details), a **sort option**, columns in the
-leads/pipeline CSVs and the Markdown report, a line in AI research briefs, and
-a chip on the phone digest. Judged independently of thesis fit: a lead can
-match the thesis yet need nothing Headline uniquely offers — and vice versa.
-
-The nine signals the heuristics emit (names must match in `weights`):
-`bio_intent`, `departure_signal`, `bio_change`, `smart_money_follow`,
-`smart_money_convergence`, `launch_traction`, `builder_evidence`,
-`github_evidence`, `source_corroboration` (2+ independent discovery strategies
-surfacing the same account).
-
-## X API budget (`--source xapi`)
-
-The official X API v2 is **pay-per-use since Feb 2026** — no free tier.
-As of mid-2026: ~$0.005 per tweet/post read, ~$0.010 per user-profile read,
-~2M reads/month cap. Our bearer token has a hard **$25 total** budget, so:
-
-- **$25 buys roughly 5,000 tweet reads or 2,500 profile reads.** A single
-  careless run can eat a big chunk of that. Treat xapi as the fallback, not
-  the default.
-- **Spend guard:** every API call is logged to a persistent ledger in
-  `~/.scout/scout.db` (it survives across runs and working directories;
-  override with `DB_PATH`). Before each call, scout checks cumulative
-  estimated spend against `XAPI_SPEND_CAP_USD` (default `20.0`, deliberately
-  under $25) and hard-stops with `BudgetExceededError` rather than exceed it.
-  Check where you stand anytime with `scout budget` (it also prints the
-  ledger path).
-- **xapi mode is search-only:** it skips list ingestion and the tastemaker
-  graph-hop (those endpoints aren't worth the spend). Only `seeds.yaml →
-  searches` are used.
-- Costs are *estimates* computed client-side from the per-read prices in
-  `.env` / `config.py` — reconcile against the X developer console if you're
-  pushing close to the cap.
-
-## CLI reference
-
-Invoke as `./scout-cli <command>` (see the Quickstart note on why).
-
-```
-strategy     AI strategy agent: thesis in plain language → full sourcing config
-  "description"            the thesis, quoted
-  --apply                  write the proposal to thesis.yaml + seeds.yaml
-
-run          Full pipeline: discover → heuristics → Claude → score → export
-  --source twscrape|xapi   default twscrape; xapi = paid official API, search-only
-  --max-accounts N         cap accounts ingested per run (default 500)
-  --min-score N            drop leads scoring below N (0–100)
-  --ttl-days N             skip accounts scored within the last N days (default 7)
-
-source       Discovery PREVIEW — raw accounts per strategy, no scoring/LLM/cost
-  --strategy searches,bio,graph,github,hn,lists   subset to test (default: stage-aware)
-  --max-accounts N
-
-reclassify   Re-run classification + audit + scoring. No discovery, no X spend —
-             cache-first, so this is the fast loop for iterating on a thesis
-  --all                    every startup across the whole ledger, not just the last run
-  --stale-only             ONLY startups scored under an older version of this thesis
-                           (the cheap way to bring the database current after a retune)
-  --top N / --skip-verify
-
-thesis       Manage the thesis library — what you source and score against
-  list                     every thesis with its runs, startups, version, staleness
-  show <id>                statement, version history, and what is stale
-  new <name> / use <id> / clone <id> <name> / archive <id>
-
-inspect <handle>   Score one account and print the per-signal breakdown (@ optional)
-
-verify       Hydrate the current shortlist with FRESH paid X API data and re-score
-  --max N            how many top leads to hydrate (default 50)
-  --tweets N         tweets to pull per account (default 10)
-  --discovered       hydrate recently-discovered accounts instead of the scored run
-
-probe        One-time ~$0.50 empirical check of X API capabilities on your tier
-demo         $0 offline end-to-end test on built-in sample founders
-export       Re-export the last run from the cache DB (--format md|csv|both)
-  --pipeline               export the deal flow (status, notes, outreach, memos, your database columns) instead
-budget       Cumulative X API spend vs. XAPI_SPEND_CAP_USD
-ui           Launch the Thesis · Startups · Longlist · Shortlist · Memos · Settings workspace
-```
-
-**Efficiency:** free-source tweet fetches run concurrently
-(`TWEET_FETCH_CONCURRENCY`, default 8; paid xapi stays sequential so the budget
-guard can't be raced). Claude verdicts are cached in `scout.db` keyed by a
-fingerprint of bio + tweets + thesis + model (`VERDICT_TTL_DAYS`, default 14),
-so re-runs while tuning weights are free; classification runs
-`LLM_CONCURRENCY` batches in parallel and is capped to the top
-`LLM_MAX_CANDIDATES` (default 150) accounts by heuristic pre-score.
-Sourcing itself has a hard wall-clock cap, `SOURCING_TIME_BUDGET_S`
-(default 480 = 8 minutes): X rate-limits the follow-graph endpoint hard and
-twscrape sleeps through 15-minute reset windows, so when the budget expires
-the run simply continues with whatever was gathered (search legs run first,
-the graph leg last, so the highest-yield legs get budget priority).
-
-Outputs land in `./out/`: `leads_YYYYMMDD.csv` (full columns) and
-`report_YYYYMMDD.md` (top-20 cards — the thing you paste into the one-pager).
-Top 10 also prints to the terminal.
-
-## Phone digest (GitHub Pages)
-
-`./scout-cli publish --push` renders the deal flow into a single mobile-first
-page (launched startups grouped by company, pre-launch watch, briefs, client-
-side search) and pushes it to the public repo named in `DIGEST_REPO`, which
-GitHub Pages serves. On your phone, open the page in Safari → Share →
-**Add to Home Screen** — it installs like an app (Scout icon, full-screen)
-and refreshes every time you publish after a scan.
-
-Read-only by design: triage lives in the desktop app. The page contains only
-lead data (never keys, config, or the watchlist), is `noindex`, and lives in
-a separate repo so the code stays private. Remember the URL is still public —
-anyone with the link can read your thesis statement and lead cards.
-
-## Operational notes
-
-Deliberate single-user, single-machine assumptions — fine for an internal
-tool, worth knowing about:
-
-- **Storage is one SQLite file** (`~/.scout/scout.db`): caches, the lead
-  ledger, deal flow, your memos, manual score adjustments, database columns +
-  categorization, and the spend ledger. Back it up — the hand-entered layer
-  (memos, overrides, attrs) is not reproducible from a re-run.
-- **The spend ledger is per-machine, not per-token** — running scout on a
-  second machine starts a fresh ledger against the same X API budget.
-- **Secrets live in `.env`** in the project root, never in the DB or UI.
-- **The UI commits to one light appearance** (set in `.streamlit/config.toml`):
-  Streamlit pins its native widgets to a single theme once one is configured,
-  so scout ships one deterministic look rather than a half-themed dark mode.
-- **Agent calls run inline in the UI** with hard timeouts (strategy 120s,
-  briefs/weights 60s, auto-categorize 90s, memos 90s/150s/300s per request by
-  depth — a deep memo may chain a few requests); transient API errors retry
-  with backoff, timeouts fail fast, and a failed generation never overwrites
-  a stored memo. Streamlit's stop button is the cancel path.
-- **Runs record provenance** (`runs` table: strategy fingerprint of
-  thesis+seeds) — identical settings group as one strategy in the Leads view.
-
-## Known limitations
-
-- **ToS risk:** scraping X via twscrape is against X's Terms of Service.
-  Accounts get banned. Use a burner, keep `--max-accounts` sane.
-- **No graph-hop in xapi mode:** the `smart_money_follow` signal only works
-  with `--source twscrape`; via the official API it always scores 0.
-- **List ingestion is best-effort:** scout fetches the actual membership
-  roll (twscrape's `list_members`); if that call fails it falls back to
-  authors of recent tweets on the list timeline — a lossier proxy that
-  misses members who haven't tweeted lately.
-- **Engagement search operators are twscrape-only:** `min_faves:N`,
-  `min_retweets:N`, `min_replies:N` in `seeds.yaml` searches are rejected by
-  the X API v2 search endpoint, so xapi mode strips them from the query
-  (a dim note shows what was actually sent).
-- **Pinned tweets aren't always seen by Claude:** only a pinned tweet that
-  happens to be among the cached recent tweets is included in the LLM
-  context; older pinned tweets are not fetched separately.
-- **xapi accounts are scored from search-matched tweets:** in xapi mode the
-  tweets that matched the search double as the account's cached timeline
-  (cache-first — no extra paid timeline call during runs), so
-  `launch_traction` sees only those tweets.
-- **`smart_money_follow` is coarse:** it saturates at 3 tastemaker follows,
-  and "recent follows" is approximated by each tastemaker's ~100
-  most-recent follows.
-- **LLM is optional:** no `ANTHROPIC_API_KEY` → heuristics-only mode
-  (scout says so at runtime). You lose stage/sector/summary/account-type
-  enrichment and the confidence multiplier, but ranking still works. Outreach
-  drafting falls back to a fill-in template, memos fall back to a data-only
-  skeleton (never overwriting a real memo), and auto-categorize is
-  unavailable without a key.
-- **Bio/people search is twscrape-only:** the paid X API has no bio-search
-  endpoint (`/2/users/search` returned 403 on our tier — see `scout probe`),
-  so `bio_searches` and the follow-graph only run under `--source twscrape`.
-- **GitHub identity bridge is partial:** GitHub discovery only links an owner
-  to X when they've filled in their profile's Twitter/X field; otherwise the
-  founder is recorded as an *unlinked lead* (surfaced in `scout source`) for
-  manual lookup. Star-velocity diffing is a noted future hook (needs scheduled
-  runs). LinkedIn adapter and `--watch` remain unbuilt stubs.
-- **Pricing drift:** the X API figures above are as of mid-2026 and will
-  change; the per-read prices are configurable in `.env` if they do.
