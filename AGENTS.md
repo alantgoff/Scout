@@ -254,12 +254,24 @@ shortlist / pass, persisted in the `pipeline` table as statuses `longlisted` /
    use IT, never call either path directly from UI/export code.
    `fit = 100 × llm.thesis_fit`.
 2. `base = Σ(score_weight_c × component_c) / Σ(weights of PRESENT components)`
-   — the 45/35/20 blend (`signal_params.score_weight_quality/_fit/_signals`),
-   renormalized so a lead is never punished for a component nobody could
-   evidence. No verdict → signals only (demo unchanged).
-3. `× llm.confidence` when a verdict is attached.
+   — the blend (`signal_params.score_weight_quality/_fit/_signals`, currently
+   35/50/15), renormalized so a lead is never punished for a component nobody
+   could evidence. No verdict → signals only (demo unchanged). Fit outweighs
+   quality deliberately: a well-built off-thesis company used to outrank an
+   on-thesis one, which is backwards for thesis-driven sourcing.
+3. `× llm.confidence` when a verdict is attached. **Known bias, deliberately
+   not "fixed":** confidence measures how legible an account was, and stealth
+   companies are inherently less legible — in one run they averaged 0.57
+   against 0.83–0.93 for launched/scaling while carrying the HIGHEST mean
+   thesis fit. Flooring it was tried and reverted: it lifts every lead whose
+   product claim never traced to evidence, which is exactly the Raindrop
+   failure `test_stealth_pedigree_founder_sinks_despite_team_score` guards.
+   A real fix must separate "stealthy" from "unevidenced", not blur both.
 4. `× 0.2` when `llm.is_founder` is false (kills corporate/commentator accounts).
-5. `× signal_params.stage_mismatch_multiplier` (0.5) when `llm.stage` ∉ `target_stages`.
+5. `× signal_params.stage_mismatch_multiplier` (0.3) when `llm.stage` ∉
+   `target_stages` — an off-stage company must be ~3× better to rank
+   alongside an on-stage one. Demoted, not deleted: it still reads as market
+   signal.
 6. `× ((1 − w) + w × llm.value_add_fit)` (w = `signal_params.value_add_weight`,
    default **0** — opt-in). The value-add dimension is otherwise informational.
 7. `× signal_params.ungrounded_multiplier` (0.6) when the product claim never
@@ -322,7 +334,10 @@ in the DB keep the model's numbers; overrides live only in their own table.
 |---|---|
 | accounts, tweets | fetch cache (incremental runs) |
 | leads | saved scored runs (run_id keyed) |
-| runs | run provenance: source + strategy_hash (thesis+seeds fingerprint) + config snapshot — groups runs into "strategies" |
+| runs | run provenance: source + strategy_hash + **thesis_id** (durable identity) + **thesis_version** (the tuning fingerprint) + config snapshot. The id/version split is the whole point: `strategy_fingerprint` hashes the entire config, so every weight tweak minted a new "strategy" and one thesis fragmented across all of them (the live DB had 7 hashes for 4 theses) |
+| theses | the thesis registry: id, name, statement, current_version, is_active, archived_at. `backfill_thesis_ids()` recovers identity for pre-v8 runs by grouping on thesis_statement — the one field that stays put while weights churn |
+| thesis_versions | one row per distinct tuning of a thesis, so "v3" is nameable and staleness is computable (`stale_handles`) |
+| llm_verdict_history | **prior verdicts**, appended by `record_verdict` BEFORE it overwrites. `llm_verdicts` is one row per handle, so rescoring under a new thesis would otherwise destroy the old judgment — and "0.20 under Edge AI, 0.75 under Novel Architectures" is the most useful thing a thesis change produces |
 | searches | per-query TTL cache (xapi mode: repeat runs free) |
 | follow_edges, follow_meta | investor follow-graph snapshots + per-watcher baseline |
 | bio_snapshots | bio history for bio_change detection |
@@ -367,6 +382,20 @@ silently widen its input set to all-time).
   (twscrape/github/hn) never touch the ledger. Corollary: paid adapters keep
   `parallel_safe = False` — tweet fetches fan out ONLY for free adapters, so
   concurrent calls can never race past the budget pre-check.
+- **Never assert a figure the system did not read.** The whole product rests
+  on this. A `funding_stage` without `funding_evidence` is downgraded to
+  `unknown` by a model validator in `models.py` — enforced in code, not
+  merely asked for in a prompt, because asking was tried and 3 of 20 tagged
+  rounds came back unevidenced (one recalled Perplexity as "Series C+" from
+  a bio reading "Everything is Computer."). The memo prompt carries the same
+  ban at EVERY depth, including the tiers that cannot research: the format
+  demands a competitor funding column, so without the ban the model fills it
+  from memory. If you add a field that states a number, add the evidence
+  field and the validator alongside it.
+- **Two different "stage" concepts, never conflate them.** `stage` is
+  lifecycle (idea/stealth/launched/scaling — has it shipped). `funding_stage`
+  is the cap table (seed/series_a/… — who priced it). A launched company can
+  be bootstrapped or Series B.
 - **Pydantic models are the only cross-module data structures** (models.py).
 - **Adapters only fetch.** Enrichment fields (`recent_followed_by`, `bio_changed`,
   `github_repo`) are set by `cli._enrich_accounts` from store history, never by
@@ -460,6 +489,37 @@ silently widen its input set to all-time).
   prompt change auto-invalidated the verdict cache). The dead
   `thesis_fit_weight` key in thesis.yaml is ignored by pydantic and drops on
   the next Settings save.
+- v8 additions (all validated live on the 942-startup ledger):
+  - **Thesis as a first-class object.** Identity (`thesis.id`/`name`, durable)
+    split from version (`thesis_version`, the tuning fingerprint, which
+    deliberately EXCLUDES id/name — hashing them marked all 602 startups
+    stale the moment a thesis was named). `theses` / `thesis_versions` /
+    `llm_verdict_history` tables, `scout thesis list|show|new|use|clone|
+    archive`, `reclassify --stale-only`, a thesis library in `theses/`,
+    provenance rendered in `_score_detail_html` (shared by the detail pane
+    and the Database dossier, so they cannot drift).
+  - **Funding stage** (`funding_stage` + amount/investors/evidence), evidence-
+    gated by a model validator. 17 of 942 tagged, every one cited.
+  - **Memo v3:** 12 sections (added Why now, Team, Traction, Deal terms,
+    Risks), deep-by-default, research budget 8/10 → 14/16 spent on founders
+    BEFORE competitors, and the unverified-figure ban at every depth. A live
+    run produced 65 citations across 11 sources.
+  - **`_rank_candidates` now classifies signal-less SEARCH leads.** The
+    deterministic signals all describe a PERSON (bio_intent reads a personal
+    bio, departure_signal wants an ex-employer), so the company-account query
+    bank was feeding the pipeline leads that fire none of them — 220 of 645
+    were dropped before Claude. One (@BiggerMax19, no bio, 0 followers)
+    classified at fit 0.70. github/hn bulk discovery stays excluded.
+- **Known gaps / next threads:**
+  - The confidence-multiplier bias against stealth (see §5 step 3) is real and
+    unfixed. It needs a fix that distinguishes "stealthy" from "unevidenced".
+  - Per-thesis verdicts (one company scored under several theses at once, for
+    routing to the right partner) are deliberately out of scope — it needs an
+    `llm_verdicts` PK migration and multiplies Claude spend per thesis.
+    `llm_verdict_history` is the stepping stone.
+  - Memos now run ~3,200 words against a 1,100–1,700 target. Denser and
+    better-sourced, not padded — but narrow the target rather than cutting
+    sections if that matters.
 - **Waiting on the user:** X account cookies (`TW_COOKIES`) to activate the X
   discovery legs (query bank, bio search, follow-graph); replacing the suggested
   default `watchlist` in seeds.yaml with Headline's own investors.

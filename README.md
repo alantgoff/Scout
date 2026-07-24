@@ -1,22 +1,72 @@
-# scout
+# Scout
 
-Startup-sourcing engine for a VC analyst. **The primary output is real,
-launched startups** — discovered through their founders' and their own X
-accounts (launch announcements, GitHub, Hacker News, investor follow-graph),
-classified fine-grained (stage, sector/subsector, business model, **company
-name + URL**, tags, and an explicit 0–1 **thesis fit**), and presented as
-companies: a founder account and the startup's account fold into one entry.
-The secondary, completeness track is a **pre-launch watch**: people the
-signals say are about to leave a lab, go stealth, or launch. Built-in agents do
-the heavy lifting — a **strategy agent** turns a plain-language thesis into
-the full sourcing configuration, and an **investment-memo agent** writes a
-full multi-section memo per startup (product, tech, competition, market
-sizing, acquisition dynamics, recommendation), editable in the app and
-exportable as PDF. CLI + a Streamlit UI in Headline design language
-(headline.com). Internal tool — scrappy on purpose.
+**A thesis-driven sourcing engine: from a thesis in plain English to an
+investment memo, with every number traceable to evidence.**
 
-> **Agents:** read [`AGENTS.md`](AGENTS.md) first — it's the fast map of the
-> codebase, data flow, invariants, and gotchas.
+Scout watches X, GitHub, and Hacker News for companies matching a stated
+investment thesis, scores them against it, and writes the first-draft memo.
+It is built around one conviction: **a sourcing tool that guesses is worse
+than no sourcing tool**, because a wrong number is acted on with the same
+confidence as a right one. Most of the engineering here is spent refusing to
+assert things it cannot evidence.
+
+### Where it stands today
+
+| | |
+|---|---|
+| Startups in the database | **942** across 13 runs |
+| Classified with a thesis-fit score | **643** |
+| Strong fit (≥ 70%) | **28** |
+| Adversarially audited | 43 — **every one returned corrections** |
+| Funding rounds tagged | 17, **all evidence-cited** |
+| Theses tracked in parallel | 4, with version history |
+| X API spend | **$3.21** of a $25 grant |
+
+That audit row is the honest headline: when a second pass checks the first
+pass against its own evidence, it finds something to fix every time. That is
+the argument for the audit existing, and the reason nothing here is presented
+as certain when it isn't.
+
+### The three ideas worth your time
+
+**1. Evidence or nothing.** Every figure a partner might repeat in a meeting —
+funding round, competitor's raise, market size — must trace to something the
+system actually read. A funding round with no cited source is *discarded in
+code*, not merely discouraged in a prompt ([why](#evidence-or-nothing)). A
+live run tagged Perplexity "Series C+" from a bio reading *"Everything is
+Computer."*; that class of error now cannot reach the output.
+
+**2. A thesis is an object, not a config file.** Change your thesis and every
+score computed under the old one is marked stale rather than silently
+reinterpreted. Scores name the thesis and version that produced them
+("Scored against Novel Architectures · v3"), and companies stay attributed to
+the thesis that surfaced them ([why](#the-thesis-is-a-first-class-object)).
+
+**3. Cost is a designed constraint.** The X API is pay-per-use. The spend
+guard refuses a request *before* making it, never retries anything that might
+have already been billed, and caps a full run at **$3.60** — down from $30 —
+by buying breadth through many narrow queries rather than one deep page
+([why](#cost-discipline)).
+
+### Try it in 30 seconds
+
+```bash
+git clone https://github.com/alantgoff/X-Sourcing-Tool.git scout && cd scout
+./start
+```
+
+No API keys needed to look around — it seeds a sample dataset and opens the
+workspace. macOS: double-click **`Scout.command`** in Finder instead.
+
+- **A finished memo** is at [`out/memo_Walden_Robotics.pdf`](out/) — or open
+  Memos in the app and read Octen's.
+- **The scoring is legible**: click any startup, then "How it scored" — every
+  point is attributed, and the arithmetic is shown.
+
+---
+
+> **Working on the code?** [`AGENTS.md`](AGENTS.md) is the map — architecture,
+> data flow, invariants, and the gotchas that will bite you.
 
 ## Open the app
 
@@ -55,6 +105,94 @@ Runs are incremental: everything fetched is cached in `~/.scout/scout.db`
 the last `--ttl-days` (default 7) are skipped, so re-running while you tune
 the thesis is fast and (in xapi mode) free. A legacy `./scout.db` in the
 working directory is migrated to the home location automatically on first run.
+
+## How judgment is enforced
+
+The three sections below are the design decisions I would defend in a
+partner meeting. Each exists because the obvious implementation was wrong in
+a way that mattered.
+
+### Evidence or nothing
+
+An LLM asked for a competitor's funding round will produce one. It is
+plausible, it is specific, and it is frequently a year stale. The failure is
+silent: a memo reading *"Deeplite | Series A (~$10M)"* looks identical
+whether that came from a press release or from the model's memory.
+
+Three layers now prevent it, escalating in strength:
+
+1. **Prompt.** No funding amount, valuation, revenue, headcount, or market
+   datapoint that was not read in the dossier or verified in *this* memo.
+   No citation-shaped phrasing — *"per analyst estimates"*, *"industry
+   consensus per Gartner"* — without a real citation. Attribution that cites
+   nothing is worse than a blank, because it reads as sourced and cannot be
+   checked.
+2. **Format.** Competitor *names* may come from model knowledge; their
+   *stage and funding* may not. Market-size inputs must be labelled
+   `*verified*` (cited) or `*analyst assumption*` (reasoning, owned as such).
+3. **Code.** A `funding_stage` arriving without a `funding_evidence` string
+   is downgraded to `unknown` and loses its amount and investors on the way
+   through. This is a model validator, so it holds regardless of what the
+   classifier returns.
+
+Layer 3 exists because layers 1 and 2 were not enough. A live run over 942
+startups tagged 20 rounds; **3 had no evidence**, one of them Perplexity at
+"Series C+" inferred from a bio that says nothing about funding. The rule
+also discards the occasional *correct* tag whose source line was left blank —
+a deliberate trade, because an unknown round costs one reclassify to recover
+while a confident wrong one is never questioned.
+
+The same instinct runs through scoring. An adversarial second pass audits the
+top verdicts against their own evidence and rewrites what the first pass
+overstated; a product claim that never traced to evidence is multiplied down;
+and the memo's Risks section is required to name *"the risk you would be
+least comfortable raising in a partner meeting."*
+
+### The thesis is a first-class object
+
+A sourcing tool's thesis changes — that is the job. The naive design stores
+it in a config file, and every score silently becomes a claim about a thesis
+that no longer exists.
+
+Scout separates a thesis's **identity** (durable) from its **version** (the
+exact weights and queries). Editing weights bumps the version; the thesis
+stays itself. That yields three properties:
+
+- **Scores name their origin.** Every startup shows *"Scored against Novel
+  Architectures · v3"*. A number without that is not interpretable.
+- **Changing the thesis marks work stale, never rewrites it.** A rewrite left
+  602 startups flagged; a single `reclassify --stale-only` brought them
+  current. Nothing rescores automatically, because rescoring costs money and
+  that call is the investor's.
+- **Prior judgments survive.** Verdicts are archived before being
+  overwritten, so *"0.20 under Edge AI, 0.75 under Novel Architectures"* is
+  still answerable — often the most useful thing a thesis change produces.
+
+The existing database had 7 configuration hashes for 4 real theses, one
+thesis fragmented across every tuning it had ever had. Splitting identity
+from version collapsed them correctly, with history intact.
+
+### Cost discipline
+
+The X API is pay-per-use against a fixed grant, which makes spend a
+correctness problem rather than an optimisation.
+
+- **The guard refuses before it spends.** Every request is pre-checked
+  against a persistent cross-run ledger using the *worst-case* cost of the
+  response. It never requests-then-checks.
+- **It never double-bills.** Retries are limited to failures that provably
+  happened before X served anything (connect errors, 429/5xx). A read
+  timeout — where the response may already have been billed — is allowed to
+  fail rather than risk paying twice.
+- **Narrow beats deep.** Cost is per result returned, so a precise query
+  matching 3 posts costs $0.045, not the $0.30 page ceiling. Precision lowers
+  the bill *and* raises the hit rate — there is no trade-off. Worst case per
+  run fell from **$30 to $3.60**; measured actual was **$1.55**.
+- **Enrichment is opt-in.** Bulk-discovered accounts don't get paid timeline
+  fetches by default; that leak would have quietly outspent the entire search
+  phase.
+
+Total spend to date across 13 runs and 942 startups: **$3.21**.
 
 ## The workspace: Thesis · Startups · Longlist · Shortlist · Memos · Settings
 
@@ -122,26 +260,40 @@ being written):
    (Shortlisted → Contacted → Meeting → Diligence → Allocated) with notes,
    the same per-dimension scoring cards, and a one-click **pipeline CSV
    export** (CRM-import-ready).
-5. **Memos** — the full investment memo per startup: **Overview · Product
-   & differentiation · Technology & architecture · Competitive landscape
-   (table) · Market sizing (arithmetic shown) · Strategic capital &
-   acquisition dynamics (named acquirers, tuck-in vs. platform, exit
-   sizing) · Recommendation** (a **VERDICT: PURSUE/TRACK/PASS** line with
-   tripwires and first-call questions), opening with a 3-bullet TL;DR.
-   Pick the **research depth** per memo: **Quick** (dossier only, ~30s,
-   ~$0.02), **Standard** (+ a multi-page crawl of the company site —
-   about/product/pricing/etc., cache-first — ~1-2 min, ~$0.05), or **Deep
-   research** (Claude searches the live web with Anthropic's server-side
-   `web_search`/`web_fetch`: finds the real company site when the on-file
-   URL is the founder's personal page, verifies funding and competitors,
-   and cites a **Sources** section — ~3-6 min, ~$0.15-0.40; the run
-   narrates its searches live). An optional **Focus** box steers the memo
-   ("dig into the moat"). The dossier labels WHOSE pages were captured, so
-   a founder's personal site is never dressed up as product evidence.
-   Memos are **editable in place** (generation and edit each timestamped,
-   depth + source count shown), **named after the startup** (stealth
-   identities for unnamed ones), and export as **Markdown or a styled
-   PDF**. The **AI-drafted outreach** message lives below the memo.
+5. **Memos** — a 12-section first-draft investment memo per startup:
+   **Overview · Why now · Team · Product & differentiation · Technology &
+   architecture · Traction & metrics · Competitive landscape (table) ·
+   Market sizing (arithmetic shown) · Strategic capital & acquisition
+   dynamics · Deal terms & ownership · Risks · Recommendation** (a
+   **VERDICT: PURSUE/TRACK/PASS** line with tripwires and first-call
+   questions), opening with a 3-bullet TL;DR.
+
+   The section list is opinionated about what a partner actually asks.
+   **Team** carries the most weight — at seed the team *is* the investment,
+   so it demands the specific thing in a founder's background that earns
+   them the right to build this, and names the bench gap rather than
+   padding with praise. **Risks** are severity-ranked with a retirement
+   path each, and must include the one you would least want to raise in a
+   partner meeting — the memo's job is to surface it, not to sell the deal.
+   **Deal terms** does the ownership arithmetic: at a plausible check, what
+   ownership, and what exit clears the fund.
+
+   **Deep research is the default**, because it is the only depth that
+   verifies funding and researches founders by name. Quick and Standard say
+   so in their own captions — they cannot verify, so their figures stay
+   marked `*unverified*`. Deep spends its budget on the company site, then
+   founders, then funding, then competitors (~4-8 min, ~$0.20-0.50), and
+   narrates its searches live. A real run produced **65 citations across 11
+   sources**, with every competitor's round either cited or explicitly
+   `*unverified*`.
+
+   An optional **Focus** box steers the memo ("dig into the moat"). The
+   dossier labels WHOSE pages were captured, so a founder's personal site is
+   never dressed up as product evidence. Memos are **editable in place**
+   (generation and edit each timestamped, depth + source count shown),
+   **named after the startup** (stealth identities for unnamed ones), and
+   export as **Markdown or a styled PDF**. The **AI-drafted outreach**
+   message lives below the memo.
 6. **Settings** — keys, the budget ledger, and defaults.
 
 Deal-flow state (longlist/shortlist status, notes, outreach, memos) persists
@@ -355,6 +507,18 @@ run          Full pipeline: discover → heuristics → Claude → score → exp
 source       Discovery PREVIEW — raw accounts per strategy, no scoring/LLM/cost
   --strategy searches,bio,graph,github,hn,lists   subset to test (default: stage-aware)
   --max-accounts N
+
+reclassify   Re-run classification + audit + scoring. No discovery, no X spend —
+             cache-first, so this is the fast loop for iterating on a thesis
+  --all                    every startup across the whole ledger, not just the last run
+  --stale-only             ONLY startups scored under an older version of this thesis
+                           (the cheap way to bring the database current after a retune)
+  --top N / --skip-verify
+
+thesis       Manage the thesis library — what you source and score against
+  list                     every thesis with its runs, startups, version, staleness
+  show <id>                statement, version history, and what is stale
+  new <name> / use <id> / clone <id> <name> / archive <id>
 
 inspect <handle>   Score one account and print the per-signal breakdown (@ optional)
 
