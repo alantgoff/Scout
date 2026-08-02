@@ -182,10 +182,12 @@ def _fingerprint(
     thesis: Thesis,
     settings: Settings,
     site: SitePage | None = None,
+    system_prompt: str | None = None,
 ) -> str:
     """Stable hash of everything a verdict depends on. Any change — new bio,
     new tweets, edited thesis/prompt, different model, a changed website —
-    invalidates the cache."""
+    invalidates the cache. `system_prompt` lets batch callers render the
+    (identical) prompt once instead of re-rendering it per candidate."""
     site_text_hash = (
         hashlib.sha256(site.text.encode("utf-8")).hexdigest()
         if site is not None and site.text
@@ -195,7 +197,7 @@ def _fingerprint(
         [
             account.bio,
             "\x1e".join(t.id for t in tweets[:RECENT_TWEETS]),
-            _system_prompt(thesis),
+            system_prompt if system_prompt is not None else _system_prompt(thesis),
             settings.claude_model,
             account.website or "",
             site_text_hash,
@@ -448,10 +450,12 @@ def classify(
     fresh: list[tuple[Account, list[Tweet]]] = []
     fingerprints: dict[str, str] = {}
     cache_hits = 0
+    system_prompt = _system_prompt(thesis)  # identical for every candidate
     for account, tweets in candidates:
         key = account.handle.lstrip("@").lower()
         fingerprints[key] = _fingerprint(account, tweets, thesis, settings,
-                                         sites.get(key))
+                                         sites.get(key),
+                                         system_prompt=system_prompt)
         cached = (
             store.cached_verdict(key, fingerprints[key], settings.verdict_ttl_days)
             if store is not None
@@ -472,7 +476,6 @@ def classify(
         return results
 
     client = anthropic.Anthropic(api_key=settings.anthropic_api_key)
-    system_prompt = _system_prompt(thesis)
     batch_size = max(1, settings.classify_batch_size)
     batches = [fresh[i : i + batch_size] for i in range(0, len(fresh), batch_size)]
     workers = max(1, min(settings.llm_concurrency, len(batches)))
@@ -669,6 +672,9 @@ def verify_leads(
     sites = sites or {}
     client = anthropic.Anthropic(api_key=settings.anthropic_api_key)
     system = _verify_system(thesis)
+    # The CLASSIFIER prompt (not the audit prompt) keys the verdict cache —
+    # rendered once here rather than per corrected lead.
+    classify_prompt = _system_prompt(thesis)
     if progress is not None:
         progress(0, len(targets))
 
@@ -717,6 +723,7 @@ def verify_leads(
                     fingerprint = _fingerprint(
                         lead.account, tweets_by_handle.get(key, []),
                         thesis, settings, sites.get(key),
+                        system_prompt=classify_prompt,
                     )
                     store.record_verdict(
                         key, fingerprint, lead.llm,

@@ -38,7 +38,11 @@ def _term_pattern(term: str) -> str:
     return prefix + re.escape(term) + suffix
 
 
+@lru_cache(maxsize=512)
 def _keyword_pattern(term: str) -> re.Pattern[str]:
+    """Cached per term: these are matched against every candidate's bio, and
+    rebuilding the pattern per account × keyword was pure rework (thesis
+    keyword lists are small and fixed for the life of a run)."""
     return re.compile(_term_pattern(term), re.IGNORECASE)
 
 
