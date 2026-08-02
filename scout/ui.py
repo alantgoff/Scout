@@ -948,35 +948,95 @@ thesis = load_thesis(THESIS_PATH)
 seeds = load_seeds(SEEDS_PATH)
 store = Store(Path(settings.db_path), cross_thread=True)
 
-leads = store.load_latest_leads()
-pipeline = store.all_pipeline()
-counts = store.pipeline_counts()
-# The ledger is the person-centric view: best-known state per handle across
-# ALL runs. It backs the "All runs" scope and — always — the Longlist,
-# Shortlist, and Memos pages, so a triaged lead never degrades just because
-# it missed the latest run.
-latest_is_demo = bool(leads) and all(x.account.source == "demo" for x in leads)
-ledger = store.load_lead_ledger(include_demo=latest_is_demo)
-
 # --- thesis provenance ------------------------------------------------------
 # Runs recorded before thesis identity existed carry only a strategy hash;
 # backfilling on load means the pickers and provenance lines are populated for
 # an existing database without a migration step the investor has to run.
-store.backfill_thesis_ids()
+# Gated to once per session per thesis tuning: Streamlit re-executes this
+# script on EVERY interaction, and the backfills (window-function scans) plus
+# the registry upsert are pure rework within an unchanged session.
 ACTIVE_THESIS_ID = ensure_thesis_id(thesis)
 ACTIVE_VERSION = thesis_version(thesis, seeds)
-# Naming a thesis that has already been running must not strand its history
-# under the slug the backfill derived from its statement.
-store.adopt_history(ACTIVE_THESIS_ID, thesis.thesis)
-store.backfill_verdict_provenance()
-store.upsert_thesis(
-    ACTIVE_THESIS_ID,
-    name=thesis.name or ACTIVE_THESIS_ID,
-    statement=thesis.thesis,
-    version=ACTIVE_VERSION,
-    make_active=True,
-)
+if st.session_state.get("thesis_synced") != (ACTIVE_THESIS_ID, ACTIVE_VERSION):
+    store.backfill_thesis_ids()
+    # Naming a thesis that has already been running must not strand its
+    # history under the slug the backfill derived from its statement.
+    store.adopt_history(ACTIVE_THESIS_ID, thesis.thesis)
+    store.backfill_verdict_provenance()
+    store.upsert_thesis(
+        ACTIVE_THESIS_ID,
+        name=thesis.name or ACTIVE_THESIS_ID,
+        statement=thesis.thesis,
+        version=ACTIVE_VERSION,
+        make_active=True,
+    )
+    st.session_state["thesis_synced"] = (ACTIVE_THESIS_ID, ACTIVE_VERSION)
 _THESIS_ROWS = store.list_theses()
+
+
+def _db_stamp() -> tuple:
+    """Cache invalidator for the workspace loads: any committed write —
+    from this session's triage clicks or a CLI run in another process —
+    touches the DB file's mtime/size (the -wal too, if journaling ever
+    changes). The db path is included so tests on separate databases can
+    never share a cache entry."""
+    parts: list = [str(store.db_path)]
+    for suffix in ("", "-wal"):
+        try:
+            stat = os.stat(str(store.db_path) + suffix)
+            parts += [stat.st_mtime_ns, stat.st_size]
+        except OSError:
+            parts += [0, 0]
+    return tuple(parts)
+
+
+@st.cache_data(show_spinner=False, max_entries=4)
+def _load_workspace(stamp: tuple, thesis_id: str, version: str):
+    """Every heavy read the page needs, in one cached unit. On cache hits
+    (any interaction that didn't write — nav, filters, selections) this
+    skips the ledger window query and re-parsing ~every stored lead's JSON,
+    which dominated per-click latency. cache_data returns a fresh copy per
+    call, so the in-place override mutations below stay rerun-local."""
+    leads = store.load_latest_leads()
+    latest_is_demo = bool(leads) and all(x.account.source == "demo" for x in leads)
+    return (
+        leads,
+        latest_is_demo,
+        # The ledger is the person-centric view: best-known state per handle
+        # across ALL runs. It backs the "All runs" scope and — always — the
+        # Longlist, Shortlist, and Memos pages, so a triaged lead never
+        # degrades just because it missed the latest run.
+        store.load_lead_ledger(include_demo=latest_is_demo),
+        store.all_pipeline(),
+        store.all_overrides(),
+        store.all_attrs(),
+        store.stale_handles(thesis_id, version),
+    )
+
+
+@st.cache_data(show_spinner=False, max_entries=8)
+def _load_filtered_ledger(
+    stamp: tuple,
+    include_demo: bool,
+    strategy_hash: str | None,
+    thesis_id: str | None,
+) -> list[LedgerEntry]:
+    """The thesis/version-filtered ledger for the All-runs scope, cached the
+    same way as the workspace loads (each filter combination is one entry)."""
+    return store.load_lead_ledger(
+        include_demo=include_demo,
+        strategy_hash=strategy_hash,
+        thesis_id=thesis_id,
+    )
+
+
+leads, latest_is_demo, ledger, pipeline, overrides, attrs_by_handle, _stale = (
+    _load_workspace(_db_stamp(), ACTIVE_THESIS_ID, ACTIVE_VERSION)
+)
+counts: dict[str, int] = {}
+for _row in pipeline.values():
+    _status = _row.get("status") or "new"
+    counts[_status] = counts.get(_status, 0) + 1
 
 
 def _version_number(thesis_id: str, version: str) -> int:
@@ -1009,12 +1069,11 @@ def _is_stale(lead: Lead) -> bool:
     return thesis_id == ACTIVE_THESIS_ID and bool(version) and version != ACTIVE_VERSION
 
 
-STALE_HANDLES = set(store.stale_handles(ACTIVE_THESIS_ID, ACTIVE_VERSION))
+STALE_HANDLES = set(_stale)
 
 # The investor's manual scoring, layered on top of every loaded lead BEFORE
 # anything renders or ranks — adjusted dims/fit re-enter the score math, a
 # pinned score wins outright (score.apply_override).
-overrides = store.all_overrides()
 if overrides:
     for _lead in leads:
         apply_override(_lead, overrides.get(_lead.account.handle.lower()), thesis)
@@ -1043,7 +1102,6 @@ store.ensure_default_columns([
      "options": CURATED_PRIORITIES, "ai_fill": False},
 ])
 db_columns = store.list_columns()
-attrs_by_handle = store.all_attrs()
 
 
 def _status_of(lead: Lead) -> str:
@@ -2205,10 +2263,8 @@ def _render_startup_feed() -> None:
         if scope == "Latest run":
             pairs = [(x, entry_by_handle.get(x.account.handle.lower())) for x in leads]
         elif strategy_hash or thesis_filter:
-            filtered = store.load_lead_ledger(
-                include_demo=latest_is_demo,
-                strategy_hash=strategy_hash,
-                thesis_id=thesis_filter,
+            filtered = _load_filtered_ledger(
+                _db_stamp(), latest_is_demo, strategy_hash, thesis_filter
             )
             pairs = [(e.lead, e) for e in filtered]
         else:

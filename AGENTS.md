@@ -156,7 +156,13 @@ scout/
                     on Memos and auto-generates); startup database with dossier
                     row-select; per-card Q/F/S score breakout + Adjust-scoring
                     popover; Memos page with in-place editing and .md/.pdf
-                    export. Headline design language. ~2600 lines.
+                    export. Headline design language. ~2600 lines. Heavy reads
+                    (latest leads, ledger, pipeline, overrides, attrs, stale
+                    handles) load through st.cache_data keyed on the DB file
+                    stamp (_db_stamp) — Streamlit reruns the whole script per
+                    click, and re-parsing every stored lead's JSON dominated
+                    latency; provenance backfills are session-gated
+                    (st.session_state["thesis_synced"]).
   ingest/
     base.py         SourceAdapter ABC (X sources) + DiscoverySource ABC (github/hn).
     twscrape_src.py Primary free X adapter: query bank, bio search, list members,
@@ -355,6 +361,16 @@ DB path defaults to `~/.scout/scout.db` (not cwd) so the budget guard can't be
 defeated by running from another directory; `DB_PATH` overrides. Handle lookups
 are `COLLATE NOCASE`. `set_pipeline` is read-merge-write (partial updates don't
 clobber other fields; outreach/brief writes also stamp `outreach_at`/`brief_at`).
+
+**Performance contract:** `Store.__init__` creates secondary indexes
+(`_ensure_indexes`) for the per-handle hot paths — every composite pk here
+indexes the wrong prefix for them (leads is run_id-first, follow_edges
+watcher-first, tweets by tweet id). Batched forms exist for what the pipeline
+used to do as per-account query loops: `last_scored_map` (the TTL skip),
+`recent_watchers_map` (enrichment + the twscrape graph leg), `upsert_accounts`
+(adapters persist once per leg, not once per sighting). Prefer these over
+calling the per-handle forms in a loop; the per-handle forms remain for
+single-lead paths (`inspect`, the UI detail pane).
 
 **The lead ledger** (`store.load_lead_ledger`) is the person-centric read path:
 one window-function query returns each handle's latest Lead + movement metadata
