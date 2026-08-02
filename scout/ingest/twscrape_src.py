@@ -233,12 +233,13 @@ class TwscrapeSource(SourceAdapter):
                 account = _to_account(user, source=source)
                 found[key] = account
             # Track every strategy that independently surfaced this account —
-            # feeds the source_corroboration signal.
+            # feeds the source_corroboration signal. Persistence is one
+            # batched upsert at the end of fetch_accounts: a search result
+            # used to re-upsert the same author once per tweet.
             if source and source not in account.sources:
                 account.sources.append(source)
             if watcher and watcher not in account.followed_by:
                 account.followed_by.append(watcher)
-            self.store.upsert_account(account)
 
         # 1) lists — membership roll first; timeline authors as the fallback
         #    (see module docstring)
@@ -300,6 +301,7 @@ class TwscrapeSource(SourceAdapter):
         #    is baseline-only, so this strategy starts yielding from run 2.
         if enabled("graph"):
             cold_start = 0
+            follow_lists: list[tuple[str, dict[str, TwUser]]] = []
             for watcher in seeds.watchers:
                 if full() or out_of_time():
                     break
@@ -322,19 +324,26 @@ class TwscrapeSource(SourceAdapter):
                 if is_first_snapshot:
                     cold_start += 1
                     continue  # baseline only — new-follow diffing starts next run
-                by_handle = {u.username.lower(): u for u in follows}
-                for followee, user_obj in by_handle.items():
-                    recent = self.store.recent_watchers_for(
-                        followee, recent_follow_days
-                    )
-                    if recent:
-                        add(user_obj, "graph", watcher=handle)
+                follow_lists.append(
+                    (handle, {u.username.lower(): u for u in follows})
+                )
+            if follow_lists:
+                # ONE batched recency query after all snapshots, replacing a
+                # follow_edges scan per followee (that was O(watchers² ×
+                # follows²) as the edge table grew run over run).
+                recent_map = self.store.recent_watchers_map(recent_follow_days)
+                for handle, by_handle in follow_lists:
+                    for followee, user_obj in by_handle.items():
+                        if recent_map.get(followee):
+                            add(user_obj, "graph", watcher=handle)
             if cold_start:
                 _console.print(
                     f"[dim]graph: baselined {cold_start} watcher(s) — new-follow "
                     "detection activates on the next run.[/dim]"
                 )
 
+        # Batched persistence for everything the legs above surfaced.
+        self.store.upsert_accounts(list(found.values()))
         _console.print(
             f"[green]twscrape:[/] {len(found)} unique accounts from seeds"
         )

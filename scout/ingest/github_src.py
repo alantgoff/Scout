@@ -40,6 +40,10 @@ _REPO_WINDOW_DAYS = 90
 _MIN_STARS = 10
 _REPOS_PER_TOPIC = 30
 _SEARCH_PAUSE_S = 2.5  # stay far under the Search API per-minute limit
+# Owner-profile fan-out. These are CORE API calls (5,000/hr with a token,
+# 60/hr without) — not the throttled Search API — so a small concurrent
+# burst is safe; serial fetches made this leg minutes of wall-clock.
+_PROFILE_CONCURRENCY = 8
 
 _retry = retry(
     reraise=True,
@@ -144,34 +148,53 @@ class GitHubSource(DiscoverySource):
                     owners.setdefault(owner["login"].lower(), owner)
                 await asyncio.sleep(_SEARCH_PAUSE_S)
 
-            for owner in owners.values():
+            semaphore = asyncio.Semaphore(_PROFILE_CONCURRENCY)
+
+            async def fetch_owner(
+                owner: dict[str, Any],
+            ) -> tuple[dict[str, Any], dict[str, Any], list[dict[str, Any]]] | None:
                 login = owner["login"]
-                try:
-                    profile = await self._get(client, f"/users/{login}")
-                    socials = (
-                        await self._get(client, f"/users/{login}/social_accounts")
-                        if owner["owner_type"] == "User"
-                        else []
-                    )
-                except Exception as exc:
-                    _console.print(f"[yellow]github profile {login} failed:[/] {exc}")
+                async with semaphore:
+                    try:
+                        profile = await self._get(client, f"/users/{login}")
+                        socials = (
+                            await self._get(
+                                client, f"/users/{login}/social_accounts"
+                            )
+                            if owner["owner_type"] == "User"
+                            else []
+                        )
+                    except Exception as exc:
+                        _console.print(
+                            f"[yellow]github profile {login} failed:[/] {exc}"
+                        )
+                        return None
+                return owner, profile, socials
+
+            profiles = await asyncio.gather(
+                *(fetch_owner(o) for o in owners.values())
+            )
+            for result in profiles:
+                if result is None:
                     continue
+                owner, profile, socials = result
+                login = owner["login"]
                 x_handle = profile_to_x_handle(profile, socials)
                 bio = profile.get("bio") or profile.get("description") or ""
                 if x_handle:
-                    account = Account(
-                        id=f"gh-{login.lower()}",
-                        handle=x_handle,
-                        name=profile.get("name") or login,
-                        bio=bio,
-                        website=owner["repo_url"],
-                        followers=profile.get("followers", 0),
-                        source="github",
-                        github_repo=owner["repo_url"],
-                        fetched_at=now,
+                    accounts.append(
+                        Account(
+                            id=f"gh-{login.lower()}",
+                            handle=x_handle,
+                            name=profile.get("name") or login,
+                            bio=bio,
+                            website=owner["repo_url"],
+                            followers=profile.get("followers", 0),
+                            source="github",
+                            github_repo=owner["repo_url"],
+                            fetched_at=now,
+                        )
                     )
-                    self.store.upsert_account(account)
-                    accounts.append(account)
                 else:
                     unlinked.append(
                         UnlinkedLead(
@@ -184,6 +207,7 @@ class GitHubSource(DiscoverySource):
                         )
                     )
 
+        self.store.upsert_accounts(accounts)
         self.store.upsert_unlinked_leads(unlinked)
         _console.print(
             f"[green]github:[/] {len(accounts)} X-bridged accounts, "

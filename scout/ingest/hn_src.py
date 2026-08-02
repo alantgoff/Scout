@@ -182,8 +182,7 @@ class HackerNewsSource(DiscoverySource):
         # Dedupe (an author can match several terms)
         accounts = list({a.handle.lower(): a for a in accounts}.values())
         unlinked = list({u.ref.lower(): u for u in unlinked}.values())
-        for account in accounts:
-            self.store.upsert_account(account)
+        self.store.upsert_accounts(accounts)
         self.store.upsert_unlinked_leads(unlinked)
         _console.print(
             f"[green]hn:[/] {len(accounts)} X-bridged accounts, "
