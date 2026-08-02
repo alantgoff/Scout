@@ -1,0 +1,18 @@
+[Unit]
+Description=Scout workspace (Streamlit)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=scout
+Group=scout
+WorkingDirectory=/opt/scout
+EnvironmentFile=/etc/scout/scout.env
+Environment=DB_PATH=/var/lib/scout/scout.db
+ExecStart=/var/lib/scout/.local/bin/uv run streamlit run scout/ui.py --server.address 127.0.0.1 --server.port 8501 --server.headless true
+Restart=always
+RestartSec=3
+TimeoutStopSec=30
+
+[Install]
+WantedBy=multi-user.target

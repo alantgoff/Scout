@@ -1,0 +1,14 @@
+# TLS + reverse proxy for the Scout workspace. Edit the domain, reload caddy.
+scout.example.com {
+	reverse_proxy 127.0.0.1:8501
+	# Streamlit uses a websocket (/_stcore/stream); reverse_proxy handles it.
+
+	# Modest brute-force damping on the OAuth callback.
+	@auth path /oauth2callback
+	rate_limit @auth {
+		zone auth_zone
+		key {remote_host}
+		events 20
+		window 1m
+	}
+}

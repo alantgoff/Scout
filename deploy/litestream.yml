@@ -1,0 +1,12 @@
+# Continuous SQLite replication. Fill in the bucket + credentials
+# (or use LITESTREAM_ACCESS_KEY_ID / _SECRET_ACCESS_KEY in the unit env).
+dbs:
+  - path: /var/lib/scout/scout.db
+    replicas:
+      - type: s3
+        bucket: your-firm-scout-backup
+        path: scout.db
+        region: auto
+        # endpoint: https://<accountid>.r2.cloudflarestorage.com   # R2/B2: set endpoint
+        sync-interval: 10s
+        retention: 720h

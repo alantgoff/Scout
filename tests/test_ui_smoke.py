@@ -328,3 +328,65 @@ def test_memo_edit_saves_with_edit_stamp(tmp_path, monkeypatch) -> None:
     assert not at.exception
     editor = [ta for ta in at.text_area if ta.key == "memo_editor_smoke_founder"]
     assert editor and "original" in editor[0].value
+
+
+# --- identity & multiplayer gating ----------------------------------------------
+
+
+def test_dev_identity_provisions_first_admin(tmp_path, monkeypatch) -> None:
+    """Without an [auth] block the app resolves a dev identity; the first
+    user ever provisioned is the admin."""
+    at = _app(tmp_path, monkeypatch)
+    at.run()
+    assert not at.exception, at.exception[0].message if at.exception else ""
+    user = Store(tmp_path / "smoke.db").get_user("local@scout")
+    assert user is not None and user["role"] == "admin"
+
+
+def test_dev_identity_env_override_and_actor_stamp(tmp_path, monkeypatch) -> None:
+    monkeypatch.setenv("SCOUT_DEV_USER", "sara@firm.com")
+    at = _app(tmp_path, monkeypatch)
+    at.run()
+    assert not at.exception, at.exception[0].message if at.exception else ""
+    store = Store(tmp_path / "smoke.db")
+    assert store.get_user("sara@firm.com") is not None
+    # A write made through the app's store is attributed to the signed-in user.
+    # (Simulated at the store level: the UI binds store.actor = ACTOR.)
+    store.actor = "sara@firm.com"
+    store.set_pipeline("smoke_founder", status="longlisted")
+    assert store.get_pipeline("smoke_founder")["updated_by"] == "sara@firm.com"
+
+
+def test_oidc_gate_blocks_until_signed_in(tmp_path, monkeypatch) -> None:
+    """With [auth] configured but nobody logged in, the app renders only the
+    sign-in gate — no nav, no data."""
+    at = _app(tmp_path, monkeypatch)
+    at.secrets["auth"] = {
+        "client_id": "x", "client_secret": "y", "cookie_secret": "z",
+        "redirect_uri": "https://scout.test/oauth2callback",
+    }
+    at.run()
+    assert not at.exception, at.exception[0].message if at.exception else ""
+    assert any("Sign in with Google" in b.label for b in at.button)
+    assert "nav" not in at.session_state  # the page stopped at the gate
+
+
+def test_allowlist_blocks_unlisted_user(tmp_path, monkeypatch) -> None:
+    db = tmp_path / "smoke.db"
+    monkeypatch.setenv("DB_PATH", str(db))
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "")
+    monkeypatch.setenv("SCOUT_DEV_USER", "outsider@elsewhere.com")
+    seed_store(db)
+    gate = Store(db)
+    gate.set_setting("allowed_email_domain", "firm.com")
+    at = AppTest.from_file(str(UI_PATH), default_timeout=30)
+    at.run()
+    assert not at.exception, at.exception[0].message if at.exception else ""
+    assert any("not on this workspace" in e.value for e in at.error)
+    assert "nav" not in at.session_state
+    # And a firm-domain user gets in.
+    monkeypatch.setenv("SCOUT_DEV_USER", "sara@firm.com")
+    at2 = AppTest.from_file(str(UI_PATH), default_timeout=30)
+    at2.run()
+    assert not at2.exception
+    assert at2.session_state["nav"] == "Thesis"

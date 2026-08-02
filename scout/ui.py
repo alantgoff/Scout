@@ -44,6 +44,7 @@ import sys
 import time
 from datetime import datetime, timezone
 from pathlib import Path
+from types import SimpleNamespace
 
 _ROOT = Path(__file__).resolve().parent.parent
 if str(_ROOT) not in sys.path:
@@ -743,17 +744,6 @@ def _from_lines(text: str) -> list[str]:
     return [line.strip() for line in text.splitlines() if line.strip()]
 
 
-def _set_env_var(key: str, value: str) -> None:
-    lines = ENV_PATH.read_text(encoding="utf-8").splitlines() if ENV_PATH.exists() else []
-    for i, line in enumerate(lines):
-        if line.split("#", 1)[0].strip().startswith(f"{key}="):
-            lines[i] = f"{key}={value}"
-            break
-    else:
-        lines.append(f"{key}={value}")
-    ENV_PATH.write_text("\n".join(lines) + "\n", encoding="utf-8")
-
-
 # --------------------------------------------------- run launching & progress
 
 PHASE_LABELS = {
@@ -835,7 +825,9 @@ def _launch_scan(args: list[str], kind_hint: str) -> None:
     log_dir.mkdir(parents=True, exist_ok=True)
     log_path = log_dir / f"{kind_hint}-{datetime.now():%Y%m%d-%H%M%S}.log"
     env = {**os.environ, "TERM": "dumb", "NO_COLOR": "1", "COLUMNS": "120",
-           "PYTHONUNBUFFERED": "1", "SCOUT_SCAN_LOG": str(log_path)}
+           "PYTHONUNBUFFERED": "1", "SCOUT_SCAN_LOG": str(log_path),
+           # Attribute the run to the member who clicked, not the machine.
+           "SCOUT_ACTOR": ACTOR}
     with open(log_path, "wb") as fh:
         fh.write(f"$ scout {' '.join(args)}\n".encode())
         subprocess.Popen([sys.executable, "-u", "-m", "scout.cli", *args],
@@ -947,6 +939,93 @@ settings = Settings(_env_file=ENV_PATH if ENV_PATH.exists() else None)
 thesis = load_thesis(THESIS_PATH)
 seeds = load_seeds(SEEDS_PATH)
 store = Store(Path(settings.db_path), cross_thread=True)
+# Firm-shared runtime knobs (spend cap, model, run sizes) live in the DB and
+# win over .env defaults, so every session and worker run agrees on them.
+store.apply_settings_overrides(settings)
+
+
+# ------------------------------------------------------------------ identity
+# Streamlit-native OIDC when an [auth] block exists in secrets.toml (Google
+# Workspace in production); a named dev identity otherwise, so local use and
+# AppTest need no IdP. Every judgment write below is attributed to ACTOR.
+
+
+def _current_user():
+    """The authenticated identity, or None while login is still required.
+
+    A wrapper (rather than st.user inline) so tests can monkeypatch identity
+    and offline/dev sessions resolve to a stable local user."""
+    try:
+        auth_configured = "auth" in st.secrets
+    except Exception:  # no secrets.toml at all
+        auth_configured = False
+    if not auth_configured:
+        email = os.environ.get("SCOUT_DEV_USER", "local@scout")
+        return SimpleNamespace(
+            email=email, name=email.split("@")[0].title(), is_logged_in=True
+        )
+    try:
+        user = st.user
+        if not getattr(user, "is_logged_in", False):
+            return None
+        return user
+    except Exception:
+        # st.user unavailable (e.g. AppTest with auth secrets but no real
+        # OIDC handshake) — treat as not signed in; the gate renders.
+        return None
+
+
+def _user_allowed(email: str) -> bool:
+    """Allowlist from the settings table: an email domain and/or explicit
+    emails. Nothing configured = open — the bootstrap state; the first login
+    becomes admin and locks it down in Settings."""
+    domain = (
+        (store.get_setting("allowed_email_domain") or "")
+        .strip().lower().lstrip("@")
+    )
+    emails = {
+        e.strip().lower()
+        for e in (store.get_setting("allowed_emails") or "").split(",")
+        if e.strip()
+    }
+    if not domain and not emails:
+        return True
+    return email in emails or (bool(domain) and email.endswith("@" + domain))
+
+
+_login_user = _current_user()
+if _login_user is None:
+    st.markdown(
+        '<div class="masthead" style="margin-top:18vh;justify-content:center">'
+        '<span class="brand">Scout</span></div>'
+        '<div class="subtle" style="text-align:center;margin-top:8px">'
+        "Sign in with your firm Google account to open the workspace.</div>",
+        unsafe_allow_html=True,
+    )
+    _l, _c, _r = st.columns([2, 1, 2])
+    if _c.button("Sign in with Google", type="primary", use_container_width=True):
+        st.login()
+    st.stop()
+
+ACTOR = (getattr(_login_user, "email", "") or "local@scout").strip().lower()
+if not _user_allowed(ACTOR):
+    st.error(
+        f"{ACTOR} is not on this workspace's allowlist — "
+        "ask an admin to add you (Settings → Workspace)."
+    )
+    if st.button("Sign out"):
+        st.logout()
+    st.stop()
+
+store.actor = ACTOR
+# Provision on first login; presence heartbeat throttled to ~once a minute.
+if time.time() - st.session_state.get("user_seen_at", 0.0) > 60:
+    st.session_state["current_user_row"] = store.ensure_user(
+        ACTOR, name=getattr(_login_user, "name", "") or ""
+    )
+    st.session_state["user_seen_at"] = time.time()
+CURRENT_USER = st.session_state.get("current_user_row") or store.get_user(ACTOR) or {}
+IS_ADMIN = CURRENT_USER.get("role") == "admin"
 
 # --- thesis provenance ------------------------------------------------------
 # Runs recorded before thesis identity existed carry only a strategy hash;
@@ -3919,8 +3998,10 @@ def _render_database() -> None:
 
     st.write("")
     # A toggle, not an expander — the raw browser has its own SQL expander
-    # inside, and Streamlit forbids nesting expanders.
-    if st.toggle("Raw tables — the underlying SQLite store", key="sdb_raw"):
+    # inside, and Streamlit forbids nesting expanders. Admin-only: the raw
+    # store includes every memo and outreach draft, and the SQL console
+    # (read-only as it is) is not something every member needs.
+    if IS_ADMIN and st.toggle("Raw tables — the underlying SQLite store", key="sdb_raw"):
         _render_raw_tables()
 
 
@@ -4109,8 +4190,10 @@ if nav == "Settings":
     k1.markdown(("✓ " if cookie_ok else "○ ") + "twscrape cookies")
     k2.markdown(("✓ " if settings.x_bearer_token else "○ ") + "X API token")
     k3.markdown(("✓ " if settings.anthropic_api_key else "○ ") + "Anthropic key")
-    st.markdown('<div class="subtle">Secrets live in <code>.env</code> — edit them there. '
-                'Non-secret defaults below.</div>', unsafe_allow_html=True)
+    st.markdown('<div class="subtle">Secrets are configured on the server '
+                '(<code>/etc/scout/scout.env</code>, or <code>.env</code> for local '
+                'use) and are never editable here. The shared defaults below apply '
+                'to every member and scheduled run.</div>', unsafe_allow_html=True)
     st.write("")
 
     with st.form("settings_form"):
@@ -4125,11 +4208,55 @@ if nav == "Settings":
             ttl_in = st.number_input("Default TTL days", 0, 90, settings.ttl_days)
             verdict_ttl_in = st.number_input("Verdict cache TTL (days)", 0, 90,
                                              settings.verdict_ttl_days)
-        if st.form_submit_button("Save settings", type="primary"):
-            _set_env_var("XAPI_SPEND_CAP_USD", f"{cap_in:.2f}")
-            _set_env_var("CLAUDE_MODEL", model_in.strip())
-            _set_env_var("MAX_ACCOUNTS", str(int(max_in)))
-            _set_env_var("TTL_DAYS", str(int(ttl_in)))
-            _set_env_var("LLM_MAX_CANDIDATES", str(int(llm_cap_in)))
-            _set_env_var("VERDICT_TTL_DAYS", str(int(verdict_ttl_in)))
-            st.success(".env updated."); st.rerun()
+        if st.form_submit_button("Save settings", type="primary",
+                                 disabled=not IS_ADMIN,
+                                 help=None if IS_ADMIN else "Admins only"):
+            store.set_setting("xapi_spend_cap_usd", f"{cap_in:.2f}")
+            store.set_setting("claude_model", model_in.strip())
+            store.set_setting("max_accounts", str(int(max_in)))
+            store.set_setting("ttl_days", str(int(ttl_in)))
+            store.set_setting("llm_max_candidates", str(int(llm_cap_in)))
+            store.set_setting("verdict_ttl_days", str(int(verdict_ttl_in)))
+            st.session_state["toast"] = "Shared settings saved — applies to everyone."
+            st.rerun()
+
+    # ---- workspace: who's signed in, who's allowed in, member roles.
+    st.write("")
+    st.markdown('<div class="section-title">Workspace</div>', unsafe_allow_html=True)
+    st.markdown(
+        f'<div class="subtle">Signed in as <b>{_e(CURRENT_USER.get("name") or ACTOR)}</b> '
+        f'({_e(ACTOR)}) · role: {_e(CURRENT_USER.get("role") or "member")}</div>',
+        unsafe_allow_html=True,
+    )
+    try:
+        _auth_live = "auth" in st.secrets
+    except Exception:
+        _auth_live = False
+    if _auth_live and st.button("Sign out", key="ws_signout"):
+        st.logout()
+    members = store.list_users()
+    if members:
+        st.markdown(
+            "\n".join(
+                f"- **{m['name']}** — {m['id']} · {m['role']} · "
+                f"last seen {_ago(m.get('last_seen_at'))}"
+                for m in members
+            )
+        )
+    if IS_ADMIN:
+        with st.form("workspace_form"):
+            domain_in = st.text_input(
+                "Allowed email domain",
+                store.get_setting("allowed_email_domain") or "",
+                help="Anyone signing in with this Google Workspace domain gets access.",
+            )
+            emails_in = st.text_input(
+                "Allowed emails (comma-separated)",
+                store.get_setting("allowed_emails") or "",
+                help="Extra addresses outside the domain. Leave both empty to allow anyone who can sign in (bootstrap only).",
+            )
+            if st.form_submit_button("Save workspace access"):
+                store.set_setting("allowed_email_domain", domain_in.strip())
+                store.set_setting("allowed_emails", emails_in.strip())
+                st.session_state["toast"] = "Workspace access updated."
+                st.rerun()

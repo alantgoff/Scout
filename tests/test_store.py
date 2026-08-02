@@ -570,3 +570,112 @@ def test_startup_attrs_merge_delete_and_types(tmp_path: Path) -> None:
     assert attrs == {"vertical": "Security",
                      "use_case": ["Payments", "Risk"], "round_size": 2.5}
     assert store.all_attrs().get("nobody") is None
+
+
+# --- multiplayer foundation: WAL, write_tx, users, settings, actors -------------
+
+
+def test_wal_and_busy_timeout_configured(tmp_path: Path) -> None:
+    store = make_store(tmp_path)
+    assert store.db.execute("pragma journal_mode").fetchone()[0] == "wal"
+    assert store.db.execute("pragma busy_timeout").fetchone()[0] == 5000
+
+
+def test_concurrent_writers_do_not_lose_updates(tmp_path: Path) -> None:
+    """Two sessions (separate connections, separate threads) updating
+    different fields of the same pipeline row must both survive — the
+    lost-update race write_tx exists to prevent."""
+    import threading
+
+    db_path = tmp_path / "test.db"
+    Store(db_path)  # create schema
+    errors: list[Exception] = []
+
+    def writer(field: str, value: str) -> None:
+        try:
+            local = Store(db_path)
+            for i in range(20):
+                if field == "notes":
+                    local.set_pipeline("acme", notes=f"{value}-{i}")
+                else:
+                    local.set_pipeline("acme", status=value)
+        except Exception as exc:  # pragma: no cover - failure path
+            errors.append(exc)
+
+    threads = [
+        threading.Thread(target=writer, args=("notes", "note")),
+        threading.Thread(target=writer, args=("status", "shortlisted")),
+    ]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    assert not errors
+    row = Store(db_path).get_pipeline("acme")
+    # Both fields present: neither thread's writes clobbered the other's.
+    assert row["status"] == "shortlisted"
+    assert row["notes"] == "note-19"
+
+
+def test_ensure_user_first_is_admin_then_member(tmp_path: Path) -> None:
+    store = make_store(tmp_path)
+    first = store.ensure_user("Alan@Firm.com", name="Alan")
+    second = store.ensure_user("sara@firm.com", name="Sara")
+    assert first["id"] == "alan@firm.com" and first["role"] == "admin"
+    assert second["role"] == "member"
+    # Re-login touches last_seen and keeps role; a new name updates.
+    again = store.ensure_user("alan@firm.com", name="Alan G")
+    assert again["role"] == "admin" and again["name"] == "Alan G"
+    assert [u["id"] for u in store.list_users()][0] == "alan@firm.com"
+
+
+def test_ensure_user_admin_env_promotes(tmp_path: Path, monkeypatch) -> None:
+    store = make_store(tmp_path)
+    store.ensure_user("first@firm.com")
+    monkeypatch.setenv("SCOUT_ADMIN_EMAILS", "sara@firm.com, ops@firm.com")
+    assert store.ensure_user("sara@firm.com")["role"] == "admin"
+    # An existing member is promoted on next login too.
+    store.set_user_role("sara@firm.com", "member")
+    assert store.ensure_user("sara@firm.com")["role"] == "admin"
+
+
+def test_settings_roundtrip_and_overrides(tmp_path: Path) -> None:
+    store = make_store(tmp_path)
+    assert store.get_setting("missing", "fallback") == "fallback"
+    store.actor = "alan@firm.com"
+    store.set_setting("claude_model", "claude-x")
+    store.set_setting("max_accounts", "123")
+    store.set_setting("xapi_spend_cap_usd", "not-a-number")  # ignored on apply
+    assert store.get_setting("claude_model") == "claude-x"
+    assert store.all_settings()["max_accounts"] == "123"
+
+    class FakeSettings:
+        claude_model = "env-model"
+        max_accounts = 5
+        xapi_spend_cap_usd = 25.0
+        ttl_days = 7
+        llm_max_candidates = 40
+        verdict_ttl_days = 14
+
+    s = FakeSettings()
+    store.apply_settings_overrides(s)
+    assert s.claude_model == "claude-x"
+    assert s.max_accounts == 123
+    assert s.xapi_spend_cap_usd == 25.0  # unparseable value ignored
+    row = list(store.db["settings"].rows_where("key = ?", ["claude_model"]))[0]
+    assert row["updated_by"] == "alan@firm.com"
+
+
+def test_actor_stamped_on_judgment_writes(tmp_path: Path) -> None:
+    store = make_store(tmp_path)
+    store.actor = "sara@firm.com"
+    store.set_pipeline("acme", status="longlisted")
+    store.set_override("acme", fit=0.9, note="conviction")
+    store.set_attrs("acme", {"vertical": "Fintech"})
+    assert store.get_pipeline("acme")["updated_by"] == "sara@firm.com"
+    assert store.all_overrides()["acme"]["actor"] == "sara@firm.com"
+    row = list(store.db["startup_attrs"].rows_where("handle = ?", ["acme"]))[0]
+    assert row["updated_by"] == "sara@firm.com"
+    # Explicit actor kwarg overrides the bound one.
+    store.set_pipeline("acme", notes="handoff", actor="alan@firm.com")
+    assert store.get_pipeline("acme")["updated_by"] == "alan@firm.com"

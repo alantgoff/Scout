@@ -58,6 +58,19 @@ app = typer.Typer(
 console = Console()
 
 
+def _open_store(settings: Settings, actor: str = "system:cli") -> Store:
+    """The CLI's Store: bound to a machine actor and with the firm's DB-held
+    runtime knobs overlaid onto settings (spend cap, model, run sizes — the
+    knobs the UI's Settings page edits for everyone).
+
+    SCOUT_ACTOR (set by the UI when it launches a run on a member's behalf)
+    wins over the default, so subprocess runs stay attributed to the human
+    who asked for them."""
+    store = Store(settings.db_path, actor=os.environ.get("SCOUT_ACTOR") or actor)
+    store.apply_settings_overrides(settings)
+    return store
+
+
 class Source(str, Enum):
     twscrape = "twscrape"
     xapi = "xapi"
@@ -759,7 +772,7 @@ def run(
     settings = Settings()
     thesis = _load_thesis_or_exit(thesis_path)
     seeds = _load_seeds_or_exit(seeds_path)
-    store = Store(settings.db_path)
+    store = _open_store(settings)
     effective_max = max_accounts if max_accounts is not None else settings.max_accounts
     effective_ttl = ttl_days if ttl_days is not None else settings.ttl_days
 
@@ -839,7 +852,7 @@ def reclassify(
     what the current thesis has outgrown."""
     settings = Settings()
     thesis = _load_thesis_or_exit(thesis_path)
-    store = Store(settings.db_path)
+    store = _open_store(settings)
     seeds = _load_seeds_or_default()
     console.print(f"Thesis: [bold]{_thesis_banner(thesis, seeds, store)}[/bold]")
     scope_label = "the whole ledger" if all_runs else "the latest run"
@@ -969,7 +982,7 @@ def inspect(
     handle = handle.lstrip("@").lower()
     settings = Settings()
     thesis = _load_thesis_or_exit(Path("thesis.yaml"))
-    store = Store(settings.db_path)
+    store = _open_store(settings)
 
     try:
         account = store.get_account(handle)
@@ -1085,7 +1098,7 @@ def export(
 ) -> None:
     """Re-export the most recent run (or, with --pipeline, the deal flow)."""
     settings = Settings()
-    store = Store(settings.db_path)
+    store = _open_store(settings)
 
     if pipeline:
         from scout.export import pipeline_rows, write_pipeline_csv
@@ -1124,7 +1137,7 @@ def export(
 def budget() -> None:
     """Show cumulative X API spend against the hard cap."""
     settings = Settings()
-    store = Store(settings.db_path)
+    store = _open_store(settings)
     spent = store.xapi_spend_usd()
     cap = settings.xapi_spend_cap_usd
     remaining = max(cap - spent, 0.0)
@@ -1169,7 +1182,7 @@ def source_preview(
     settings = Settings()
     thesis = _load_thesis_or_exit(thesis_path)
     seeds = _load_seeds_or_exit(seeds_path)
-    store = Store(settings.db_path)
+    store = _open_store(settings)
     effective_max = max_accounts if max_accounts is not None else settings.max_accounts
 
     if strategy == "all":
@@ -1299,7 +1312,7 @@ def verify(
     """
     settings = Settings()
     thesis = _load_thesis_or_exit(Path("thesis.yaml"))
-    store = Store(settings.db_path)
+    store = _open_store(settings)
 
     if discovered:
         shortlist = store.recent_discovered_accounts(days=7)[:max_leads]
@@ -1478,7 +1491,7 @@ def strategy(
     settings = Settings()
     thesis = _load_thesis_or_exit(thesis_path)
     seeds = _load_seeds_or_exit(seeds_path)
-    store = Store(settings.db_path)
+    store = _open_store(settings)
 
     try:
         with console.status("Designing sourcing strategy with Claude..."):
@@ -1574,7 +1587,7 @@ def publish(
 
     settings = Settings()
     thesis = _load_thesis_or_exit(thesis_path)
-    store = Store(settings.db_path)
+    store = _open_store(settings)
     docs = Path("docs")
     path = build_digest(store, thesis, docs)
     console.print(f"Digest written: [bold]{path}[/bold]")
@@ -1628,7 +1641,7 @@ def probe(
     import httpx as _httpx
 
     settings = Settings()
-    store = Store(settings.db_path)
+    store = _open_store(settings)
     if not settings.x_bearer_token:
         console.print("[red]X_BEARER_TOKEN not set — cannot probe.[/red]")
         raise typer.Exit(1)
@@ -1765,7 +1778,7 @@ def demo(
 
     settings = Settings()
     thesis = _load_thesis_or_exit(thesis_path)
-    store = Store(settings.db_path)
+    store = _open_store(settings)
 
     accounts, tweets = sample_data(datetime.now(timezone.utc))
     for account in accounts:
@@ -1851,7 +1864,7 @@ app.add_typer(thesis_app, name="thesis")
 
 
 def _thesis_store() -> Store:
-    return Store(Settings().db_path)
+    return _open_store(Settings())
 
 
 @thesis_app.command("list")

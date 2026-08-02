@@ -1,0 +1,20 @@
+# The job worker: scheduled sourcing runs, digests, CRM sync.
+# Ships with the jobs phase — enable once `scout worker` exists.
+[Unit]
+Description=Scout job worker
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=scout
+Group=scout
+WorkingDirectory=/opt/scout
+EnvironmentFile=/etc/scout/scout.env
+Environment=DB_PATH=/var/lib/scout/scout.db
+ExecStart=/var/lib/scout/.local/bin/uv run python -m scout.cli worker
+Restart=always
+RestartSec=5
+TimeoutStopSec=30
+
+[Install]
+WantedBy=multi-user.target

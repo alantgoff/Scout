@@ -9,6 +9,7 @@ from __future__ import annotations
 import json
 import os
 import shutil
+from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -23,7 +24,13 @@ _LEGACY_DB_PATH = Path("scout.db")
 
 
 class Store:
-    def __init__(self, db_path: Path = DEFAULT_DB_PATH, *, cross_thread: bool = False) -> None:
+    def __init__(
+        self,
+        db_path: Path = DEFAULT_DB_PATH,
+        *,
+        cross_thread: bool = False,
+        actor: str | None = None,
+    ) -> None:
         db_path = Path(db_path).expanduser()
         # One-time migration: preserve spend history from the old cwd-relative
         # scout.db so moving the ledger home never resets the $25 guard.
@@ -36,11 +43,18 @@ class Store:
             shutil.copy2(_LEGACY_DB_PATH, db_path)
         db_path.parent.mkdir(parents=True, exist_ok=True)
         self.db_path = db_path
+        # Who is making writes through this Store. The UI binds the logged-in
+        # user's email after auth resolves; the CLI/worker bind namespaced
+        # machine actors ("system:run", "agent:memo", "schedule:3"). Judgment
+        # writes stamp it; None means unattributed (legacy callers).
+        self.actor = actor
         if cross_thread:
-            # Streamlit reruns the script (and 4s-polling fragments) on
-            # varying threads; sqlite3's same-thread guard would raise
-            # ProgrammingError mid-render. Safe here: the UI is single-user
-            # and read-mostly, never writing from two threads at once.
+            # Streamlit reruns the script (and polling fragments) on varying
+            # threads; sqlite3's same-thread guard would raise
+            # ProgrammingError mid-render. Cross-thread use is safe because
+            # SQLite serializes statements internally and every read-merge-
+            # write in this class runs inside write_tx() (BEGIN IMMEDIATE),
+            # so concurrent sessions cannot lose each other's updates.
             import sqlite3
 
             self.db = sqlite_utils.Database(
@@ -48,8 +62,47 @@ class Store:
             )
         else:
             self.db = sqlite_utils.Database(db_path)
+        self._configure_connection()
         self._migrate_thesis_columns()
         self._ensure_indexes()
+
+    def _configure_connection(self) -> None:
+        """Concurrency posture for a multi-session deployment.
+
+        WAL lets N readers proceed while one writer commits (and is what
+        litestream replication requires); busy_timeout makes a second writer
+        wait instead of raising 'database is locked'; synchronous=NORMAL is
+        the standard WAL pairing (durability to the WAL, not fsync-per-txn).
+        journal_mode persists in the file; the others are per-connection.
+        """
+        conn = self.db.conn
+        conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute("PRAGMA busy_timeout=5000")
+        conn.execute("PRAGMA synchronous=NORMAL")
+
+    @contextmanager
+    def write_tx(self):
+        """One atomic write transaction, lost-update-safe.
+
+        BEGIN IMMEDIATE takes the write lock BEFORE the first read, so a
+        read-merge-write (set_pipeline, set_attrs, ...) cannot interleave
+        with another session's — the deferred default would let two sessions
+        read the same row and last-write-wins each other. Re-entrant: a
+        write_tx inside an open write_tx joins it (single commit at the
+        outermost exit). sqlite-utils' own atomic() blocks nest via
+        SAVEPOINTs, so upsert/insert calls inside compose correctly.
+        """
+        conn = self.db.conn
+        if conn.in_transaction:
+            yield
+            return
+        conn.execute("BEGIN IMMEDIATE")
+        try:
+            yield
+            conn.commit()
+        except BaseException:
+            conn.rollback()
+            raise
 
     def _migrate_thesis_columns(self) -> None:
         """Add the thesis-provenance columns to tables that predate them.
@@ -108,6 +161,148 @@ class Store:
                 continue  # legacy table shape — never let an index break init
             self.db.execute(f"create index if not exists {name} on {table}({expr})")
         self.db.conn.commit()
+
+    # ------------------------------------------------------------------ users
+
+    def ensure_user(self, email: str, *, name: str = "") -> dict:
+        """Provision-or-touch a user on login; returns the row.
+
+        The id is the lowercased email (it is what OIDC asserts and what
+        actor columns store). The FIRST user ever provisioned becomes admin,
+        as does anyone listed in SCOUT_ADMIN_EMAILS — everyone else joins as
+        member and an admin can promote them. last_seen_at is stamped here;
+        the UI throttles calls to ~once a minute per session.
+        """
+        user_id = email.strip().lower()
+        if not user_id:
+            raise ValueError("ensure_user needs a non-empty email")
+        now = datetime.now(timezone.utc).isoformat()
+        admin_env = {
+            e.strip().lower()
+            for e in os.environ.get("SCOUT_ADMIN_EMAILS", "").split(",")
+            if e.strip()
+        }
+        with self.write_tx():
+            existing = self.get_user(user_id)
+            if existing is None:
+                first = not (
+                    self.db["users"].exists() and self.db["users"].count > 0
+                )
+                role = "admin" if (first or user_id in admin_env) else "member"
+                row = {
+                    "id": user_id,
+                    "name": name or user_id.split("@")[0],
+                    "role": role,
+                    "default_thesis_id": "",
+                    "slack_member_id": "",
+                    "settings_json": "{}",
+                    "created_at": now,
+                    "last_seen_at": now,
+                }
+                self.db["users"].insert(row, pk="id")
+                return row
+            updates: dict = {"last_seen_at": now}
+            if name and name != existing.get("name"):
+                updates["name"] = name
+            if user_id in admin_env and existing.get("role") != "admin":
+                updates["role"] = "admin"
+            self.db["users"].update(user_id, updates)
+            return {**existing, **updates}
+
+    def get_user(self, user_id: str) -> dict | None:
+        if not self.db["users"].exists():
+            return None
+        rows = list(
+            self.db["users"].rows_where("id = ?", [user_id.strip().lower()], limit=1)
+        )
+        return dict(rows[0]) if rows else None
+
+    def list_users(self) -> list[dict]:
+        """All provisioned users, admins first then by name."""
+        if not self.db["users"].exists():
+            return []
+        return [
+            dict(r)
+            for r in self.db["users"].rows_where(
+                order_by="case role when 'admin' then 0 else 1 end, name"
+            )
+        ]
+
+    def touch_user(self, user_id: str) -> None:
+        """Presence heartbeat (throttled by the caller)."""
+        if self.db["users"].exists():
+            self.db.execute(
+                "update users set last_seen_at = ? where id = ?",
+                [datetime.now(timezone.utc).isoformat(), user_id.strip().lower()],
+            )
+            self.db.conn.commit()
+
+    def set_user_role(self, user_id: str, role: str) -> None:
+        if role not in ("admin", "member"):
+            raise ValueError(f"unknown role: {role!r}")
+        if self.db["users"].exists():
+            self.db.execute(
+                "update users set role = ? where id = ?",
+                [role, user_id.strip().lower()],
+            )
+            self.db.conn.commit()
+
+    # --------------------------------------------------------------- settings
+
+    # Non-secret runtime knobs that may live in the settings table and
+    # override the .env value at load time (key = Settings field name).
+    # True secrets (API keys, cookies) are deliberately NOT overridable
+    # here — they stay in the environment, never UI-writable.
+    RUNTIME_SETTING_FIELDS: dict[str, type] = {
+        "xapi_spend_cap_usd": float,
+        "claude_model": str,
+        "max_accounts": int,
+        "ttl_days": int,
+        "llm_max_candidates": int,
+        "verdict_ttl_days": int,
+    }
+
+    def get_setting(self, key: str, default: str | None = None) -> str | None:
+        if not self.db["settings"].exists():
+            return default
+        rows = list(self.db["settings"].rows_where("key = ?", [key], limit=1))
+        if not rows or rows[0].get("value") in (None, ""):
+            return default
+        return rows[0]["value"]
+
+    def set_setting(self, key: str, value: str, *, actor: str | None = None) -> None:
+        with self.write_tx():
+            self.db["settings"].upsert(
+                {
+                    "key": key,
+                    "value": str(value),
+                    "updated_by": actor or self.actor or "",
+                    "updated_at": datetime.now(timezone.utc).isoformat(),
+                },
+                pk="key",
+                alter=True,
+            )
+
+    def all_settings(self) -> dict[str, str]:
+        if not self.db["settings"].exists():
+            return {}
+        return {r["key"]: r.get("value") or "" for r in self.db["settings"].rows}
+
+    def apply_settings_overrides(self, settings) -> None:
+        """Overlay DB-held runtime knobs onto a loaded Settings object.
+
+        The firm's shared knobs (spend cap, model, run sizes) are edited in
+        the UI and must apply to every session and worker run — a value in
+        the settings table wins over the .env default. Unparseable values
+        are ignored rather than crashing a run."""
+        for field, cast in self.RUNTIME_SETTING_FIELDS.items():
+            raw = self.get_setting(field)
+            if raw in (None, ""):
+                continue
+            try:
+                setattr(settings, field, cast(raw))
+            except (TypeError, ValueError):
+                continue
 
     # ------------------------------------------------------------------ cache
 
@@ -278,7 +473,8 @@ class Store:
 
         `thesis_id` is the durable identity and `thesis_version` the tuning
         fingerprint; `strategy_hash` is kept identical to the version so the
-        existing strategy grouping keeps working unchanged.
+        existing strategy grouping keeps working unchanged. `requested_by`
+        names who asked for the run (the store's bound actor by default).
         """
         self.db["runs"].upsert(
             {
@@ -290,6 +486,7 @@ class Store:
                 "config_json": config_json,
                 "thesis_id": thesis_id,
                 "thesis_version": thesis_version or strategy_hash,
+                "requested_by": self.actor or "",
             },
             pk="run_id",
             alter=True,
@@ -314,32 +511,33 @@ class Store:
         comparison with `theses.current_version`.
         """
         now = datetime.now(timezone.utc).isoformat()
-        existing = self.get_thesis(thesis_id)
-        self.db["theses"].upsert(
-            {
-                "id": thesis_id,
-                "name": name or thesis_id,
-                "statement": statement,
-                "current_version": version,
-                "created_at": (existing or {}).get("created_at") or now,
-                "archived_at": (existing or {}).get("archived_at"),
-                "is_active": 1 if make_active else (existing or {}).get("is_active", 0),
-            },
-            pk="id",
-            alter=True,
-        )
-        if version:
-            self.db["thesis_versions"].upsert(
+        with self.write_tx():
+            existing = self.get_thesis(thesis_id)
+            self.db["theses"].upsert(
                 {
-                    "thesis_id": thesis_id,
-                    "version": version,
-                    "created_at": now,
+                    "id": thesis_id,
+                    "name": name or thesis_id,
+                    "statement": statement,
+                    "current_version": version,
+                    "created_at": (existing or {}).get("created_at") or now,
+                    "archived_at": (existing or {}).get("archived_at"),
+                    "is_active": 1 if make_active else (existing or {}).get("is_active", 0),
                 },
-                pk=("thesis_id", "version"),
+                pk="id",
                 alter=True,
             )
-        if make_active:
-            self.set_active_thesis(thesis_id)
+            if version:
+                self.db["thesis_versions"].upsert(
+                    {
+                        "thesis_id": thesis_id,
+                        "version": version,
+                        "created_at": now,
+                    },
+                    pk=("thesis_id", "version"),
+                    alter=True,
+                )
+            if make_active:
+                self.set_active_thesis(thesis_id)
 
     def get_thesis(self, thesis_id: str) -> dict | None:
         if not self.db["theses"].exists():
@@ -407,9 +605,11 @@ class Store:
     def set_active_thesis(self, thesis_id: str) -> None:
         if not self.db["theses"].exists():
             return
-        self.db.execute("update theses set is_active = 0")
-        self.db.execute("update theses set is_active = 1 where id = ?", [thesis_id])
-        self.db.conn.commit()
+        with self.write_tx():
+            self.db.execute("update theses set is_active = 0")
+            self.db.execute(
+                "update theses set is_active = 1 where id = ?", [thesis_id]
+            )
 
     def active_thesis_id(self) -> str | None:
         if not self.db["theses"].exists():
@@ -502,30 +702,31 @@ class Store:
         """
         if from_id == to_id or not self.db["runs"].exists():
             return 0
-        moved = self.db.execute(
-            "select count(*) from runs where thesis_id = ?", [from_id]
-        ).fetchone()[0]
-        self.db.execute(
-            "update runs set thesis_id = ? where thesis_id = ?", [to_id, from_id]
-        )
-        for table, column in (
-            ("llm_verdicts", "thesis_id"),
-            ("llm_verdict_history", "thesis_id"),
-            ("pipeline", "sourced_thesis_id"),
-        ):
-            if self.db[table].exists() and column in self.db[table].columns_dict:
+        with self.write_tx():
+            moved = self.db.execute(
+                "select count(*) from runs where thesis_id = ?", [from_id]
+            ).fetchone()[0]
+            self.db.execute(
+                "update runs set thesis_id = ? where thesis_id = ?", [to_id, from_id]
+            )
+            for table, column in (
+                ("llm_verdicts", "thesis_id"),
+                ("llm_verdict_history", "thesis_id"),
+                ("pipeline", "sourced_thesis_id"),
+            ):
+                if self.db[table].exists() and column in self.db[table].columns_dict:
+                    self.db.execute(
+                        f"update {table} set {column} = ? where {column} = ?",
+                        [to_id, from_id],
+                    )
+            if self.db["thesis_versions"].exists():
                 self.db.execute(
-                    f"update {table} set {column} = ? where {column} = ?",
+                    "update or replace thesis_versions set thesis_id = ? "
+                    "where thesis_id = ?",
                     [to_id, from_id],
                 )
-        if self.db["thesis_versions"].exists():
-            self.db.execute(
-                "update or replace thesis_versions set thesis_id = ? where thesis_id = ?",
-                [to_id, from_id],
-            )
-        if self.db["theses"].exists():
-            self.db.execute("delete from theses where id = ?", [from_id])
-        self.db.conn.commit()
+            if self.db["theses"].exists():
+                self.db.execute("delete from theses where id = ?", [from_id])
         return moved
 
     def adopt_history(self, thesis_id: str, statement: str) -> int:
@@ -786,45 +987,46 @@ class Store:
         """
         watcher = watcher.lstrip("@").lower()
         now = datetime.now(timezone.utc).isoformat()
-        if not self._watcher_baseline(watcher):
-            self.db["follow_meta"].insert(
-                {"watcher": watcher, "first_snapshot_at": now}, pk="watcher"
-            )
-        edges = self.db["follow_edges"]
-        known: set[str] = set()
-        if edges.exists():
-            known = {
-                r["followee"]
-                for r in edges.rows_where("watcher = ?", [watcher])
-            }
-        # Two batched upserts (new edges / refreshes) instead of one
-        # autocommitted upsert per followee — a watcher list is ~100 rows.
-        # A refresh row carries last_seen only, so first_seen is preserved.
-        seen: set[str] = set()
-        new_rows: list[dict] = []
-        refresh_rows: list[dict] = []
-        for handle in followee_handles:
-            followee = handle.lstrip("@").lower()
-            if followee in seen:
-                continue
-            seen.add(followee)
-            if followee in known:
-                refresh_rows.append(
-                    {"watcher": watcher, "followee": followee, "last_seen": now}
+        with self.write_tx():
+            if not self._watcher_baseline(watcher):
+                self.db["follow_meta"].insert(
+                    {"watcher": watcher, "first_snapshot_at": now}, pk="watcher"
                 )
-            else:
-                new_rows.append(
-                    {
-                        "watcher": watcher,
-                        "followee": followee,
-                        "first_seen": now,
-                        "last_seen": now,
-                    }
-                )
-        if new_rows:
-            edges.upsert_all(new_rows, pk=("watcher", "followee"))
-        if refresh_rows:
-            edges.upsert_all(refresh_rows, pk=("watcher", "followee"))
+            edges = self.db["follow_edges"]
+            known: set[str] = set()
+            if edges.exists():
+                known = {
+                    r["followee"]
+                    for r in edges.rows_where("watcher = ?", [watcher])
+                }
+            # Two batched upserts (new edges / refreshes) instead of one
+            # autocommitted upsert per followee — a watcher list is ~100 rows.
+            # A refresh row carries last_seen only, so first_seen is preserved.
+            seen: set[str] = set()
+            new_rows: list[dict] = []
+            refresh_rows: list[dict] = []
+            for handle in followee_handles:
+                followee = handle.lstrip("@").lower()
+                if followee in seen:
+                    continue
+                seen.add(followee)
+                if followee in known:
+                    refresh_rows.append(
+                        {"watcher": watcher, "followee": followee, "last_seen": now}
+                    )
+                else:
+                    new_rows.append(
+                        {
+                            "watcher": watcher,
+                            "followee": followee,
+                            "first_seen": now,
+                            "last_seen": now,
+                        }
+                    )
+            if new_rows:
+                edges.upsert_all(new_rows, pk=("watcher", "followee"))
+            if refresh_rows:
+                edges.upsert_all(refresh_rows, pk=("watcher", "followee"))
 
     def _watcher_baseline(self, watcher: str) -> str | None:
         if not self.db["follow_meta"].exists():
@@ -904,6 +1106,22 @@ class Store:
             thesis_version = (self.get_thesis(thesis_id) or {}).get(
                 "current_version", ""
             ) or ""
+        with self.write_tx():
+            self._record_verdict_locked(
+                key, fingerprint, verdict,
+                thesis_id=thesis_id, thesis_version=thesis_version,
+            )
+
+    def _record_verdict_locked(
+        self,
+        key: str,
+        fingerprint: str,
+        verdict: LLMVerdict,
+        *,
+        thesis_id: str,
+        thesis_version: str,
+    ) -> None:
+        """Archive-then-overwrite as one unit (caller holds write_tx)."""
         self._archive_verdict(key)
         self.db["llm_verdicts"].upsert(
             {
@@ -1006,22 +1224,23 @@ class Store:
     def record_bio(self, handle: str, bio: str) -> str | None:
         """Snapshot a bio if it changed; return the PREVIOUS bio (None if first sighting)."""
         handle = handle.lstrip("@").lower()
-        latest = None
-        if self.db["bio_snapshots"].exists():
-            rows = list(self.db["bio_snapshots"].rows_where(
-                "handle = ?", [handle], order_by="seen_at desc", limit=1
-            ))
-            latest = rows[0]["bio"] if rows else None
-        if latest == bio:
-            return latest  # unchanged — previous == current, caller sees no change
-        self.db["bio_snapshots"].insert(
-            {
-                "handle": handle,
-                "bio": bio,
-                "seen_at": datetime.now(timezone.utc).isoformat(),
-            }
-        )
-        return latest
+        with self.write_tx():
+            latest = None
+            if self.db["bio_snapshots"].exists():
+                rows = list(self.db["bio_snapshots"].rows_where(
+                    "handle = ?", [handle], order_by="seen_at desc", limit=1
+                ))
+                latest = rows[0]["bio"] if rows else None
+            if latest == bio:
+                return latest  # unchanged — previous == current, no change seen
+            self.db["bio_snapshots"].insert(
+                {
+                    "handle": handle,
+                    "bio": bio,
+                    "seen_at": datetime.now(timezone.utc).isoformat(),
+                }
+            )
+            return latest
 
     # --------------------------------------------------------- unlinked leads
 
@@ -1055,6 +1274,7 @@ class Store:
         brief_edited: bool = False,
         brief_meta: dict | None = None,
         sourced_thesis_id: str | None = None,
+        actor: str | None = None,
     ) -> None:
         """Upsert deal-flow state for one lead (read-merge-write so partial
         updates never clobber the other fields).
@@ -1064,40 +1284,47 @@ class Store:
         manual edit (brief_edited=True) stamps brief_edited_at and keeps the
         original generation time. `brief_meta` (depth, sources, searches —
         agents.investment_memo's meta) is stored as brief_meta_json alongside
-        a generation and left untouched by edits."""
+        a generation and left untouched by edits.
+
+        Runs inside write_tx so two sessions updating the same startup merge
+        instead of clobbering; `updated_by` records the writer."""
         handle = handle.lstrip("@").lower()
-        row = {"handle": handle}
-        if self.db["pipeline"].exists():
-            existing = list(self.db["pipeline"].rows_where("handle = ?", [handle], limit=1))
-            if existing:
-                row = dict(existing[0])
-        now = datetime.now(timezone.utc).isoformat()
-        if status is not None:
-            row["status"] = status
-        if notes is not None:
-            row["notes"] = notes
-        if outreach is not None:
-            row["outreach"] = outreach
-            row["outreach_at"] = now
-        if channel is not None:
-            row["channel"] = channel
-        if brief is not None:
-            row["brief"] = brief
-            if brief_edited:
-                row["brief_edited_at"] = now
-            else:
-                row["brief_at"] = now
-                row["brief_edited_at"] = None
-        if brief_meta is not None:
-            row["brief_meta_json"] = json.dumps(brief_meta)
-        # Which thesis brought this company in. Triage itself stays global — a
-        # company you shortlisted is shortlisted, whichever thesis found it —
-        # but the attribution answers "why is this in my pipeline". Only ever
-        # set once, so a later thesis cannot rewrite the origin.
-        if sourced_thesis_id and not row.get("sourced_thesis_id"):
-            row["sourced_thesis_id"] = sourced_thesis_id
-        row["updated_at"] = datetime.now(timezone.utc).isoformat()
-        self.db["pipeline"].upsert(row, pk="handle", alter=True)
+        with self.write_tx():
+            row = {"handle": handle}
+            if self.db["pipeline"].exists():
+                existing = list(
+                    self.db["pipeline"].rows_where("handle = ?", [handle], limit=1)
+                )
+                if existing:
+                    row = dict(existing[0])
+            now = datetime.now(timezone.utc).isoformat()
+            if status is not None:
+                row["status"] = status
+            if notes is not None:
+                row["notes"] = notes
+            if outreach is not None:
+                row["outreach"] = outreach
+                row["outreach_at"] = now
+            if channel is not None:
+                row["channel"] = channel
+            if brief is not None:
+                row["brief"] = brief
+                if brief_edited:
+                    row["brief_edited_at"] = now
+                else:
+                    row["brief_at"] = now
+                    row["brief_edited_at"] = None
+            if brief_meta is not None:
+                row["brief_meta_json"] = json.dumps(brief_meta)
+            # Which thesis brought this company in. Triage itself stays global —
+            # a company you shortlisted is shortlisted, whichever thesis found
+            # it — but the attribution answers "why is this in my pipeline".
+            # Only ever set once, so a later thesis cannot rewrite the origin.
+            if sourced_thesis_id and not row.get("sourced_thesis_id"):
+                row["sourced_thesis_id"] = sourced_thesis_id
+            row["updated_at"] = now
+            row["updated_by"] = actor or self.actor or ""
+            self.db["pipeline"].upsert(row, pk="handle", alter=True)
 
     @staticmethod
     def _decode_pipeline(row: dict) -> dict:
@@ -1172,6 +1399,23 @@ class Store:
         key = key.strip()
         if not key:
             raise ValueError("column key must be non-empty")
+        with self.write_tx():
+            self._save_column_locked(
+                key, label, col_type, options=options, builtin=builtin,
+                position=position, ai_fill=ai_fill,
+            )
+
+    def _save_column_locked(
+        self,
+        key: str,
+        label: str,
+        col_type: str,
+        *,
+        options: list[str] | None,
+        builtin: bool,
+        position: int | None,
+        ai_fill: bool,
+    ) -> None:
         if position is None:
             existing = [c["position"] for c in self.list_columns()]
             position = (max(existing) + 1) if existing else 0
@@ -1214,30 +1458,33 @@ class Store:
             rows.append(row)
         return rows
 
-    def set_attrs(self, handle: str, changes: dict) -> None:
+    def set_attrs(self, handle: str, changes: dict, *, actor: str | None = None) -> None:
         """Merge per-startup attribute values (column key → value). A None
-        value deletes the key. Read-merge-write, like set_pipeline."""
+        value deletes the key. Read-merge-write inside write_tx, like
+        set_pipeline; `updated_by` records the writer."""
         handle = handle.lstrip("@").lower()
-        values: dict = {}
-        if self.db["startup_attrs"].exists():
-            rows = list(self.db["startup_attrs"].rows_where(
-                "handle = ?", [handle], limit=1))
-            if rows:
-                values = json.loads(rows[0].get("values_json") or "{}")
-        for key, value in changes.items():
-            if value is None:
-                values.pop(key, None)
-            else:
-                values[key] = value
-        self.db["startup_attrs"].upsert(
-            {
-                "handle": handle,
-                "values_json": json.dumps(values),
-                "updated_at": datetime.now(timezone.utc).isoformat(),
-            },
-            pk="handle",
-            alter=True,
-        )
+        with self.write_tx():
+            values: dict = {}
+            if self.db["startup_attrs"].exists():
+                rows = list(self.db["startup_attrs"].rows_where(
+                    "handle = ?", [handle], limit=1))
+                if rows:
+                    values = json.loads(rows[0].get("values_json") or "{}")
+            for key, value in changes.items():
+                if value is None:
+                    values.pop(key, None)
+                else:
+                    values[key] = value
+            self.db["startup_attrs"].upsert(
+                {
+                    "handle": handle,
+                    "values_json": json.dumps(values),
+                    "updated_at": datetime.now(timezone.utc).isoformat(),
+                    "updated_by": actor or self.actor or "",
+                },
+                pk="handle",
+                alter=True,
+            )
 
     def all_attrs(self) -> dict[str, dict]:
         """Every startup's attribute values, keyed by lowercased handle."""
@@ -1259,6 +1506,7 @@ class Store:
         fit: float | None = None,
         score: float | None = None,
         note: str = "",
+        actor: str | None = None,
     ) -> None:
         """Persist the investor's manual scoring for one lead.
 
@@ -1268,27 +1516,30 @@ class Store:
         thesis_fit (0..1); `score` pins the FINAL score outright (0..100).
         Passing everything as None/empty clears the row — an override that
         overrides nothing shouldn't linger. Values replace the whole row
-        (the UI form always submits its full current state)."""
+        (the UI form always submits its full current state); `actor` records
+        whose numbers these are."""
         handle = handle.lstrip("@").lower()
         if not quality and not sections and fit is None and score is None:
             self.clear_override(handle)
             return
-        self.db["score_overrides"].upsert(
-            {
-                "handle": handle,
-                "quality_json": json.dumps(quality or {}),
-                "sections_json": json.dumps(sections or {}),
-                "fit": fit,
-                "score": score,
-                "note": note,
-                "updated_at": datetime.now(timezone.utc).isoformat(),
-            },
-            pk="handle",
-            alter=True,
-            # Explicit REAL affinity: a None on the first write would
-            # otherwise type these TEXT and hand back "88.0" strings.
-            columns={"fit": float, "score": float},
-        )
+        with self.write_tx():
+            self.db["score_overrides"].upsert(
+                {
+                    "handle": handle,
+                    "quality_json": json.dumps(quality or {}),
+                    "sections_json": json.dumps(sections or {}),
+                    "fit": fit,
+                    "score": score,
+                    "note": note,
+                    "updated_at": datetime.now(timezone.utc).isoformat(),
+                    "actor": actor or self.actor or "",
+                },
+                pk="handle",
+                alter=True,
+                # Explicit REAL affinity: a None on the first write would
+                # otherwise type these TEXT and hand back "88.0" strings.
+                columns={"fit": float, "score": float},
+            )
 
     def clear_override(self, handle: str) -> None:
         handle = handle.lstrip("@").lower()
@@ -1318,12 +1569,14 @@ class Store:
 
     def scan_start(self, kind: str, pid: int, phases: list[str] | None = None) -> None:
         """Mark a scan (run / verify / source preview) as running. Single-row
-        table: scout is single-user and runs are serialized by design.
+        table: scans are serialized firm-wide by design — one sourcing run at
+        a time keeps the paid-adapter budget guard race-free. (The jobs table
+        supersedes this as the queue; this row remains the live-progress view.)
 
         `phases` declares the expected phase sequence up front so the UI can
         render a stepper (pending → running → done). `SCOUT_SCAN_LOG` (set by
-        the UI when it launches the process detached) is recorded so any
-        session can tail the live console output."""
+        the launcher) is recorded so any session can tail the live console
+        output."""
         now = datetime.now(timezone.utc).isoformat()
         self.db["scan"].upsert(
             {
@@ -1355,37 +1608,39 @@ class Store:
         "s" — seconds means the phase is wall-clock-budgeted and the UI
         derives `done` from elapsed time). Counters reset on phase change
         unless explicitly passed."""
-        row = self._scan_row()
-        if not row or row.get("status") != "running":
-            return
-        now = datetime.now(timezone.utc).isoformat()
-        if phase != row.get("phase"):
-            log = json.loads(row.get("phase_log_json") or "[]")
-            log.append({"phase": phase, "at": now})
-            row["phase_log_json"] = json.dumps(log)
-        row.update(phase=phase, detail=detail, updated_at=now,
-                   done=done, total=total, unit=unit)
-        self.db["scan"].upsert(row, pk="id", alter=True)
+        with self.write_tx():
+            row = self._scan_row()
+            if not row or row.get("status") != "running":
+                return
+            now = datetime.now(timezone.utc).isoformat()
+            if phase != row.get("phase"):
+                log = json.loads(row.get("phase_log_json") or "[]")
+                log.append({"phase": phase, "at": now})
+                row["phase_log_json"] = json.dumps(log)
+            row.update(phase=phase, detail=detail, updated_at=now,
+                       done=done, total=total, unit=unit)
+            self.db["scan"].upsert(row, pk="id", alter=True)
 
     def scan_finish(self, status: str = "done", detail: str = "") -> None:
-        row = self._scan_row()
-        if not row:
-            return
-        now = datetime.now(timezone.utc).isoformat()
-        row.update(status=status, detail=detail or row.get("detail") or "",
-                   updated_at=now, finished_at=now)
-        self.db["scan"].upsert(row, pk="id", alter=True)
-        # Completed-scan history — powers empirical time estimates in the UI.
-        if row.get("started_at"):
-            self.db["scan_history"].insert(
-                {
-                    "kind": row.get("kind"), "status": status,
-                    "started_at": row.get("started_at"), "finished_at": now,
-                    "phase_log_json": row.get("phase_log_json") or "[]",
-                    "detail": row.get("detail") or "",
-                },
-                alter=True,
-            )
+        with self.write_tx():
+            row = self._scan_row()
+            if not row:
+                return
+            now = datetime.now(timezone.utc).isoformat()
+            row.update(status=status, detail=detail or row.get("detail") or "",
+                       updated_at=now, finished_at=now)
+            self.db["scan"].upsert(row, pk="id", alter=True)
+            # Completed-scan history — powers empirical time estimates in the UI.
+            if row.get("started_at"):
+                self.db["scan_history"].insert(
+                    {
+                        "kind": row.get("kind"), "status": status,
+                        "started_at": row.get("started_at"), "finished_at": now,
+                        "phase_log_json": row.get("phase_log_json") or "[]",
+                        "detail": row.get("detail") or "",
+                    },
+                    alter=True,
+                )
 
     def _scan_row(self) -> dict | None:
         if not self.db["scan"].exists():
