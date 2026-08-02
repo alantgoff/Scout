@@ -76,7 +76,60 @@ def test_last_scored_and_recently_scored_case_insensitive(tmp_path: Path) -> Non
     assert store.recently_scored("someoneelse", ttl_days=7) is False
 
 
+def test_last_scored_map_matches_per_handle_lookups(tmp_path: Path) -> None:
+    store = make_store(tmp_path)
+    signals = [Signal(name="bio_intent", value=1.0)]
+    store.save_leads("run-1", [Lead(account=make_account("Alpha", "1"), signals=signals)])
+    store.save_leads("run-2", [
+        Lead(account=make_account("ALPHA", "1"), signals=signals),
+        Lead(account=make_account("Beta", "2"), signals=signals),
+    ])
+    scored = store.last_scored_map()
+    # Lowercase-keyed, casings merged, newest run wins.
+    assert set(scored) == {"alpha", "beta"}
+    last = store.last_scored_at("alpha")
+    assert last is not None
+    assert scored["alpha"] == (
+        last if last.tzinfo else last.replace(tzinfo=timezone.utc)
+    )
+
+
+def test_last_scored_map_empty_without_leads(tmp_path: Path) -> None:
+    assert make_store(tmp_path).last_scored_map() == {}
+
+
+def test_secondary_indexes_created_once_tables_exist(tmp_path: Path) -> None:
+    store = make_store(tmp_path)
+    store.save_leads(
+        "run-1",
+        [Lead(account=make_account("a"), signals=[Signal(name="bio_intent", value=1.0)])],
+    )
+    store.upsert_account(make_account("a"))
+    # Tables are created lazily on first write; the next init indexes them.
+    reopened = Store(tmp_path / "test.db")
+    names = {
+        r[0]
+        for r in reopened.db.execute(
+            "select name from sqlite_master where type = 'index'"
+        ).fetchall()
+    }
+    assert {"idx_leads_handle", "idx_accounts_handle"} <= names
+
+
 # --- account sources round-trip -------------------------------------------------
+
+
+def test_upsert_accounts_batch_round_trip(tmp_path: Path) -> None:
+    store = make_store(tmp_path)
+    one = make_account("one", "1")
+    one.sources = ["search"]
+    two = make_account("two", "2")
+    two.followed_by = ["eladgil"]
+    store.upsert_accounts([one, two])
+    loaded_one = store.get_account("one")
+    loaded_two = store.get_account("two")
+    assert loaded_one is not None and loaded_one.sources == ["search"]
+    assert loaded_two is not None and loaded_two.followed_by == ["eladgil"]
 
 
 def test_account_sources_round_trip(tmp_path: Path) -> None:
@@ -127,6 +180,15 @@ def test_verdict_cache_expires_after_ttl(tmp_path: Path) -> None:
     store.db["llm_verdicts"].upsert({"handle": "alice", "created_at": stale}, pk="handle")
     assert store.cached_verdict("alice", "fp-1", ttl_days=14) is None
     assert store.cached_verdict("alice", "fp-1", ttl_days=30) is not None
+
+
+def test_pipeline_counts_group_by_status_with_new_fallback(tmp_path: Path) -> None:
+    store = make_store(tmp_path)
+    store.set_pipeline("a", status="shortlisted")
+    store.set_pipeline("b", status="passed")
+    store.set_pipeline("c", status="passed")
+    store.set_pipeline("d", notes="note only")  # no status → counted as "new"
+    assert store.pipeline_counts() == {"shortlisted": 1, "passed": 2, "new": 1}
 
 
 def test_pipeline_brief_persists_without_clobbering(tmp_path: Path) -> None:

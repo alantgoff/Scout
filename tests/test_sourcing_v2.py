@@ -53,6 +53,23 @@ def test_follow_edges_case_insensitive_and_at_stripped(tmp_path: Path) -> None:
     assert store.recent_watchers_for("newfounder", days=30) == ["eladgil"]
 
 
+def test_recent_watchers_map_matches_per_followee_lookups(tmp_path: Path) -> None:
+    store = make_store(tmp_path)
+    store.record_follow_snapshot("eladgil", ["x"])
+    store.record_follow_snapshot("saranormous", ["y"])
+    store.record_follow_snapshot("eladgil", ["x", "hotfounder"])
+    store.record_follow_snapshot("saranormous", ["y", "hotfounder", "newfounder"])
+    recent = store.recent_watchers_map(days=30)
+    assert sorted(recent["hotfounder"]) == ["eladgil", "saranormous"]
+    assert recent["newfounder"] == ["saranormous"]
+    # Baseline (cold-start) edges never count, matching recent_watchers_for.
+    assert "x" not in recent and "y" not in recent
+
+
+def test_recent_watchers_map_empty_without_history(tmp_path: Path) -> None:
+    assert make_store(tmp_path).recent_watchers_map(days=30) == {}
+
+
 def test_reobserved_edge_keeps_first_seen(tmp_path: Path) -> None:
     store = make_store(tmp_path)
     store.record_follow_snapshot("w", ["base"])

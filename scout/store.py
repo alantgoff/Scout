@@ -49,6 +49,7 @@ class Store:
         else:
             self.db = sqlite_utils.Database(db_path)
         self._migrate_thesis_columns()
+        self._ensure_indexes()
 
     def _migrate_thesis_columns(self) -> None:
         """Add the thesis-provenance columns to tables that predate them.
@@ -72,17 +73,64 @@ class Store:
                 for name, col_type in missing.items():
                     self.db[table].add_column(name, col_type)
 
+    def _ensure_indexes(self) -> None:
+        """Secondary indexes for the per-handle hot paths.
+
+        Every composite pk here indexes the WRONG prefix for these lookups
+        (leads is keyed run_id-first, follow_edges watcher-first, tweets by
+        tweet id), so without these each per-account query in the pipeline
+        was a full table scan — O(accounts × table) loops in aggregate.
+        Idempotent, and skipped for tables that don't exist yet (sqlite-utils
+        creates tables lazily on first write; the index lands on the next
+        Store init, which every CLI command and UI rerun performs)."""
+        for table, name, columns, expr in (
+            # last_scored_at: handle = ? COLLATE NOCASE, newest first.
+            ("leads", "idx_leads_handle",
+             {"handle", "created_at"}, "handle collate nocase, created_at"),
+            # get_tweets: account_id = ?, newest first.
+            ("tweets", "idx_tweets_account",
+             {"account_id", "created_at"}, "account_id, created_at"),
+            # get_account: handle = ? COLLATE NOCASE.
+            ("accounts", "idx_accounts_handle", {"handle"}, "handle collate nocase"),
+            # record_bio: latest snapshot per handle (table grows every run).
+            ("bio_snapshots", "idx_bio_snapshots_handle",
+             {"handle", "seen_at"}, "handle, seen_at"),
+            # recent_watchers_for/_map: followee = ? and first_seen >= ?.
+            ("follow_edges", "idx_follow_edges_followee",
+             {"followee", "first_seen"}, "followee, first_seen"),
+            # verdict_history: handle = ?, newest archive first.
+            ("llm_verdict_history", "idx_verdict_history_handle",
+             {"handle", "archived_at"}, "handle, archived_at"),
+        ):
+            if not self.db[table].exists():
+                continue
+            if not columns <= set(self.db[table].columns_dict):
+                continue  # legacy table shape — never let an index break init
+            self.db.execute(f"create index if not exists {name} on {table}({expr})")
+        self.db.conn.commit()
+
     # ------------------------------------------------------------------ cache
 
     def upsert_account(self, account: Account) -> None:
-        row = account.model_dump(mode="json")
-        row["followed_by"] = json.dumps(row["followed_by"])
-        row["sources"] = json.dumps(row.get("sources") or [])
-        # Enrichment fields are recomputed from history every run — don't persist
-        # stale values.
-        row.pop("recent_followed_by", None)
-        row.pop("bio_changed", None)
-        self.db["accounts"].upsert(row, pk="id", alter=True)
+        self.upsert_accounts([account])
+
+    def upsert_accounts(self, accounts: list[Account]) -> None:
+        """Batched account upsert — one statement batch instead of one
+        autocommitted transaction per row (sourcing used to re-upsert an
+        account on every sighting of it)."""
+        if not accounts:
+            return
+        rows = []
+        for account in accounts:
+            row = account.model_dump(mode="json")
+            row["followed_by"] = json.dumps(row["followed_by"])
+            row["sources"] = json.dumps(row.get("sources") or [])
+            # Enrichment fields are recomputed from history every run — don't
+            # persist stale values.
+            row.pop("recent_followed_by", None)
+            row.pop("bio_changed", None)
+            rows.append(row)
+        self.db["accounts"].upsert_all(rows, pk="id", alter=True)
 
     def upsert_tweets(self, tweets: list[Tweet]) -> None:
         if tweets:
@@ -164,6 +212,23 @@ class Store:
         if last.tzinfo is None:
             last = last.replace(tzinfo=timezone.utc)
         return datetime.now(timezone.utc) - last < timedelta(days=ttl_days)
+
+    def last_scored_map(self) -> dict[str, datetime]:
+        """Newest scored-at per lowercased handle, across all runs — the
+        batched form of `last_scored_at` for the pipeline's TTL skip (one
+        grouped query instead of one query per candidate account)."""
+        if not self.db["leads"].exists():
+            return {}
+        out: dict[str, datetime] = {}
+        rows = self.db.execute(
+            "select lower(handle), max(created_at) from leads group by lower(handle)"
+        ).fetchall()
+        for handle, created in rows:
+            if not created:
+                continue
+            ts = datetime.fromisoformat(created)
+            out[handle] = ts if ts.tzinfo else ts.replace(tzinfo=timezone.utc)
+        return out
 
     # ------------------------------------------------------------------ leads
 
@@ -732,24 +797,34 @@ class Store:
                 r["followee"]
                 for r in edges.rows_where("watcher = ?", [watcher])
             }
+        # Two batched upserts (new edges / refreshes) instead of one
+        # autocommitted upsert per followee — a watcher list is ~100 rows.
+        # A refresh row carries last_seen only, so first_seen is preserved.
+        seen: set[str] = set()
+        new_rows: list[dict] = []
+        refresh_rows: list[dict] = []
         for handle in followee_handles:
             followee = handle.lstrip("@").lower()
+            if followee in seen:
+                continue
+            seen.add(followee)
             if followee in known:
-                # existing edge — refresh last_seen only, preserve first_seen
-                edges.upsert(
-                    {"watcher": watcher, "followee": followee, "last_seen": now},
-                    pk=("watcher", "followee"),
+                refresh_rows.append(
+                    {"watcher": watcher, "followee": followee, "last_seen": now}
                 )
             else:
-                edges.upsert(
+                new_rows.append(
                     {
                         "watcher": watcher,
                         "followee": followee,
                         "first_seen": now,
                         "last_seen": now,
-                    },
-                    pk=("watcher", "followee"),
+                    }
                 )
+        if new_rows:
+            edges.upsert_all(new_rows, pk=("watcher", "followee"))
+        if refresh_rows:
+            edges.upsert_all(refresh_rows, pk=("watcher", "followee"))
 
     def _watcher_baseline(self, watcher: str) -> str | None:
         if not self.db["follow_meta"].exists():
@@ -776,6 +851,31 @@ class Store:
             if baseline and row["first_seen"] > baseline:
                 recent.append(row["watcher"])
         return recent
+
+    def recent_watchers_map(self, days: int) -> dict[str, list[str]]:
+        """Every followee's recent new watchers in ONE query — the batched
+        form of `recent_watchers_for`, same rules (first_seen inside the
+        window AND strictly after that watcher's baseline snapshot). The
+        per-followee form scanned follow_edges once per candidate account,
+        which made enrichment and the graph leg O(accounts × edges)."""
+        if not (
+            self.db["follow_edges"].exists() and self.db["follow_meta"].exists()
+        ):
+            return {}
+        cutoff = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat()
+        rows = self.db.execute(
+            """
+            select e.followee, e.watcher
+            from follow_edges e
+            join follow_meta m on m.watcher = e.watcher
+            where e.first_seen >= ? and e.first_seen > m.first_snapshot_at
+            """,
+            [cutoff],
+        ).fetchall()
+        out: dict[str, list[str]] = {}
+        for followee, watcher in rows:
+            out.setdefault(followee, []).append(watcher)
+        return out
 
     # ---------------------------------------------------------- verdict cache
 
@@ -1020,11 +1120,17 @@ class Store:
 
     def pipeline_counts(self) -> dict[str, int]:
         """Count of leads at each status (only statuses that appear)."""
-        counts: dict[str, int] = {}
-        for row in self.all_pipeline().values():
-            status = row.get("status") or "new"
-            counts[status] = counts.get(status, 0) + 1
-        return counts
+        if not self.db["pipeline"].exists():
+            return {}
+        if "status" not in self.db["pipeline"].columns_dict:
+            # Rows exist (notes/outreach) but nothing ever set a status.
+            n = self.db.execute("select count(*) from pipeline").fetchone()[0]
+            return {"new": n} if n else {}
+        rows = self.db.execute(
+            "select coalesce(nullif(status, ''), 'new'), count(*) "
+            "from pipeline group by 1"
+        ).fetchall()
+        return {status: n for status, n in rows}
 
     # ------------------------------------------- startup columns & attributes
 

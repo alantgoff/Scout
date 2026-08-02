@@ -6,7 +6,7 @@ import asyncio
 import json
 import os
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from enum import Enum
 from pathlib import Path
 from typing import Annotated
@@ -285,11 +285,14 @@ def _enrich_accounts(
 ) -> None:
     """Fill enrichment fields from store history (in place):
     bio_changed (bio snapshot diff) and recent_followed_by (follow-edge diff)."""
+    # One batched recency query for every account, instead of a follow-edge
+    # scan per account (recent_watchers_map keys are lowercased followees).
+    recent_map = store.recent_watchers_map(settings.recent_follow_days)
     for account in accounts:
         previous_bio = store.record_bio(account.handle, account.bio)
         account.bio_changed = intent_appeared(previous_bio, account.bio, thesis)
-        account.recent_followed_by = store.recent_watchers_for(
-            account.handle, settings.recent_follow_days
+        account.recent_followed_by = recent_map.get(
+            account.handle.lstrip("@").lower(), []
         )
 
 
@@ -565,7 +568,13 @@ def _run_pipeline(
 
     _enrich_accounts(accounts, store, thesis, settings)
 
-    fresh = [a for a in accounts if not store.recently_scored(a.handle, ttl_days)]
+    # One grouped query for the TTL skip, not one leads-table query per account.
+    scored_at = store.last_scored_map()
+    ttl_cutoff = datetime.now(timezone.utc) - timedelta(days=ttl_days)
+    fresh = [
+        a for a in accounts
+        if (last := scored_at.get(a.handle.lower())) is None or last <= ttl_cutoff
+    ]
     skipped = len(accounts) - len(fresh)
     if skipped:
         console.print(
