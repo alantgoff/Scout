@@ -113,6 +113,7 @@ from scout.export import memo_pdf_bytes, pipeline_rows, write_pipeline_csv
 from scout.insights import actor_stats, model_disagreements, stats_prompt, triage_stats
 from scout import jobs as jobs_mod
 from scout import notify
+from scout import theses as theses_mod
 from scout.models import (
     FUNDING_STAGE_LABELS,
     FUNDING_STAGE_ORDER,
@@ -998,7 +999,6 @@ if _pending_toast := st.session_state.pop("toast", None):
     st.toast(_pending_toast)
 
 settings = Settings(_env_file=ENV_PATH if ENV_PATH.exists() else None)
-thesis = load_thesis(THESIS_PATH)
 seeds = load_seeds(SEEDS_PATH)
 store = Store(Path(settings.db_path), cross_thread=True)
 # Firm-shared runtime knobs (spend cap, model, run sizes) live in the DB and
@@ -1096,6 +1096,15 @@ IS_ADMIN = CURRENT_USER.get("role") == "admin"
 # Gated to once per session per thesis tuning: Streamlit re-executes this
 # script on EVERY interaction, and the backfills (window-function scans) plus
 # the registry upsert are pure rework within an unchanged session.
+# The thesis is resolved PER MEMBER (see scout.theses): an explicit id, then
+# this member's own pointer, then the workspace default, then thesis.yaml.
+# Loaded here rather than at import time because it needs both the store and
+# the signed-in identity, neither of which exists further up.
+if st.session_state.get("thesis_files_synced") != str(THESIS_PATH):
+    # One-time adoption for installs whose theses only ever lived on disk.
+    theses_mod.sync_files_to_db(store, THESIS_PATH)
+    st.session_state["thesis_files_synced"] = str(THESIS_PATH)
+thesis = theses_mod.resolve(store, actor=ACTOR, path=THESIS_PATH)
 ACTIVE_THESIS_ID = ensure_thesis_id(thesis)
 ACTIVE_VERSION = thesis_version(thesis, seeds)
 if st.session_state.get("thesis_synced") != (ACTIVE_THESIS_ID, ACTIVE_VERSION):
@@ -1240,6 +1249,21 @@ def _version_number(thesis_id: str, version: str) -> int:
     return next(
         (h["n"] for h in history if h["version"] == version), len(history) + 1
     )
+
+
+def _save_thesis(updated) -> str:
+    """Persist a thesis edit.
+
+    Database first — that is the copy both partners read, litestream backs
+    up, and a replaced container keeps. thesis.yaml is only rewritten when
+    the edited thesis IS the workspace default, so one member refining their
+    own thesis cannot silently re-aim the scheduled run or their partner's
+    workspace.
+    """
+    default_id = store.active_thesis_id()
+    is_default = default_id in (None, "", ensure_thesis_id(updated))
+    return theses_mod.persist(store, updated, path=THESIS_PATH,
+                              write_active_file=is_default)
 
 
 def _active_thesis_label() -> str:
@@ -3481,7 +3505,10 @@ if nav == "Thesis":
                     'startups stay attributed to the thesis that surfaced them.</div>',
                     unsafe_allow_html=True)
         for row in _THESIS_ROWS:
+            # Two different questions: "am I looking at this one" (per
+            # member) versus "does unattended work use it" (firm-wide).
             is_active = row["id"] == ACTIVE_THESIS_ID
+            is_workspace_default = row["id"] == store.active_thesis_id()
             versions = store.thesis_version_history(row["id"])
             n_stale = (
                 len(STALE_HANDLES) if is_active
@@ -3511,8 +3538,17 @@ if nav == "Thesis":
                                 unsafe_allow_html=True)
                 elif st.button("Switch", key=f"use_{row['id']}"):
                     try:
-                        switch_thesis(row["id"], THESIS_PATH)
-                        store.set_active_thesis(row["id"])
+                        # Per-member: switching re-aims YOUR workspace only.
+                        # Your partner keeps theirs, and — importantly — the
+                        # scheduled run keeps sourcing against the workspace
+                        # default until an admin changes it below.
+                        if store.get_thesis_config(row["id"]) is None:
+                            switch_thesis(row["id"], THESIS_PATH)
+                            theses_mod.persist(
+                                store, load_thesis(THESIS_PATH),
+                                path=THESIS_PATH, write_active_file=False,
+                            )
+                        theses_mod.switch_for_user(store, ACTOR, row["id"])
                         st.session_state["toast"] = f"Now scoring against {name}"
                         st.rerun()
                     except FileNotFoundError:
@@ -3524,6 +3560,19 @@ if nav == "Thesis":
                             "configuration to switch to. Its startups are still "
                             "listed under it in Startups → All runs."
                         )
+                # The workspace default is what UNATTENDED work uses — the
+                # scheduled sourcing run belongs to the firm, not to whoever
+                # last clicked Switch. Admin-only for that reason.
+                if IS_ADMIN and not is_workspace_default:
+                    if st.button("Make firm default", key=f"default_{row['id']}",
+                                 help="Scheduled runs and digests will source "
+                                      "against this thesis."):
+                        theses_mod.set_workspace_default(store, row["id"])
+                        st.session_state["toast"] = f"{name} is now the firm default"
+                        st.rerun()
+                elif is_workspace_default:
+                    st.markdown('<div class="subtle">firm default</div>',
+                                unsafe_allow_html=True)
         st.divider()
 
     # --- AI strategy designer -------------------------------------------------
@@ -3628,7 +3677,7 @@ if nav == "Thesis":
                         "watchlist": [w for w in proposal.watchlist if w not in dropped]
                     })
                 new_thesis, new_seeds = apply_strategy(to_apply, thesis, seeds)
-                save_thesis(new_thesis, THESIS_PATH)
+                _save_thesis(new_thesis)
                 save_seeds(new_seeds, SEEDS_PATH)
                 for k in ("proposal", "watchlist_invalid", "watchlist_validated"):
                     st.session_state.pop(k, None)
@@ -3742,11 +3791,11 @@ if nav == "Thesis":
                 sectors = st.text_area("Sectors (classifier context)", _to_lines(thesis.sectors), height=120)
                 disqualifiers = st.text_area("Disqualifiers (drop account)", _to_lines(thesis.disqualifiers), height=120)
             if st.form_submit_button("Save targeting", type="primary"):
-                save_thesis(thesis.model_copy(update={
+                _save_thesis(thesis.model_copy(update={
                     "target_stages": chosen_stages or list(STAGES),
                     "keywords": _from_lines(keywords), "target_bios": _from_lines(target_bios),
                     "launch_phrases": _from_lines(launch_phrases), "sectors": _from_lines(sectors),
-                    "disqualifiers": _from_lines(disqualifiers)}), THESIS_PATH)
+                    "disqualifiers": _from_lines(disqualifiers)}))
                 st.success("Saved."); st.rerun()
 
     with st.expander("Query bank — X searches and bio search"):
@@ -3936,8 +3985,8 @@ if nav == "Thesis":
                 )
                 w1, w2, _w3 = st.columns([1.1, 1, 3])
                 if w1.button("Apply weights", type="primary"):
-                    save_thesis(thesis.model_copy(update={"weights": weight_proposal.weights}),
-                                THESIS_PATH)
+                    _save_thesis(
+                        thesis.model_copy(update={"weights": weight_proposal.weights}))
                     st.session_state.pop("weight_proposal", None)
                     st.session_state["toast"] = "Weights updated — re-rank with a run or demo."
                     st.rerun()
@@ -4037,7 +4086,7 @@ if nav == "Thesis":
                                       height=260, label_visibility="collapsed")
             if st.form_submit_button("Save signals", type="primary"):
                 new_prompt = "" if llm_prompt.strip() == DEFAULT_PROMPT_TEMPLATE.strip() else llm_prompt
-                save_thesis(thesis.model_copy(update={
+                _save_thesis(thesis.model_copy(update={
                     "weights": {k: float(v) for k, v in new_weights.items()},
                     "scorecard_weights": new_scorecard_weights,
                     # Every param must be listed — a missing one silently
@@ -4049,7 +4098,7 @@ if nav == "Thesis":
                         score_weight_quality=wq, score_weight_fit=wf,
                         score_weight_signals=ws,
                         value_add_weight=vw, ungrounded_multiplier=um),
-                    "llm_prompt": new_prompt}), THESIS_PATH)
+                    "llm_prompt": new_prompt}))
                 st.success("Saved."); st.rerun()
 
         with st.expander(f"{thesis.firm_name or 'Firm'} value-add levers"):

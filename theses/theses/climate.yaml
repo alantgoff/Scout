@@ -1,0 +1,81 @@
+# Managed by scout (UI / `scout strategy`). target_stages steers search + scoring;
+# signal_params and llm_prompt are editable in the UI.
+id: climate
+name: Climate
+thesis: Climate hardware
+keywords: []
+target_bios: []
+sectors: []
+disqualifiers: []
+product_disqualifiers: []
+weights: {}
+quality_weights:
+  team: 20
+  tech_product: 20
+  market: 15
+  defensibility: 15
+  traction: 20
+  investors: 10
+scorecard_weights:
+  b2b:
+    founders_captable: 18
+    market: 23
+    technology: 23
+    product: 18
+    traction_bm: 18
+  b2c:
+    founders_captable: 18
+    market: 23
+    product_experience: 23
+    growth_engagement: 18
+    monetization_bm: 18
+launch_phrases:
+- launch
+- launching
+- launched
+- introducing
+- shipped
+- we built
+- day 1
+- beta
+- waitlist
+target_stages:
+- idea
+- stealth
+- launched
+- scaling
+signal_params:
+  traction_floor: 0.05
+  traction_saturation: 0.25
+  traction_window_days: 30
+  convergence_full_credit: 2
+  stage_mismatch_multiplier: 0.5
+  score_weight_quality: 0.45
+  score_weight_fit: 0.35
+  score_weight_signals: 0.2
+  value_add_weight: 0.0
+  ungrounded_multiplier: 0.6
+firm_name: Headline
+firm_value_add:
+- key: global_expansion
+  label: Local-to-global expansion
+  description: Autonomous local funds in the US, Europe, Latin America, and Asia connected into one global
+    platform — startups whose product or go-to-market must cross borders early (multi-region customers,
+    US↔EU expansion, international marketplaces) get on-the-ground help in each market.
+- key: follow_on_capital
+  label: Multi-stage follow-on capital
+  description: Early-stage checks of $1.5–15M chain into an $865M growth fund writing $20–70M from Series
+    B — startups on capital-intensive trajectories (infra buildout, GPU spend, market-by-market expansion)
+    that will need deep follow-on rounds benefit most.
+- key: data_driven_growth
+  label: Data-driven growth benchmarking
+  description: Proprietary systems (EVA sourcing, ATHENA analytics, Searchlight, the founder-facing Deepdive)
+    benchmark traction, retention, and product-market fit against one of the largest startup datasets
+    in venture — startups with measurable usage or revenue metrics (consumer, marketplaces, usage-based
+    SaaS, PLG devtools) can be benchmarked and coached with it.
+- key: sector_playbooks
+  label: Sector depth & portfolio network
+  description: Operator networks and repeat playbooks in fintech, commerce/consumer, B2B SaaS, and AI
+    infrastructure (portfolio includes Mistral AI, NGINX, Sonos, Bumble, Gopuff, Acorns, Raisin) — startups
+    in these lanes tap portfolio intros, customer pipelines, and hiring networks.
+llm_prompt: ''

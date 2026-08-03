@@ -108,6 +108,20 @@ class Store:
             pk="id",
             if_not_exists=True,
         )
+        # The thesis registry is written by two different paths (metadata on
+        # every run, full config on every save). Declaring the shape up front
+        # means whichever runs first cannot leave the other's columns
+        # missing — `is_active` in particular is read before either writes.
+        self.db["theses"].create(
+            {
+                "id": str, "name": str, "statement": str,
+                "current_version": str, "created_at": str, "archived_at": str,
+                "is_active": int, "config_json": str,
+                "config_updated_at": str, "config_updated_by": str,
+            },
+            pk="id",
+            if_not_exists=True,
+        )
         self.db["memo_versions"].create(
             {
                 "id": int, "handle": str, "version_no": int, "body": str,
@@ -628,6 +642,58 @@ class Store:
             return None
         rows = list(self.db["theses"].rows_where("id = ?", [thesis_id], limit=1))
         return rows[0] if rows else None
+
+    def save_thesis_config(self, thesis_id: str, config: dict) -> None:
+        """Store a thesis's FULL configuration in the database.
+
+        The registry above tracks identity and version; this holds the thing
+        itself — weights, queries, disqualifiers, the lot. Keeping it in the
+        database rather than only in thesis.yaml is what makes a thesis
+        shared firm state: litestream backs it up, a replaced container
+        keeps it, and two partners editing from different continents are
+        reading and writing one copy instead of racing over a file.
+        """
+        with self.write_tx():
+            self.db["theses"].upsert(
+                {
+                    "id": thesis_id,
+                    "config_json": json.dumps(config, sort_keys=True, default=str),
+                    "config_updated_at": datetime.now(timezone.utc).isoformat(),
+                    "config_updated_by": self.actor or "",
+                },
+                pk="id",
+                alter=True,
+            )
+
+    def get_thesis_config(self, thesis_id: str) -> dict | None:
+        """The stored configuration, or None if only metadata is on file
+        (theses backfilled from run history have no config)."""
+        row = self.get_thesis(thesis_id)
+        if not row or not row.get("config_json"):
+            return None
+        try:
+            return json.loads(row["config_json"])
+        except (TypeError, ValueError):
+            return None
+
+    def set_user_thesis(self, user_id: str, thesis_id: str) -> None:
+        """Point one member at a thesis, without touching anyone else's.
+
+        The multiplayer fix for the old single active thesis.yaml: one
+        partner exploring a new space must not silently re-aim the other
+        partner's workspace — or, worse, the scheduled run.
+        """
+        if not self.db["users"].exists():
+            return
+        with self.write_tx():
+            self.db["users"].update(
+                user_id.strip().lower(), {"active_thesis_id": thesis_id},
+                alter=True,
+            )
+
+    def user_thesis_id(self, user_id: str) -> str | None:
+        user = self.get_user(user_id) or {}
+        return (user.get("active_thesis_id") or "").strip() or None
 
     def list_theses(self, include_archived: bool = False) -> list[dict]:
         """Registered theses with run/lead counts, most recently run first."""

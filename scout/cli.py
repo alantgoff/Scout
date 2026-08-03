@@ -107,6 +107,34 @@ def _load_thesis_or_exit(path: Path) -> Thesis:
         raise typer.Exit(1) from None
 
 
+def _resolve_thesis_or_exit(
+    store: Store, path: Path, thesis_id: str = ""
+) -> Thesis:
+    """The thesis this invocation should use.
+
+    An explicit --thesis-id wins; otherwise the firm's workspace default
+    from the database; otherwise the file. That order is what makes a
+    scheduled run correct: unattended work must source against the thesis
+    the firm chose, not against whichever one a partner happened to leave in
+    thesis.yaml.
+    """
+    from scout import theses as theses_mod
+
+    try:
+        thesis = theses_mod.resolve(store, thesis_id=thesis_id or None, path=path)
+    except FileNotFoundError:
+        console.print(f"[red]Thesis file not found:[/red] {path}")
+        raise typer.Exit(1) from None
+    except (yaml.YAMLError, ValidationError) as exc:
+        console.print(f"[red]Could not parse the thesis:[/red] {exc}")
+        raise typer.Exit(1) from None
+    if thesis_id and ensure_thesis_id(thesis) != slugify(thesis_id):
+        console.print(f"[red]No thesis {thesis_id!r}[/] — list them with "
+                      "`scout thesis --list`.")
+        raise typer.Exit(1)
+    return thesis
+
+
 def _load_seeds_or_exit(path: Path) -> Seeds:
     try:
         return load_seeds(path)
@@ -760,19 +788,30 @@ def run(
     seeds_path: Annotated[
         Path, typer.Option("--seeds", help="Path to seeds.yaml.")
     ] = Path("seeds.yaml"),
+    thesis_id: Annotated[
+        str,
+        typer.Option("--thesis-id", help="Source against a specific thesis "
+                                         "(default: the firm's)."),
+    ] = "",
     watch: Annotated[
-        bool, typer.Option("--watch", help="Scheduled runs + Slack alerts (future hook).")
+        bool,
+        typer.Option("--watch", help="Deprecated — use `scout worker` for "
+                                     "scheduled runs."),
     ] = False,
 ) -> None:
     """Run the full sourcing pipeline: ingest -> signals -> LLM -> score -> export."""
     if watch:
-        console.print("[yellow]--watch: not implemented — future hook.[/yellow]")
+        console.print(
+            "[yellow]--watch is gone[/] — scheduling now lives in the worker:\n"
+            "  scout worker --bootstrap --once   # create the default schedules\n"
+            "  scout worker                      # run them"
+        )
         raise typer.Exit()
 
     settings = Settings()
-    thesis = _load_thesis_or_exit(thesis_path)
     seeds = _load_seeds_or_exit(seeds_path)
     store = _open_store(settings)
+    thesis = _resolve_thesis_or_exit(store, thesis_path, thesis_id)
     effective_max = max_accounts if max_accounts is not None else settings.max_accounts
     effective_ttl = ttl_days if ttl_days is not None else settings.ttl_days
 
@@ -1155,8 +1194,10 @@ def memo(
         console.print(f"[red]Unknown depth:[/] {depth} (quick | standard | deep)")
         raise typer.Exit(1)
     settings = Settings()
-    thesis = _load_thesis_or_exit(thesis_path)
     store = _open_store(settings)
+    # Resolves the firm's thesis, so a worker-written memo is judged against
+    # the same thesis the scheduled run sourced under.
+    thesis = _resolve_thesis_or_exit(store, thesis_path)
     key = handle.lstrip("@").lower()
     lead = next(
         (entry.lead for entry in store.load_lead_ledger(include_demo=True)
