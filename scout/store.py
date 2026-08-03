@@ -16,6 +16,7 @@ from pathlib import Path
 import sqlite_utils
 from pydantic import ValidationError
 
+from scout import jobs as jobs_mod
 from scout.config import DEFAULT_DB_PATH
 from scout.models import (
     Account,
@@ -77,6 +78,7 @@ class Store:
         self._configure_connection()
         self._migrate_thesis_columns()
         self._ensure_collab_tables()
+        self._ensure_job_tables()
         self._ensure_indexes()
 
     def _ensure_collab_tables(self) -> None:
@@ -883,6 +885,22 @@ class Store:
             for r in rows
         ]
 
+    def latest_run(self) -> dict | None:
+        """The newest run row with its lead count — what a worker reports
+        back and what a digest opens with."""
+        if not self.db["runs"].exists():
+            return None
+        rows = list(self.db["runs"].rows_where(order_by="created_at desc", limit=1))
+        if not rows:
+            return None
+        run = dict(rows[0])
+        run["id"] = run.get("run_id")
+        count = self.db.execute(
+            "select count(*) from leads where run_id = ?", [run.get("run_id")]
+        ).fetchone() if self.db["leads"].exists() else None
+        run["n_leads"] = int(count[0]) if count else 0
+        return run
+
     def last_real_run_at(self) -> datetime | None:
         """Timestamp of the newest non-demo run (None if only demo / nothing).
 
@@ -1494,12 +1512,16 @@ class Store:
         actor: str | None = None,
         verbs: list[str] | None = None,
         before_id: int | None = None,
+        since: datetime | None = None,
     ) -> list[Event]:
         """Newest-first slice of the activity feed, with optional filters."""
         if not self.db["events"].exists():
             return []
         where = ["1=1"]
         params: list = []
+        if since is not None:
+            where.append("at >= ?")
+            params.append(since.isoformat())
         if handle:
             where.append("handle = ?")
             params.append(handle.lstrip("@").lower())
@@ -2246,6 +2268,403 @@ class Store:
                             if row.get(key) not in (None, "") else None)
             out[row["handle"]] = row
         return out
+
+    # ------------------------------------------------------------- job queue
+
+    def _ensure_job_tables(self) -> None:
+        """Explicit creation for the same reason as the collab tables: rows
+        never carry the auto-assigned id the queue orders and claims by."""
+        self.db["jobs"].create(
+            {
+                "id": int, "kind": str, "payload_json": str, "status": str,
+                "priority": int, "attempts": int, "max_attempts": int,
+                "requested_by": str, "schedule_id": int,
+                "created_at": str, "run_after": str, "started_at": str,
+                "finished_at": str, "heartbeat_at": str, "lease_expires_at": str,
+                "worker_id": str, "result_json": str, "error": str,
+                "log_path": str,
+            },
+            pk="id",
+            if_not_exists=True,
+        )
+        self.db["schedules"].create(
+            {
+                "id": int, "name": str, "kind": str, "payload_json": str,
+                "spec_json": str, "enabled": int, "created_by": str,
+                "created_at": str, "updated_at": str,
+                "last_run_at": str, "next_run_at": str, "last_job_id": int,
+            },
+            pk="id",
+            if_not_exists=True,
+        )
+
+    def enqueue_job(
+        self,
+        kind: str,
+        payload: dict | None = None,
+        *,
+        actor: str | None = None,
+        priority: int = 0,
+        run_after: datetime | str | None = None,
+        max_attempts: int = jobs_mod.MAX_ATTEMPTS,
+        schedule_id: int | None = None,
+        dedupe: bool = False,
+    ) -> int | None:
+        """Add a job to the queue; returns its id.
+
+        `dedupe` skips the insert when an equivalent job (same kind, same
+        payload) is already queued or running — what a UI button wants, so
+        an impatient double-click doesn't start two sourcing runs.
+        """
+        if kind not in jobs_mod.JOB_KINDS:
+            raise ValueError(f"unknown job kind: {kind!r}")
+        payload = payload or {}
+        payload_json = json.dumps(payload, sort_keys=True)
+        now = datetime.now(timezone.utc)
+        when = run_after or now
+        when_iso = when if isinstance(when, str) else when.isoformat()
+        with self.write_tx():
+            if dedupe:
+                existing = self.db.execute(
+                    "select id from jobs where kind = ? and payload_json = ? "
+                    "and status in ('queued', 'running') limit 1",
+                    [kind, payload_json],
+                ).fetchone()
+                if existing:
+                    return None
+            # Chained, not two lookups: db["jobs"] builds a fresh Table each
+            # access, so a separate .last_pk read would see a different
+            # object and return None.
+            return int(
+                self.db["jobs"].insert(
+                    {
+                        "kind": kind, "payload_json": payload_json,
+                        "status": "queued", "priority": priority,
+                        "attempts": 0, "max_attempts": max_attempts,
+                        "requested_by": actor or self.actor or "system:scout",
+                        "schedule_id": schedule_id or 0,
+                        "created_at": now.isoformat(), "run_after": when_iso,
+                        "started_at": None, "finished_at": None,
+                        "heartbeat_at": None, "lease_expires_at": None,
+                        "worker_id": "", "result_json": "{}", "error": "",
+                        "log_path": "",
+                    },
+                    alter=True,
+                ).last_pk
+            )
+
+    def claim_job(self, worker_id: str) -> dict | None:
+        """Atomically take the next runnable job, or None.
+
+        The claim is a single BEGIN IMMEDIATE transaction, so two workers
+        racing for the same job cannot both win — one blocks, re-reads, and
+        finds it already running. Highest priority first, then oldest.
+        """
+        now = datetime.now(timezone.utc)
+        with self.write_tx():
+            if not self.db["jobs"].exists():
+                return None
+            # rows_where (not db.execute) because this needs dicts — the raw
+            # cursor yields tuples.
+            rows = list(self.db["jobs"].rows_where(
+                "status = 'queued' and run_after <= ?", [now.isoformat()],
+                order_by="priority desc, id asc", limit=1,
+            ))
+            if not rows:
+                return None
+            job = dict(rows[0])
+            lease = now + timedelta(seconds=jobs_mod.LEASE_SECONDS)
+            self.db["jobs"].update(
+                job["id"],
+                {
+                    "status": "running", "worker_id": worker_id,
+                    "started_at": now.isoformat(),
+                    "heartbeat_at": now.isoformat(),
+                    "lease_expires_at": lease.isoformat(),
+                    "attempts": (job.get("attempts") or 0) + 1,
+                },
+            )
+            job = self._job_row(job["id"]) or job
+        # Hydrated, so handlers read job["payload"] rather than re-parsing
+        # the JSON themselves.
+        return self._hydrate_job(job)
+
+    def heartbeat_job(self, job_id: int) -> None:
+        """Extend a running job's lease — proof the worker is still alive."""
+        now = datetime.now(timezone.utc)
+        with self.write_tx():
+            row = self._job_row(job_id)
+            if not row or row.get("status") != "running":
+                return
+            self.db["jobs"].update(
+                job_id,
+                {
+                    "heartbeat_at": now.isoformat(),
+                    "lease_expires_at": (
+                        now + timedelta(seconds=jobs_mod.LEASE_SECONDS)
+                    ).isoformat(),
+                },
+            )
+
+    def finish_job(
+        self, job_id: int, result: dict | None = None, log_path: str = ""
+    ) -> None:
+        now = datetime.now(timezone.utc).isoformat()
+        with self.write_tx():
+            if not self._job_row(job_id):
+                return
+            self.db["jobs"].update(
+                job_id,
+                {
+                    "status": "done", "finished_at": now, "error": "",
+                    "result_json": json.dumps(result or {}),
+                    **({"log_path": log_path} if log_path else {}),
+                },
+            )
+
+    def fail_job(self, job_id: int, error: str, log_path: str = "") -> bool:
+        """Record a failure. Retries with backoff until max_attempts, then
+        the job goes terminal. Returns True if it will be retried."""
+        now = datetime.now(timezone.utc)
+        with self.write_tx():
+            row = self._job_row(job_id)
+            if not row:
+                return False
+            attempts = int(row.get("attempts") or 0)
+            max_attempts = int(row.get("max_attempts") or jobs_mod.MAX_ATTEMPTS)
+            will_retry = attempts < max_attempts
+            update = {
+                "error": error[:2000],
+                **({"log_path": log_path} if log_path else {}),
+            }
+            if will_retry:
+                delay = jobs_mod.backoff_seconds(attempts)
+                update.update(
+                    status="queued", worker_id="", lease_expires_at=None,
+                    run_after=(now + timedelta(seconds=delay)).isoformat(),
+                )
+            else:
+                update.update(status="failed", finished_at=now.isoformat())
+            self.db["jobs"].update(job_id, update)
+            return will_retry
+
+    def cancel_job(self, job_id: int, actor: str | None = None) -> bool:
+        """Cancel a queued job. A running job is left alone — its worker owns
+        it, and killing work mid-flight is the caller's business, not the
+        queue's."""
+        with self.write_tx():
+            row = self._job_row(job_id)
+            if not row or row.get("status") != "queued":
+                return False
+            self.db["jobs"].update(
+                job_id,
+                {
+                    "status": "cancelled",
+                    "finished_at": datetime.now(timezone.utc).isoformat(),
+                    "error": f"cancelled by {actor or self.actor or 'someone'}",
+                },
+            )
+            return True
+
+    def reap_stale_jobs(self) -> int:
+        """Requeue jobs whose worker died holding the lease.
+
+        This is what makes the queue survive a container restart mid-run:
+        without it a crashed worker's job would sit in 'running' forever.
+        """
+        now = datetime.now(timezone.utc)
+        reaped = 0
+        with self.write_tx():
+            if not self.db["jobs"].exists():
+                return 0
+            stale = list(self.db["jobs"].rows_where(
+                "status = 'running' and lease_expires_at is not null "
+                "and lease_expires_at < ?", [now.isoformat()],
+            ))
+            for row in stale:
+                job = dict(row)
+                attempts = int(job.get("attempts") or 0)
+                max_attempts = int(job.get("max_attempts") or jobs_mod.MAX_ATTEMPTS)
+                if attempts >= max_attempts:
+                    self.db["jobs"].update(job["id"], {
+                        "status": "failed", "finished_at": now.isoformat(),
+                        "error": "worker died and retries are exhausted",
+                    })
+                else:
+                    self.db["jobs"].update(job["id"], {
+                        "status": "queued", "worker_id": "",
+                        "lease_expires_at": None,
+                        "run_after": now.isoformat(),
+                        "error": "worker died; requeued",
+                    })
+                reaped += 1
+        return reaped
+
+    def _job_row(self, job_id: int) -> dict | None:
+        if not self.db["jobs"].exists():
+            return None
+        rows = list(self.db["jobs"].rows_where("id = ?", [job_id], limit=1))
+        return dict(rows[0]) if rows else None
+
+    def get_job(self, job_id: int) -> dict | None:
+        row = self._job_row(job_id)
+        return self._hydrate_job(row) if row else None
+
+    @staticmethod
+    def _hydrate_job(row: dict) -> dict:
+        row = dict(row)
+        row["payload"] = json.loads(row.get("payload_json") or "{}")
+        row["result"] = json.loads(row.get("result_json") or "{}")
+        return row
+
+    def jobs(
+        self, status: str | list[str] | None = None, limit: int = 50
+    ) -> list[dict]:
+        """Recent jobs, newest first."""
+        if not self.db["jobs"].exists():
+            return []
+        where, params = "1=1", []
+        if status:
+            wanted = [status] if isinstance(status, str) else list(status)
+            where = f"status in ({','.join('?' * len(wanted))})"
+            params = wanted
+        rows = self.db["jobs"].rows_where(
+            where, params, order_by="id desc", limit=limit
+        )
+        return [self._hydrate_job(dict(r)) for r in rows]
+
+    def job_queue_depth(self) -> int:
+        if not self.db["jobs"].exists():
+            return 0
+        row = self.db.execute(
+            "select count(*) from jobs where status in ('queued', 'running')"
+        ).fetchone()
+        return int(row[0]) if row else 0
+
+    # -------------------------------------------------------------- schedules
+
+    def upsert_schedule(
+        self,
+        name: str,
+        kind: str,
+        spec: "jobs_mod.ScheduleSpec",
+        payload: dict | None = None,
+        *,
+        schedule_id: int | None = None,
+        enabled: bool = True,
+        actor: str | None = None,
+    ) -> int:
+        """Create or update a schedule, recomputing when it next fires."""
+        if kind not in jobs_mod.JOB_KINDS:
+            raise ValueError(f"unknown job kind: {kind!r}")
+        spec.validate_spec()
+        now = datetime.now(timezone.utc)
+        next_at = jobs_mod.next_occurrence(spec, now) if enabled else None
+        record = {
+            "name": name.strip() or jobs_mod.JOB_LABELS.get(kind, kind),
+            "kind": kind,
+            "payload_json": json.dumps(payload or {}, sort_keys=True),
+            "spec_json": spec.model_dump_json(),
+            "enabled": 1 if enabled else 0,
+            "updated_at": now.isoformat(),
+            "next_run_at": next_at.isoformat() if next_at else None,
+        }
+        with self.write_tx():
+            if schedule_id:
+                self.db["schedules"].update(schedule_id, record)
+                return schedule_id
+            record.update(
+                created_by=actor or self.actor or "system:scout",
+                created_at=now.isoformat(),
+                last_run_at=None, last_job_id=0,
+            )
+            return int(self.db["schedules"].insert(record, alter=True).last_pk)
+
+    def set_schedule_enabled(self, schedule_id: int, enabled: bool) -> None:
+        with self.write_tx():
+            row = self._schedule_row(schedule_id)
+            if not row:
+                return
+            spec = jobs_mod.ScheduleSpec.model_validate_json(
+                row.get("spec_json") or "{}"
+            )
+            next_at = (
+                jobs_mod.next_occurrence(spec, datetime.now(timezone.utc))
+                if enabled else None
+            )
+            self.db["schedules"].update(schedule_id, {
+                "enabled": 1 if enabled else 0,
+                "next_run_at": next_at.isoformat() if next_at else None,
+                "updated_at": datetime.now(timezone.utc).isoformat(),
+            })
+
+    def delete_schedule(self, schedule_id: int) -> None:
+        with self.write_tx():
+            if self._schedule_row(schedule_id):
+                self.db["schedules"].delete(schedule_id)
+
+    def _schedule_row(self, schedule_id: int) -> dict | None:
+        if not self.db["schedules"].exists():
+            return None
+        rows = list(self.db["schedules"].rows_where("id = ?", [schedule_id], limit=1))
+        return dict(rows[0]) if rows else None
+
+    @staticmethod
+    def _hydrate_schedule(row: dict) -> dict:
+        row = dict(row)
+        row["payload"] = json.loads(row.get("payload_json") or "{}")
+        try:
+            row["spec"] = jobs_mod.ScheduleSpec.model_validate_json(
+                row.get("spec_json") or "{}"
+            )
+        except Exception:  # noqa: BLE001 — a corrupt spec must not hide the row
+            row["spec"] = None
+        row["enabled"] = bool(row.get("enabled"))
+        return row
+
+    def schedules(self) -> list[dict]:
+        if not self.db["schedules"].exists():
+            return []
+        return [
+            self._hydrate_schedule(dict(r))
+            for r in self.db["schedules"].rows_where(order_by="id asc")
+        ]
+
+    def materialize_due_schedules(self, now: datetime | None = None) -> list[int]:
+        """Enqueue a job for every schedule whose time has come, and advance
+        it to its next firing. Returns the job ids created.
+
+        Deliberately fires at most one job per schedule per pass, even if
+        several occurrences were missed (a laptop asleep over a weekend
+        should produce one run on wake, not forty).
+        """
+        now = now or datetime.now(timezone.utc)
+        created: list[int] = []
+        for row in self.schedules():
+            if not row["enabled"] or row["spec"] is None:
+                continue
+            next_at = row.get("next_run_at")
+            if not next_at:
+                continue
+            if datetime.fromisoformat(next_at) > now:
+                continue
+            job_id = self.enqueue_job(
+                row["kind"], row["payload"],
+                actor=f"schedule:{row['id']}",
+                schedule_id=row["id"],
+                # A schedule must never stack duplicates behind a slow run.
+                dedupe=True,
+            )
+            following = jobs_mod.next_occurrence(row["spec"], now)
+            with self.write_tx():
+                self.db["schedules"].update(row["id"], {
+                    "last_run_at": now.isoformat(),
+                    "next_run_at": following.isoformat(),
+                    **({"last_job_id": job_id} if job_id else {}),
+                })
+            if job_id:
+                created.append(job_id)
+        return created
 
     # ------------------------------------------------------------- scan status
 

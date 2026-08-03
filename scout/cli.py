@@ -1134,6 +1134,281 @@ def export(
 
 
 @app.command()
+def memo(
+    handle: Annotated[str, typer.Argument(help="Startup handle to write a memo for.")],
+    depth: Annotated[
+        str, typer.Option(help="quick | standard | deep (deep does live web research).")
+    ] = "standard",
+    focus: Annotated[
+        str, typer.Option(help="Optional question to steer the memo.")
+    ] = "",
+    thesis_path: Annotated[
+        Path, typer.Option("--thesis", help="Path to thesis.yaml.")
+    ] = Path("thesis.yaml"),
+) -> None:
+    """Write one investment memo, headlessly.
+
+    Same generation path the UI uses; this is what the worker shells out to
+    so memos can be produced on a schedule instead of only by a human at a
+    browser."""
+    if depth not in ("quick", "standard", "deep"):
+        console.print(f"[red]Unknown depth:[/] {depth} (quick | standard | deep)")
+        raise typer.Exit(1)
+    settings = Settings()
+    thesis = _load_thesis_or_exit(thesis_path)
+    store = _open_store(settings)
+    key = handle.lstrip("@").lower()
+    lead = next(
+        (entry.lead for entry in store.load_lead_ledger(include_demo=True)
+         if entry.lead.account.handle.lower() == key),
+        None,
+    )
+    if lead is None:
+        console.print(f"[red]No lead data for[/] @{key} — run discovery first.")
+        raise typer.Exit(1)
+
+    from scout.memos import generate_memo as _generate
+
+    console.print(f"Writing a [bold]{depth}[/bold] memo for [bold]@{key}[/bold]…")
+    def _narrate(kind: str, detail: str) -> None:
+        console.print(f"  [dim]{kind}: {detail}[/dim]" if detail else f"  [dim]{kind}[/dim]")
+
+    result = _generate(store, settings, thesis, lead, depth=depth, focus=focus,
+                       on_event=_narrate if depth == "deep" else None)
+    if not result["written"]:
+        console.print(f"[yellow]No memo written:[/] {result['reason']}")
+        raise typer.Exit(1)
+    console.print(
+        f"[green]Memo saved[/] — {result['sources']} sources, "
+        f"{result['searches']} searches."
+        if result.get("is_ai") else
+        "[yellow]Saved the data-only skeleton[/] — add an Anthropic key for the "
+        "full analysis."
+    )
+
+
+# ------------------------------------------------------------ worker & jobs
+
+
+@app.command()
+def worker(
+    once: Annotated[
+        bool, typer.Option("--once", help="Drain the queue and exit (for cron).")
+    ] = False,
+    poll: Annotated[int, typer.Option(help="Seconds between empty-queue polls.")] = 5,
+    max_jobs: Annotated[
+        int | None, typer.Option(help="Stop after this many jobs.")
+    ] = None,
+    bootstrap: Annotated[
+        bool,
+        typer.Option("--bootstrap", help="Create the default schedules if none exist."),
+    ] = False,
+) -> None:
+    """Run the background worker: schedules fire, queued jobs execute.
+
+    Run this under systemd (see deploy/) for a firm that wants Scout
+    sourcing every weekday without anyone pressing a button."""
+    from scout.worker import bootstrap_schedules, run_worker
+
+    settings = Settings()
+    store = _open_store(settings)
+    if bootstrap:
+        created = bootstrap_schedules(store)
+        console.print(
+            f"Created {len(created)} default schedule(s)." if created
+            else "Schedules already configured — nothing to bootstrap."
+        )
+    executed = run_worker(store, settings, once=once, poll_seconds=poll,
+                          max_jobs=max_jobs)
+    if once:
+        console.print(f"Executed [bold]{executed}[/bold] job(s).")
+
+
+@app.command("jobs")
+def jobs_cmd(
+    status: Annotated[
+        str, typer.Option(help="Filter: queued | running | done | failed | cancelled.")
+    ] = "",
+    limit: Annotated[int, typer.Option(help="How many to show.")] = 20,
+    enqueue: Annotated[
+        str, typer.Option("--enqueue", help="Queue a job: run_pipeline | digest | verify.")
+    ] = "",
+    cancel: Annotated[int | None, typer.Option("--cancel", help="Cancel a queued job by id.")] = None,
+) -> None:
+    """List the job queue, or add to it."""
+    from scout.jobs import JOB_KINDS, job_label
+
+    settings = Settings()
+    store = _open_store(settings)
+
+    if cancel is not None:
+        ok = store.cancel_job(cancel)
+        console.print(
+            f"Cancelled job {cancel}." if ok
+            else f"[yellow]Job {cancel} is not queued[/] — running and finished "
+                 "jobs cannot be cancelled."
+        )
+        return
+
+    if enqueue:
+        if enqueue not in JOB_KINDS:
+            console.print(f"[red]Unknown job kind:[/] {enqueue} "
+                          f"({', '.join(sorted(JOB_KINDS))})")
+            raise typer.Exit(1)
+        job_id = store.enqueue_job(enqueue, {}, dedupe=True)
+        console.print(
+            f"Queued job [bold]{job_id}[/bold]." if job_id
+            else "[yellow]An equivalent job is already queued or running.[/]"
+        )
+        return
+
+    rows = store.jobs(status=status or None, limit=limit)
+    if not rows:
+        console.print("No jobs yet. Queue one with --enqueue, or start the "
+                      "worker with --bootstrap for the default schedules.")
+        return
+    table = Table(box=box.SIMPLE)
+    for column in ("id", "job", "status", "attempts", "created", "detail"):
+        table.add_column(column)
+    tint = {"done": "green", "failed": "red", "running": "cyan",
+            "cancelled": "dim"}
+    for row in rows:
+        detail = row.get("error") or ", ".join(
+            f"{k}={v}" for k, v in (row.get("result") or {}).items()
+            if k != "log_path"
+        )
+        colour = tint.get(row["status"], "yellow")
+        table.add_row(
+            str(row["id"]),
+            job_label(row["kind"], row.get("payload")),
+            f"[{colour}]{row['status']}[/{colour}]",
+            f"{row.get('attempts', 0)}/{row.get('max_attempts', 3)}",
+            _short_ts(row.get("created_at")),
+            (detail or "")[:60],
+        )
+    console.print(table)
+
+
+@app.command("schedule")
+def schedule_cmd(
+    list_only: Annotated[bool, typer.Option("--list", help="Show schedules.")] = False,
+    add: Annotated[
+        str, typer.Option("--add", help="Job kind to schedule: run_pipeline | digest.")
+    ] = "",
+    at: Annotated[
+        str, typer.Option("--at", help="Daily time, HH:MM (with --add).")
+    ] = "",
+    every: Annotated[
+        int | None, typer.Option("--every", help="Interval in minutes (with --add).")
+    ] = None,
+    tz: Annotated[str, typer.Option(help="Timezone for --at, e.g. Europe/London.")] = "UTC",
+    weekdays: Annotated[
+        bool, typer.Option("--weekdays", help="Monday–Friday only.")
+    ] = False,
+    name: Annotated[str, typer.Option(help="Label for the schedule.")] = "",
+    enable: Annotated[int | None, typer.Option("--enable", help="Enable a schedule by id.")] = None,
+    disable: Annotated[int | None, typer.Option("--disable", help="Disable a schedule by id.")] = None,
+    delete: Annotated[int | None, typer.Option("--delete", help="Delete a schedule by id.")] = None,
+) -> None:
+    """Manage recurring work — the reason Scout keeps sourcing without you."""
+    from scout.jobs import JOB_KINDS, JOB_LABELS, ScheduleSpec
+
+    settings = Settings()
+    store = _open_store(settings)
+
+    for schedule_id, enabled in ((enable, True), (disable, False)):
+        if schedule_id is not None:
+            store.set_schedule_enabled(schedule_id, enabled)
+            console.print(f"Schedule {schedule_id} "
+                          f"{'enabled' if enabled else 'disabled'}.")
+            return
+    if delete is not None:
+        store.delete_schedule(delete)
+        console.print(f"Deleted schedule {delete}.")
+        return
+
+    if add:
+        if add not in JOB_KINDS:
+            console.print(f"[red]Unknown job kind:[/] {add} "
+                          f"({', '.join(sorted(JOB_KINDS))})")
+            raise typer.Exit(1)
+        spec = ScheduleSpec(
+            daily_at=at or None,
+            every_minutes=every,
+            weekdays=[0, 1, 2, 3, 4] if weekdays else [],
+            tz=tz,
+        )
+        try:
+            spec.validate_spec()
+        except ValueError as exc:
+            console.print(f"[red]{exc}[/]")
+            raise typer.Exit(1) from exc
+        schedule_id = store.upsert_schedule(
+            name or JOB_LABELS.get(add, add), add, spec, {}
+        )
+        console.print(f"Schedule [bold]{schedule_id}[/bold] — {spec.describe()}.")
+        return
+
+    rows = store.schedules()
+    if not rows:
+        console.print("No schedules. Add one, e.g.:\n"
+                      "  scout schedule --add run_pipeline --at 06:00 --weekdays "
+                      "--tz Europe/London\n"
+                      "or run [bold]scout worker --bootstrap[/bold] for the defaults.")
+        return
+    table = Table(box=box.SIMPLE)
+    for column in ("id", "name", "when", "next run", "state"):
+        table.add_column(column)
+    for row in rows:
+        table.add_row(
+            str(row["id"]), row["name"],
+            row["spec"].describe() if row["spec"] else "[red]invalid[/red]",
+            _short_ts(row.get("next_run_at")) if row["enabled"] else "—",
+            "[green]on[/green]" if row["enabled"] else "[dim]off[/dim]",
+        )
+    console.print(table)
+
+
+@app.command()
+def digest(
+    window: Annotated[str, typer.Option(help="daily | weekly.")] = "daily",
+    force: Annotated[
+        bool, typer.Option("--force", help="Send even when nothing happened.")
+    ] = False,
+) -> None:
+    """Post the Slack digest now (the scheduled version runs via the worker)."""
+    from scout import notify
+
+    settings = Settings()
+    store = _open_store(settings)
+    if not notify.slack_configured(store):
+        console.print("[yellow]No Slack webhook configured[/] — set it in "
+                      "Settings → Notifications.")
+        raise typer.Exit(1)
+    hours = 168 if window == "weekly" else 24
+    since = datetime.now(timezone.utc) - timedelta(hours=hours)
+    data = notify.digest_data(store, since, window=window)
+    if not data["has_content"] and not force:
+        console.print("Nothing happened worth reporting — not sending. "
+                      "(--force overrides.)")
+        return
+    ok = notify.post_slack(store, notify.digest_fallback_text(data),
+                           notify.digest_blocks(data))
+    console.print("[green]Digest sent.[/]" if ok
+                  else "[red]Slack rejected the digest[/] — check the webhook.")
+
+
+def _short_ts(value: str | None) -> str:
+    """'Aug 03 14:22' from an ISO timestamp — table-friendly."""
+    if not value:
+        return "—"
+    try:
+        return datetime.fromisoformat(value).astimezone().strftime("%b %d %H:%M")
+    except ValueError:
+        return str(value)[:16]
+
+
+@app.command()
 def migrate(
     owner: Annotated[
         str, typer.Option("--owner", help="Email of the person whose solo work this is.")
