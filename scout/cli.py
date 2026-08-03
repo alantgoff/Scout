@@ -1134,6 +1134,43 @@ def export(
 
 
 @app.command()
+def migrate(
+    owner: Annotated[
+        str, typer.Option("--owner", help="Email of the person whose solo work this is.")
+    ] = "",
+) -> None:
+    """Adopt a single-user database into the multiplayer schema.
+
+    Idempotent and additive: attributes existing triage/notes/overrides to
+    --owner, snapshots current memos as version 1 so regeneration can never
+    destroy them, and imports past triage decisions as that person's votes
+    (marked as imports) so disagreement and taste features have real data
+    from day one.
+    """
+    settings = Settings()
+    store = _open_store(settings)
+    owner = (owner or os.environ.get("SCOUT_OWNER_EMAIL", "")).strip().lower()
+    if not owner:
+        console.print(
+            "[red]--owner is required[/] — the email of the person whose "
+            "solo judgments these are, e.g. --owner you@yourfund.com"
+        )
+        raise typer.Exit(1)
+    console.print(f"Migrating [bold]{store.db_path}[/bold] for [bold]{owner}[/bold]…")
+    try:
+        counts = store.migrate_multiplayer(owner)
+    except Exception as exc:
+        console.print(f"[red]Migration failed:[/] {exc}")
+        raise typer.Exit(1) from exc
+    console.print(
+        f"Attributed [bold]{counts['attributed']}[/bold] existing judgment rows · "
+        f"snapshotted [bold]{counts['memo_versions']}[/bold] memos as v1 · "
+        f"imported [bold]{counts['votes']}[/bold] triage decisions as votes."
+    )
+    console.print("[dim]Safe to re-run; nothing is overwritten.[/dim]")
+
+
+@app.command()
 def budget() -> None:
     """Show cumulative X API spend against the hard cap."""
     settings = Settings()

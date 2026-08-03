@@ -6,6 +6,11 @@ per signal, sector, stage, business model, and thesis fit. `findings` renders
 the 2–4 most actionable contrasts as plain sentences; `stats_prompt` formats
 the whole thing for the weight-suggestion agent (scout.agents.suggest_weights).
 
+`actor_stats` runs the same contrast over ONE partner's votes instead of the
+firm's pipeline status — the per-partner taste profile — and
+`model_disagreements` surfaces where a partner and the model parted ways,
+which is the most interesting thing either of them produces.
+
 No I/O and no network — fully unit-testable.
 """
 
@@ -13,10 +18,15 @@ from __future__ import annotations
 
 from pydantic import BaseModel, Field
 
-from scout.models import Lead, LedgerEntry
+from scout.models import Lead, LedgerEntry, Vote
 from scout.status import POSITIVE_STATUSES  # noqa: F401 — re-exported for callers
 
 MIN_DECISIONS = 5
+# Score bands for human-vs-model disagreement. A pass on a lead the model
+# ranked highly (or conviction on one it ranked low) is the signal worth
+# reading — the rest is agreement, which teaches nothing.
+MODEL_LIKED = 70.0
+MODEL_COOL = 40.0
 
 
 class TriageStats(BaseModel):
@@ -170,3 +180,109 @@ def stats_prompt(stats: TriageStats) -> str:
     if stats.findings:
         lines.append("Notable contrasts: " + " | ".join(stats.findings))
     return "\n".join(lines)
+
+
+# ------------------------------------------------------------- per-partner taste
+
+
+class ModelDisagreement(BaseModel):
+    """One place a partner and the model parted ways."""
+
+    handle: str
+    name: str
+    score: float
+    stance: str
+    rationale: str = ""
+    kind: str  # "model_liked_you_passed" | "model_cool_you_liked"
+
+
+def actor_stats(
+    entries: list[LedgerEntry],
+    votes_by_handle: dict[str, list[Vote]],
+    actor: str,
+) -> TriageStats | None:
+    """One partner's taste profile: the leads THEY voted yes on contrasted
+    with the ones THEY passed, in the same shape triage_stats produces.
+
+    Deliberately reads votes rather than pipeline status: status is the
+    firm's shared state (whoever moved it last), while a vote is a named
+    person's own judgment — the only honest basis for "your taste". Unsure
+    votes are excluded; they are the absence of a decision.
+    """
+    from scout.collab import STANCES
+
+    liked: list[Lead] = []
+    passed: list[Lead] = []
+    for entry in entries:
+        handle = entry.lead.account.handle.lower()
+        vote = next(
+            (v for v in votes_by_handle.get(handle, []) if v.actor == actor), None
+        )
+        if vote is None:
+            continue
+        value = STANCES.get(vote.stance, 0)
+        if value > 0:
+            liked.append(entry.lead)
+        elif value < 0:
+            passed.append(entry.lead)
+    if len(liked) + len(passed) < MIN_DECISIONS:
+        return None
+
+    groups = {"shortlisted": liked, "passed": passed}
+    stats = TriageStats(
+        shortlisted=len(liked),
+        passed=len(passed),
+        sector_counts={g: _count_by(ls, "sector") for g, ls in groups.items()},
+        stage_counts={g: _count_by(ls, "stage") for g, ls in groups.items()},
+        model_counts={g: _count_by(ls, "business_model") for g, ls in groups.items()},
+        ctype_counts={g: _count_by(ls, "customer_type") for g, ls in groups.items()},
+        signal_means={g: _signal_means(ls) for g, ls in groups.items()},
+        fit_means={g: _fit_mean(ls) for g, ls in groups.items()},
+    )
+    stats.findings = _findings(stats)
+    return stats
+
+
+def model_disagreements(
+    entries: list[LedgerEntry],
+    votes_by_handle: dict[str, list[Vote]],
+    actor: str,
+    limit: int = 10,
+) -> list[ModelDisagreement]:
+    """Where this partner and the model disagreed, strongest first.
+
+    Two directions, both worth a look: startups the model ranked highly that
+    the partner passed on (is the thesis wrong, or was the model fooled?),
+    and startups the model ranked low that the partner backed (what does the
+    partner see that the scoring does not?). The second list is the one that
+    should eventually change the weights.
+    """
+    from scout.collab import STANCES
+
+    out: list[ModelDisagreement] = []
+    for entry in entries:
+        lead = entry.lead
+        handle = lead.account.handle.lower()
+        vote = next(
+            (v for v in votes_by_handle.get(handle, []) if v.actor == actor), None
+        )
+        if vote is None:
+            continue
+        value = STANCES.get(vote.stance, 0)
+        name = (lead.llm.company_name if lead.llm else "") or lead.account.name \
+            or f"@{lead.account.handle}"
+        if value < 0 and lead.score >= MODEL_LIKED:
+            kind = "model_liked_you_passed"
+        elif value > 0 and lead.score < MODEL_COOL:
+            kind = "model_cool_you_liked"
+        else:
+            continue
+        out.append(ModelDisagreement(
+            handle=handle, name=name, score=lead.score,
+            stance=vote.stance, rationale=vote.rationale, kind=kind,
+        ))
+    # Widest gaps first: a pass on a 90 outranks a pass on a 71.
+    out.sort(key=lambda d: -abs(d.score - (
+        MODEL_LIKED if d.kind == "model_liked_you_passed" else MODEL_COOL
+    )))
+    return out[:limit]

@@ -76,7 +76,45 @@ class Store:
             self.db = sqlite_utils.Database(db_path)
         self._configure_connection()
         self._migrate_thesis_columns()
+        self._ensure_collab_tables()
         self._ensure_indexes()
+
+    def _ensure_collab_tables(self) -> None:
+        """Create the append-only collaboration tables up front.
+
+        Unlike the rest of the store, these cannot be born from their first
+        insert: sqlite-utils infers columns from the row it is given, and
+        these tables need an auto-assigning INTEGER PRIMARY KEY that no row
+        ever carries (events are ordered by it, comments and memo versions
+        are referenced by it). Idempotent via if_not_exists.
+        """
+        self.db["events"].create(
+            {
+                "id": int, "at": str, "actor": str, "verb": str,
+                "handle": str, "thesis_id": str, "payload_json": str,
+                "notified": int,
+            },
+            pk="id",
+            if_not_exists=True,
+        )
+        self.db["comments"].create(
+            {
+                "id": int, "handle": str, "actor": str, "body": str,
+                "mentions_json": str, "memo_version_id": int,
+                "created_at": str, "edited_at": str, "deleted_at": str,
+            },
+            pk="id",
+            if_not_exists=True,
+        )
+        self.db["memo_versions"].create(
+            {
+                "id": int, "handle": str, "version_no": int, "body": str,
+                "meta_json": str, "author": str, "kind": str,
+                "created_at": str,
+            },
+            pk="id",
+            if_not_exists=True,
+        )
 
     def _configure_connection(self) -> None:
         """Concurrency posture for a multi-session deployment.
@@ -1863,6 +1901,135 @@ class Store:
                 "assigned" if target else "unassigned",
                 handle=key, actor=who, payload={"assignee": target},
             )
+
+    # -------------------------------------------------------------- migration
+
+    def migrate_multiplayer(self, owner: str) -> dict[str, int]:
+        """Adopt a single-user database into the multiplayer schema.
+
+        Idempotent — safe to re-run, and additive only (the pre-migration
+        copy stays a valid rollback). Three backfills:
+
+        1. Attribution: every judgment already in the database was made by
+           the person who ran Scout alone, so stamp `owner` on the rows that
+           have no author. Honest, not invented.
+        2. Memo history: snapshot each existing memo as version 1, so the
+           first regeneration after the upgrade cannot destroy work that
+           predates versioning.
+        3. Votes from triage: a shortlisted startup was a yes and a passed
+           one was a pass — importing them (marked as imports, not as
+           freshly-cast opinions) means disagreement and taste features have
+           real data on day one instead of an empty slate.
+        """
+        from scout.status import POSITIVE_STATUSES
+
+        owner = owner.strip().lower()
+        if not owner:
+            raise ValueError("migrate_multiplayer needs the owner's email")
+        counts = {"attributed": 0, "memo_versions": 0, "votes": 0}
+        self.ensure_user(owner)
+        now = datetime.now(timezone.utc).isoformat()
+
+        with self.write_tx():
+            # 1. Attribution for pre-multiplayer judgment rows.
+            for table, column in (
+                ("pipeline", "updated_by"),
+                ("score_overrides", "actor"),
+                ("startup_attrs", "updated_by"),
+            ):
+                if not self.db[table].exists():
+                    continue
+                if column not in self.db[table].columns_dict:
+                    self.db[table].add_column(column, str)
+                cursor = self.db.execute(
+                    f"update {table} set {column} = ? "
+                    f"where {column} is null or {column} = ''",
+                    [owner],
+                )
+                counts["attributed"] += cursor.rowcount if cursor.rowcount > 0 else 0
+
+            if not self.db["pipeline"].exists():
+                return counts
+
+            # 2. Existing memos become version 1 (only where none exists).
+            # `brief` is created lazily by the first memo write, so a
+            # database where nobody has generated one yet has no column.
+            versioned = {
+                r[0] for r in self.db.execute(
+                    "select distinct handle from memo_versions"
+                ).fetchall()
+            }
+            memo_rows = (
+                [
+                    dict(r) for r in self.db["pipeline"].rows_where(
+                        "brief is not null and brief != ''"
+                    )
+                ]
+                if "brief" in self.db["pipeline"].columns_dict
+                else []
+            )
+            for row in memo_rows:
+                handle = row["handle"]
+                if handle in versioned:
+                    continue
+                edited = bool(row.get("brief_edited_at"))
+                self.db["memo_versions"].insert(
+                    {
+                        "handle": handle,
+                        "version_no": 1,
+                        "body": row.get("brief") or "",
+                        "meta_json": row.get("brief_meta_json") or "{}",
+                        # An edited memo is the human's; an untouched one is
+                        # the agent's.
+                        "author": owner if edited else "agent:memo",
+                        "kind": "edited" if edited else "generated",
+                        "created_at": (
+                            row.get("brief_edited_at") or row.get("brief_at") or now
+                        ),
+                    },
+                    alter=True,
+                )
+                counts["memo_versions"] += 1
+
+            # 3. Triage becomes the owner's votes (never overwriting a real one).
+            voted = set()
+            if self.db["votes"].exists():
+                voted = {
+                    r[0] for r in self.db.execute(
+                        "select handle from votes where actor = ?", [owner]
+                    ).fetchall()
+                }
+            imports: list[dict] = []
+            for row in self.db["pipeline"].rows:
+                handle = row["handle"]
+                status = row.get("status") or "new"
+                if handle in voted:
+                    continue
+                if status in POSITIVE_STATUSES:
+                    stance = "yes"
+                elif status == "passed":
+                    stance = "pass"
+                else:
+                    continue
+                imports.append({
+                    "handle": handle, "actor": owner, "stance": stance,
+                    "rationale": f"imported from triage ({status})",
+                    "thesis_id": row.get("sourced_thesis_id") or "",
+                    "created_at": row.get("updated_at") or now,
+                    "updated_at": row.get("updated_at") or now,
+                })
+            if imports:
+                self.db["votes"].upsert_all(
+                    imports, pk=("handle", "actor"), alter=True
+                )
+                counts["votes"] = len(imports)
+                # One event for the import as a whole — not N fake vote_cast
+                # events that would flood the activity feed on day one.
+                self._append_event(
+                    "votes_imported", actor=owner,
+                    payload={"count": len(imports)},
+                )
+        return counts
 
     # ------------------------------------------- startup columns & attributes
 
