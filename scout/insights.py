@@ -14,11 +14,9 @@ from __future__ import annotations
 from pydantic import BaseModel, Field
 
 from scout.models import Lead, LedgerEntry
+from scout.status import POSITIVE_STATUSES  # noqa: F401 — re-exported for callers
 
 MIN_DECISIONS = 5
-
-# Any of these statuses counts as a positive ("shortlisted") decision.
-POSITIVE_STATUSES = {"longlisted", "shortlisted", "contacted", "meeting", "diligence", "won"}
 
 
 class TriageStats(BaseModel):

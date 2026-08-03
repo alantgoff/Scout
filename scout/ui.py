@@ -141,20 +141,12 @@ SIGNAL_HELP = {
     "source_corroboration": "Independently surfaced by 2+ discovery strategies (search + GitHub + graph…)",
 }
 
-STATUS_LABELS = {
-    "new": "New",
-    "longlisted": "Longlisted",
-    "shortlisted": "Shortlisted",
-    "contacted": "Contacted",
-    "meeting": "Meeting",
-    "diligence": "Diligence",
-    "won": "Allocated",
-    "passed": "Passed",
-}
-LABEL_TO_STATUS = {v: k for k, v in STATUS_LABELS.items()}
-WIN_STAGES = ["shortlisted", "contacted", "meeting", "diligence", "won"]
-# The triage funnel: feed → longlist → shortlist (→ stages to allocation).
-FUNNEL_STAGES = ["longlisted", *WIN_STAGES]
+from scout.status import (  # noqa: E402 — vocabulary shared with non-UI writers
+    FUNNEL_STAGES,
+    LABEL_TO_STATUS,
+    STATUS_LABELS,
+    WIN_STAGES,
+)
 
 STAGE_LABEL = {"idea": "Idea", "stealth": "Stealth", "launched": "Launched", "scaling": "Scaling"}
 TYPE_LABEL = {"founder": "Founder", "startup": "Startup", "other": "Other"}

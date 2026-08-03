@@ -307,3 +307,74 @@ class LedgerEntry(BaseModel):
         if self.prev_score is None:
             return None
         return round(self.lead.score - self.prev_score, 1)
+
+
+# --------------------------------------------------------------- collaboration
+# Human judgments carry the same provenance grammar as model verdicts:
+# an author, a thesis lens, a rationale, and a timestamp.
+
+
+class Vote(BaseModel):
+    """One partner's stance on one startup — the human counterpart of a
+    verdict. Updating a stance replaces the row; history lives in events."""
+
+    handle: str
+    actor: str
+    stance: str  # strong_yes | yes | unsure | pass
+    rationale: str = ""
+    thesis_id: str = ""  # the lens the stance was taken under
+    created_at: datetime | None = None
+    updated_at: datetime | None = None
+
+
+class VoteSummary(BaseModel):
+    """A startup's stance tally (collab.vote_summary)."""
+
+    handle: str
+    n_votes: int = 0
+    mean: float | None = None  # mean stance value over STANCES
+    spread: float = 0.0  # max - min stance value; disagreement measure
+    contested: bool = False  # 2+ votes spanning yes-ish vs pass
+    by_actor: dict[str, str] = Field(default_factory=dict)  # actor -> stance
+    latest_at: datetime | None = None
+
+
+class Comment(BaseModel):
+    """One comment on a startup (optionally anchored to a memo version)."""
+
+    id: int | None = None
+    handle: str
+    actor: str
+    body: str
+    mentions: list[str] = Field(default_factory=list)
+    memo_version_id: int | None = None
+    created_at: datetime | None = None
+    edited_at: datetime | None = None
+    deleted_at: datetime | None = None
+
+
+class Event(BaseModel):
+    """One row of the append-only activity spine (store._append_event)."""
+
+    id: int | None = None
+    at: datetime | None = None
+    actor: str
+    verb: str
+    handle: str | None = None
+    thesis_id: str | None = None
+    payload: dict = Field(default_factory=dict)
+
+
+class MemoVersion(BaseModel):
+    """An immutable memo snapshot. pipeline.brief stays the CURRENT memo;
+    every generation and every edit appends a version, so regeneration can
+    never destroy a human's edits again."""
+
+    id: int | None = None
+    handle: str
+    version_no: int
+    body: str
+    meta: dict = Field(default_factory=dict)
+    author: str = ""  # "agent:memo" or a member's email
+    kind: str = "generated"  # generated | edited
+    created_at: datetime | None = None

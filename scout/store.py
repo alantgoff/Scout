@@ -17,7 +17,19 @@ import sqlite_utils
 from pydantic import ValidationError
 
 from scout.config import DEFAULT_DB_PATH
-from scout.models import Account, Lead, LedgerEntry, LLMVerdict, SitePage, Tweet, UnlinkedLead
+from scout.models import (
+    Account,
+    Comment,
+    Event,
+    Lead,
+    LedgerEntry,
+    LLMVerdict,
+    MemoVersion,
+    SitePage,
+    Tweet,
+    UnlinkedLead,
+    Vote,
+)
 
 # Pre-~/.scout location: a scout.db relative to wherever scout was run from.
 _LEGACY_DB_PATH = Path("scout.db")
@@ -154,12 +166,30 @@ class Store:
             # verdict_history: handle = ?, newest archive first.
             ("llm_verdict_history", "idx_verdict_history_handle",
              {"handle", "archived_at"}, "handle, archived_at"),
+            # Activity spine + collaboration state.
+            ("events", "idx_events_handle", {"handle"}, "handle, id"),
+            ("events", "idx_events_actor", {"actor"}, "actor, id"),
+            ("votes", "idx_votes_handle", {"handle"}, "handle"),
+            ("comments", "idx_comments_handle", {"handle"}, "handle, id"),
+            ("comments", "idx_comments_memo",
+             {"memo_version_id"}, "memo_version_id"),
+            ("memo_versions", "idx_memo_versions_handle",
+             {"handle", "version_no"}, "handle, version_no"),
         ):
             if not self.db[table].exists():
                 continue
             if not columns <= set(self.db[table].columns_dict):
                 continue  # legacy table shape — never let an index break init
             self.db.execute(f"create index if not exists {name} on {table}({expr})")
+        # Partial index for the notifier's sweep — the unnotified set is tiny.
+        if (
+            self.db["events"].exists()
+            and "notified" in self.db["events"].columns_dict
+        ):
+            self.db.execute(
+                "create index if not exists idx_events_unnotified "
+                "on events(notified) where notified = 0"
+            )
         self.db.conn.commit()
 
     # ------------------------------------------------------------------ users
@@ -1275,7 +1305,8 @@ class Store:
         brief_meta: dict | None = None,
         sourced_thesis_id: str | None = None,
         actor: str | None = None,
-    ) -> None:
+        expect_updated_at: str | None = None,
+    ) -> bool:
         """Upsert deal-flow state for one lead (read-merge-write so partial
         updates never clobber the other fields).
 
@@ -1287,8 +1318,13 @@ class Store:
         a generation and left untouched by edits.
 
         Runs inside write_tx so two sessions updating the same startup merge
-        instead of clobbering; `updated_by` records the writer."""
+        instead of clobbering; `updated_by` records the writer. Status and
+        notes changes append events when an actor is bound. Returns False
+        (writing nothing) when `expect_updated_at` is given and another
+        session updated the row since — the optimistic-concurrency path for
+        the free-text notes editor."""
         handle = handle.lstrip("@").lower()
+        who = actor or self.actor
         with self.write_tx():
             row = {"handle": handle}
             if self.db["pipeline"].exists():
@@ -1297,6 +1333,13 @@ class Store:
                 )
                 if existing:
                     row = dict(existing[0])
+            if (
+                expect_updated_at is not None
+                and (row.get("updated_at") or "") not in ("", expect_updated_at)
+            ):
+                return False
+            old_status = row.get("status") or "new"
+            old_notes = row.get("notes") or ""
             now = datetime.now(timezone.utc).isoformat()
             if status is not None:
                 row["status"] = status
@@ -1323,8 +1366,19 @@ class Store:
             if sourced_thesis_id and not row.get("sourced_thesis_id"):
                 row["sourced_thesis_id"] = sourced_thesis_id
             row["updated_at"] = now
-            row["updated_by"] = actor or self.actor or ""
+            row["updated_by"] = who or ""
             self.db["pipeline"].upsert(row, pk="handle", alter=True)
+            # Judgment events (actor-bound writers only — legacy callers
+            # without an actor still work, they just leave no feed trail).
+            if who:
+                if status is not None and status != old_status:
+                    self._append_event(
+                        "status_changed", handle=handle, actor=who,
+                        payload={"old": old_status, "new": status},
+                    )
+                if notes is not None and notes != old_notes:
+                    self._append_event("notes_edited", handle=handle, actor=who)
+        return True
 
     @staticmethod
     def _decode_pipeline(row: dict) -> dict:
@@ -1358,6 +1412,457 @@ class Store:
             "from pipeline group by 1"
         ).fetchall()
         return {status: n for status, n in rows}
+
+    # ------------------------------------------------------- activity events
+
+    def _append_event(
+        self,
+        verb: str,
+        *,
+        handle: str | None = None,
+        thesis_id: str | None = None,
+        payload: dict | None = None,
+        actor: str | None = None,
+    ) -> None:
+        """Append one row to the activity spine.
+
+        Called INSIDE the same write_tx as the state write it describes, so
+        an event exists iff its state change committed. Events power the
+        activity feed, unread badges, Slack notifications, and audit — state
+        is never derived from them. An event without an author is a bug;
+        callers that may run actor-less (legacy CLI paths) skip emission
+        rather than calling with None."""
+        who = actor or self.actor
+        if not who:
+            raise ValueError(f"event {verb!r} needs an actor — bind store.actor")
+        self.db["events"].insert(
+            {
+                "at": datetime.now(timezone.utc).isoformat(),
+                "actor": who,
+                "verb": verb,
+                "handle": (handle or "").lstrip("@").lower() or None,
+                "thesis_id": thesis_id or None,
+                "payload_json": json.dumps(payload or {}),
+                "notified": 0,
+            },
+            alter=True,
+        )
+
+    def events(
+        self,
+        *,
+        limit: int = 200,
+        handle: str | None = None,
+        actor: str | None = None,
+        verbs: list[str] | None = None,
+        before_id: int | None = None,
+    ) -> list[Event]:
+        """Newest-first slice of the activity feed, with optional filters."""
+        if not self.db["events"].exists():
+            return []
+        where = ["1=1"]
+        params: list = []
+        if handle:
+            where.append("handle = ?")
+            params.append(handle.lstrip("@").lower())
+        if actor:
+            where.append("actor = ?")
+            params.append(actor)
+        if verbs:
+            where.append(f"verb in ({','.join('?' * len(verbs))})")
+            params.extend(verbs)
+        if before_id is not None:
+            where.append("id < ?")
+            params.append(before_id)
+        rows = self.db.execute(
+            f"select id, at, actor, verb, handle, thesis_id, payload_json "
+            f"from events where {' and '.join(where)} "
+            f"order by id desc limit {int(limit)}",
+            params,
+        ).fetchall()
+        return [
+            Event(
+                id=r[0], at=r[1], actor=r[2], verb=r[3], handle=r[4],
+                thesis_id=r[5], payload=json.loads(r[6] or "{}"),
+            )
+            for r in rows
+        ]
+
+    def latest_event_id(self) -> int:
+        if not self.db["events"].exists():
+            return 0
+        row = self.db.execute("select coalesce(max(id), 0) from events").fetchone()
+        return int(row[0])
+
+    def unread_count(self, actor: str) -> int:
+        """Events since this member's read cursor, excluding their own."""
+        if not self.db["events"].exists():
+            return 0
+        cursor = 0
+        if self.db["read_cursors"].exists():
+            row = self.db.execute(
+                "select last_event_id from read_cursors where actor = ?", [actor]
+            ).fetchone()
+            cursor = int(row[0]) if row and row[0] else 0
+        return int(self.db.execute(
+            "select count(*) from events where id > ? and actor != ?",
+            [cursor, actor],
+        ).fetchone()[0])
+
+    def mark_read(self, actor: str) -> None:
+        with self.write_tx():
+            self.db["read_cursors"].upsert(
+                {
+                    "actor": actor,
+                    "last_event_id": self.latest_event_id(),
+                    "updated_at": datetime.now(timezone.utc).isoformat(),
+                },
+                pk="actor",
+                alter=True,
+            )
+
+    def unnotified_events(self, limit: int = 100) -> list[Event]:
+        """Oldest-first events the notifier has not yet dispatched."""
+        if not self.db["events"].exists():
+            return []
+        rows = self.db.execute(
+            "select id, at, actor, verb, handle, thesis_id, payload_json "
+            "from events where notified = 0 order by id asc limit ?",
+            [limit],
+        ).fetchall()
+        return [
+            Event(id=r[0], at=r[1], actor=r[2], verb=r[3], handle=r[4],
+                  thesis_id=r[5], payload=json.loads(r[6] or "{}"))
+            for r in rows
+        ]
+
+    def mark_notified(self, event_ids: list[int]) -> None:
+        if not event_ids or not self.db["events"].exists():
+            return
+        with self.write_tx():
+            self.db.execute(
+                f"update events set notified = 1 "
+                f"where id in ({','.join('?' * len(event_ids))})",
+                event_ids,
+            )
+
+    # ------------------------------------------------------------------ votes
+
+    def set_vote(
+        self,
+        handle: str,
+        stance: str,
+        rationale: str = "",
+        *,
+        thesis_id: str = "",
+        actor: str | None = None,
+    ) -> None:
+        """One partner's stance on one startup. Re-voting updates the row
+        (history is the vote_cast events); an empty stance clears it."""
+        from scout.collab import STANCES
+
+        who = actor or self.actor
+        if not who:
+            raise ValueError("a vote needs an author — bind store.actor")
+        key = handle.lstrip("@").lower()
+        if not stance:
+            with self.write_tx():
+                if self.db["votes"].exists():
+                    self.db.execute(
+                        "delete from votes where handle = ? and actor = ?",
+                        [key, who],
+                    )
+                    self._append_event(
+                        "vote_cleared", handle=key, actor=who, payload={}
+                    )
+            return
+        if stance not in STANCES:
+            raise ValueError(f"unknown stance: {stance!r}")
+        now = datetime.now(timezone.utc).isoformat()
+        with self.write_tx():
+            created = now
+            if self.db["votes"].exists():
+                prior = list(self.db["votes"].rows_where(
+                    "handle = ? and actor = ?", [key, who], limit=1))
+                if prior:
+                    created = prior[0].get("created_at") or now
+            self.db["votes"].upsert(
+                {
+                    "handle": key, "actor": who, "stance": stance,
+                    "rationale": rationale.strip(),
+                    "thesis_id": thesis_id or "",
+                    "created_at": created, "updated_at": now,
+                },
+                pk=("handle", "actor"),
+                alter=True,
+            )
+            self._append_event(
+                "vote_cast", handle=key, thesis_id=thesis_id or None, actor=who,
+                payload={"stance": stance, "rationale": rationale.strip()},
+            )
+
+    def votes_for(self, handle: str) -> list[Vote]:
+        if not self.db["votes"].exists():
+            return []
+        return [
+            Vote.model_validate(dict(r))
+            for r in self.db["votes"].rows_where(
+                "handle = ?", [handle.lstrip("@").lower()], order_by="created_at"
+            )
+        ]
+
+    def all_votes(self) -> dict[str, list[Vote]]:
+        """Every startup's votes, keyed by lowercased handle."""
+        if not self.db["votes"].exists():
+            return {}
+        out: dict[str, list[Vote]] = {}
+        for r in self.db["votes"].rows_where(order_by="handle, created_at"):
+            vote = Vote.model_validate(dict(r))
+            out.setdefault(vote.handle, []).append(vote)
+        return out
+
+    # --------------------------------------------------------------- comments
+
+    def add_comment(
+        self,
+        handle: str,
+        body: str,
+        *,
+        mentions: list[str] | None = None,
+        memo_version_id: int | None = None,
+        actor: str | None = None,
+    ) -> int:
+        """Append one comment; returns its id. Mentions are precomputed by
+        the caller (collab.parse_mentions) so the event payload can drive
+        notification pings."""
+        who = actor or self.actor
+        if not who:
+            raise ValueError("a comment needs an author — bind store.actor")
+        body = body.strip()
+        if not body:
+            raise ValueError("empty comment")
+        key = handle.lstrip("@").lower()
+        with self.write_tx():
+            comment_id = (
+                self.db["comments"]
+                .insert(
+                    {
+                        "handle": key,
+                        "actor": who,
+                        "body": body,
+                        "mentions_json": json.dumps(mentions or []),
+                        "memo_version_id": memo_version_id,
+                        "created_at": datetime.now(timezone.utc).isoformat(),
+                        "edited_at": None,
+                        "deleted_at": None,
+                    },
+                    alter=True,
+                )
+                .last_pk
+            )
+            self._append_event(
+                "comment_added", handle=key, actor=who,
+                payload={
+                    "comment_id": comment_id,
+                    "mentions": mentions or [],
+                    "memo_version_id": memo_version_id,
+                    "preview": body[:140],
+                },
+            )
+        return int(comment_id)
+
+    def delete_comment(self, comment_id: int, *, actor: str | None = None) -> None:
+        """Soft delete (threads keep their shape); the UI enforces who may."""
+        if not self.db["comments"].exists():
+            return
+        with self.write_tx():
+            self.db.execute(
+                "update comments set deleted_at = ? where id = ?",
+                [datetime.now(timezone.utc).isoformat(), comment_id],
+            )
+
+    def comments_for(self, handle: str, include_deleted: bool = False) -> list[Comment]:
+        if not self.db["comments"].exists():
+            return []
+        where = "handle = ?" + ("" if include_deleted else " and deleted_at is null")
+        out = []
+        for r in self.db["comments"].rows_where(
+            where, [handle.lstrip("@").lower()], order_by="id"
+        ):
+            row = dict(r)
+            row["mentions"] = json.loads(row.pop("mentions_json", None) or "[]")
+            out.append(Comment.model_validate(row))
+        return out
+
+    def all_comment_counts(self) -> dict[str, int]:
+        if not self.db["comments"].exists():
+            return {}
+        rows = self.db.execute(
+            "select handle, count(*) from comments "
+            "where deleted_at is null group by handle"
+        ).fetchall()
+        return {r[0]: r[1] for r in rows}
+
+    # ----------------------------------------------------------- memo history
+
+    def set_memo(
+        self,
+        handle: str,
+        body: str,
+        *,
+        meta: dict | None = None,
+        kind: str = "generated",
+        actor: str | None = None,
+        restored_from: int | None = None,
+    ) -> int:
+        """Write the current memo AND an immutable version snapshot, atomically.
+
+        pipeline.brief stays the current memo (every existing read path —
+        Memos page, export, PDF — is untouched); memo_versions accumulates
+        history, which is what makes regeneration safe: a human's edit is
+        version n, a regeneration is version n+1, and any version can be
+        re-promoted. Returns the new version_no."""
+        if kind not in ("generated", "edited"):
+            raise ValueError(f"unknown memo kind: {kind!r}")
+        who = actor or self.actor or ("agent:memo" if kind == "generated" else "")
+        if not who:
+            raise ValueError("a memo write needs an author — bind store.actor")
+        key = handle.lstrip("@").lower()
+        with self.write_tx():
+            version_no = 1
+            if self.db["memo_versions"].exists():
+                row = self.db.execute(
+                    "select coalesce(max(version_no), 0) from memo_versions "
+                    "where handle = ?",
+                    [key],
+                ).fetchone()
+                version_no = int(row[0]) + 1
+            self.db["memo_versions"].insert(
+                {
+                    "handle": key,
+                    "version_no": version_no,
+                    "body": body,
+                    "meta_json": json.dumps(meta or {}),
+                    "author": who,
+                    "kind": kind,
+                    "created_at": datetime.now(timezone.utc).isoformat(),
+                },
+                alter=True,
+            )
+            self.set_pipeline(
+                key,
+                brief=body,
+                brief_edited=(kind == "edited"),
+                brief_meta=meta if kind == "generated" else None,
+                actor=who,
+            )
+            payload: dict = {"version_no": version_no}
+            if restored_from is not None:
+                payload["restored_from"] = restored_from
+            self._append_event(
+                "memo_generated" if kind == "generated" else "memo_edited",
+                handle=key, actor=who, payload=payload,
+            )
+        return version_no
+
+    def memo_versions(self, handle: str, limit: int = 25) -> list[MemoVersion]:
+        """Version headers newest-first (bodies included — memos are text)."""
+        if not self.db["memo_versions"].exists():
+            return []
+        out = []
+        for r in self.db["memo_versions"].rows_where(
+            "handle = ?", [handle.lstrip("@").lower()],
+            order_by="version_no desc", limit=limit,
+        ):
+            row = dict(r)
+            row["meta"] = json.loads(row.pop("meta_json", None) or "{}")
+            out.append(MemoVersion.model_validate(row))
+        return out
+
+    def restore_memo_version(self, handle: str, version_no: int,
+                             *, actor: str | None = None) -> int | None:
+        """Re-promote an old version as the current memo (as a NEW version —
+        history is append-only). Returns the new version_no."""
+        versions = {v.version_no: v for v in self.memo_versions(handle, limit=1000)}
+        old = versions.get(version_no)
+        if old is None:
+            return None
+        return self.set_memo(
+            handle, old.body, meta=old.meta or None, kind="edited",
+            actor=actor, restored_from=version_no,
+        )
+
+    def set_memo_review(
+        self,
+        handle: str,
+        status: str,
+        *,
+        version_no: int | None = None,
+        actor: str | None = None,
+    ) -> None:
+        """Memo review state on the pipeline row: none / requested /
+        approved / changes_requested. Approval pins a version_no, so the UI
+        can flag a memo edited after its approval."""
+        if status not in ("none", "requested", "approved", "changes_requested"):
+            raise ValueError(f"unknown review status: {status!r}")
+        who = actor or self.actor
+        if not who:
+            raise ValueError("a review action needs an author")
+        key = handle.lstrip("@").lower()
+        now = datetime.now(timezone.utc).isoformat()
+        with self.write_tx():
+            row = {"handle": key}
+            if self.db["pipeline"].exists():
+                existing = list(self.db["pipeline"].rows_where(
+                    "handle = ?", [key], limit=1))
+                if existing:
+                    row = dict(existing[0])
+            row["memo_review_status"] = status
+            if status == "requested":
+                row["memo_review_requested_by"] = who
+            elif status in ("approved", "changes_requested"):
+                row["memo_reviewed_by"] = who
+                row["memo_reviewed_at"] = now
+                if status == "approved" and version_no is not None:
+                    row["memo_approved_version"] = int(version_no)
+            row["updated_at"] = now
+            row["updated_by"] = who
+            self.db["pipeline"].upsert(row, pk="handle", alter=True)
+            verb = {
+                "requested": "memo_review_requested",
+                "approved": "memo_approved",
+                "changes_requested": "memo_changes_requested",
+                "none": "memo_review_cleared",
+            }[status]
+            self._append_event(verb, handle=key, actor=who,
+                               payload={"version_no": version_no})
+
+    # ------------------------------------------------------------- assignment
+
+    def set_assignment(self, handle: str, assignee: str | None,
+                       *, actor: str | None = None) -> None:
+        """Give a startup an owner (empty/None clears). History = events."""
+        who = actor or self.actor
+        if not who:
+            raise ValueError("an assignment needs an author")
+        key = handle.lstrip("@").lower()
+        target = (assignee or "").strip().lower()
+        now = datetime.now(timezone.utc).isoformat()
+        with self.write_tx():
+            row = {"handle": key}
+            if self.db["pipeline"].exists():
+                existing = list(self.db["pipeline"].rows_where(
+                    "handle = ?", [key], limit=1))
+                if existing:
+                    row = dict(existing[0])
+            row.update(assignee=target, assigned_by=who,
+                       assigned_at=now if target else None,
+                       updated_at=now, updated_by=who)
+            self.db["pipeline"].upsert(row, pk="handle", alter=True)
+            self._append_event(
+                "assigned" if target else "unassigned",
+                handle=key, actor=who, payload={"assignee": target},
+            )
 
     # ------------------------------------------- startup columns & attributes
 
@@ -1485,6 +1990,11 @@ class Store:
                 pk="handle",
                 alter=True,
             )
+            if actor or self.actor:
+                self._append_event(
+                    "attrs_changed", handle=handle, actor=actor,
+                    payload={"keys": sorted(changes)},
+                )
 
     def all_attrs(self) -> dict[str, dict]:
         """Every startup's attribute values, keyed by lowercased handle."""
@@ -1540,6 +2050,11 @@ class Store:
                 # otherwise type these TEXT and hand back "88.0" strings.
                 columns={"fit": float, "score": float},
             )
+            if actor or self.actor:
+                self._append_event(
+                    "override_set", handle=handle, actor=actor,
+                    payload={"fit": fit, "score": score, "note": note},
+                )
 
     def clear_override(self, handle: str) -> None:
         handle = handle.lstrip("@").lower()
