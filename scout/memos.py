@@ -116,7 +116,8 @@ def generate_memo(
     row = store.get_pipeline(handle) or {}
     existing = (row.get("brief") or "").strip()
     attrs = {
-        key: value for key, value in (store.get_attrs(handle) or {}).items()
+        key: value
+        for key, value in (store.all_attrs().get(handle) or {}).items()
         if value not in (None, "", [], False)
     }
     memo, is_ai, meta = investment_memo(

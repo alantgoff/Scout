@@ -233,6 +233,7 @@ def execute_job(store: Store, settings: Settings, job: dict) -> bool:
 
 def tick(store: Store, settings: Settings, worker_id: str) -> bool:
     """One pass: reap, schedule, run at most one job. True if work was done."""
+    store.record_worker_heartbeat(worker_id)
     reaped = store.reap_stale_jobs()
     if reaped:
         console.print(f"[yellow]requeued {reaped} job(s) from a dead worker[/]")

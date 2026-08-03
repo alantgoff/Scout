@@ -111,6 +111,7 @@ _attr_display = attr_display
 _DB_COMPUTED_LABELS = DB_COMPUTED_LABELS
 from scout.export import memo_pdf_bytes, pipeline_rows, write_pipeline_csv
 from scout.insights import actor_stats, model_disagreements, stats_prompt, triage_stats
+from scout import jobs as jobs_mod
 from scout import notify
 from scout.models import (
     FUNDING_STAGE_LABELS,
@@ -854,16 +855,34 @@ def _tail_log(path: str, max_lines: int = 30) -> str:
     return "\n".join(lines[-max_lines:])
 
 
-def _launch_scan(args: list[str], kind_hint: str) -> None:
-    """Start a CLI command as a DETACHED background process, logging to
-    ~/.scout/logs/. The UI never blocks on it — the progress panel and the
-    scan banner poll the store, and the log file is tailed on demand.
-    (The child records the log path in the scan row via SCOUT_SCAN_LOG.)"""
+def _launch_scan(args: list[str], kind_hint: str, job_kind: str = "",
+                 payload: dict | None = None) -> None:
+    """Start background work — via the worker's queue when one is deployed,
+    otherwise as a detached child of this process.
+
+    Both paths matter. On a server with the worker running, queueing is
+    correct: the job survives a Streamlit restart, both partners see it, and
+    it serializes against scheduled runs. On a laptop running only
+    `scout ui`, queueing would mean nothing ever happens, so the original
+    subprocess launch stays the fallback. Either way the UI never blocks —
+    progress comes from polling the store, and the log is tailed on demand.
+    """
     # Click-time guard: the page may have rendered before another scan
     # started (buttons enabled), so re-check right before launching.
     if (store.current_scan() or {}).get("status") == "running":
         st.warning("A scan is already running — wait for it to finish.")
         return
+
+    worker = store.worker_status()
+    if job_kind and worker and worker["alive"]:
+        job_id = store.enqueue_job(job_kind, payload or {}, actor=ACTOR,
+                                   dedupe=True)
+        st.session_state["toast"] = (
+            f"Queued — the worker picks it up within seconds (job {job_id})."
+            if job_id else
+            "That job is already queued or running."
+        )
+        st.rerun()
     log_dir = Path(settings.db_path).parent / "logs"
     log_dir.mkdir(parents=True, exist_ok=True)
     log_path = log_dir / f"{kind_hint}-{datetime.now():%Y%m%d-%H%M%S}.log"
@@ -1288,7 +1307,7 @@ def _status_of(lead: Lead) -> str:
 # slim row. Session-state-driven nav (unlike st.tabs) so any button can route to
 # a page via nav_target + rerun. The full thesis lives on the Thesis page.
 PAGES = ["Thesis", "Startups", "Longlist", "Shortlist", "Memos", "Activity",
-         "Settings"]
+         "Automation", "Settings"]
 # Slack deep links (?s=<handle>&p=<page>) land here: translate them into the
 # existing nav_target/selection mechanism once, then clear the params so a
 # later rerun doesn't keep forcing the same page.
@@ -3321,6 +3340,26 @@ if nav == "Memos":
                 unsafe_allow_html=True,
             )
 
+        # With a worker deployed, deep research (minutes of live web work)
+        # belongs in the queue rather than tying up a browser tab that must
+        # stay open for it to finish.
+        _worker = store.worker_status()
+        if _worker and _worker["alive"] and not editing:
+            if st.button(f"Queue a {_selected_depth()} memo for the worker",
+                         key="memo_queue", use_container_width=True):
+                job_id = store.enqueue_job(
+                    jobs_mod.KIND_MEMO,
+                    {"handle": pick, "depth": _selected_depth(),
+                     "focus": (st.session_state.get("memo_focus") or "").strip()},
+                    actor=ACTOR, dedupe=True,
+                )
+                st.session_state["toast"] = (
+                    f"Queued — the worker will write it (job {job_id}). "
+                    "You can close the tab."
+                    if job_id else "A memo for this startup is already queued."
+                )
+                st.rerun()
+
         # ---- Review & history. A memo is the artefact a partner acts on, so
         # it gets a named reviewer and a recoverable past.
         if existing_memo and not editing:
@@ -3657,7 +3696,11 @@ if nav == "Thesis":
         _launch_scan(["run", "--source", "xapi" if paid_run else "twscrape",
                       "--max-accounts", str(int(max_accounts)),
                       "--min-score", str(int(min_score_run)), "--ttl-days", str(int(ttl))],
-                     "run")
+                     "run",
+                     job_kind=jobs_mod.KIND_RUN,
+                     payload={"source": "xapi" if paid_run else "twscrape",
+                              "max_accounts": int(max_accounts),
+                              "min_score": int(min_score_run)})
     if preview_col.button("Preview discovery (free, no scoring)", disabled=scan_active):
         _launch_scan(["source", "--max-accounts", str(int(max_accounts))], "source")
     if reclass_col.button(
@@ -3790,6 +3833,74 @@ if nav == "Thesis":
                 'the weights.</div>',
                 unsafe_allow_html=True,
             )
+
+    # ---- Notifications. Firm-wide settings live in the DB (not .env) so
+    # both partners share one configuration and either can change it.
+    with st.expander("Notifications — Slack digests, mentions, deep links"):
+        st.markdown(
+            '<div class="subtle">A digest is the handoff between timezones: '
+            'what needs a decision, what is new, and what your partner did '
+            'overnight. Mentions and assignments ping immediately.</div>',
+            unsafe_allow_html=True,
+        )
+        webhook = st.text_input(
+            "Slack incoming webhook URL",
+            value=store.get_setting("slack_webhook_url") or "",
+            type="password", key="set_slack_hook",
+            help="Slack → Apps → Incoming Webhooks. The URL is a secret: it "
+                 "is stored server-side and never rendered back in full.",
+        )
+        base_url = st.text_input(
+            "App base URL",
+            value=store.get_setting("app_base_url") or "",
+            placeholder="https://scout.yourfund.com", key="set_base_url",
+            help="Used to build deep links in Slack messages, so a digest "
+                 "line opens the right startup.",
+        )
+        threshold = st.slider(
+            "Digest score threshold", 0, 100,
+            int(float(store.get_setting("digest_score_threshold") or 60)),
+            key="set_digest_threshold",
+            help="Only startups scoring at least this much appear in the "
+                 "digest as new candidates.",
+        )
+        n1, n2, _nsp = st.columns([1, 1.2, 3])
+        if n1.button("Save notifications", type="primary", key="save_notify"):
+            store.set_setting("slack_webhook_url", webhook.strip())
+            store.set_setting("app_base_url", base_url.strip())
+            store.set_setting("digest_score_threshold", str(threshold))
+            st.session_state["toast"] = "Notification settings saved"
+            st.rerun()
+        if n2.button("Send a test digest", key="test_digest",
+                     disabled=not (webhook or "").strip()):
+            since = datetime.now(timezone.utc) - timedelta(hours=24)
+            data = notify.digest_data(store, since)
+            ok = notify.post_slack(store, notify.digest_fallback_text(data),
+                                   notify.digest_blocks(data))
+            st.session_state["toast"] = (
+                "Test digest sent." if ok
+                else "Slack rejected it — check the webhook URL."
+            )
+            st.rerun()
+
+        st.write("")
+        st.markdown("**Your Slack handle**")
+        st.markdown(
+            '<div class="subtle">Set your Slack member ID and @mentions of '
+            'you in Scout become real Slack pings rather than plain text. '
+            'Slack profile → More → Copy member ID.</div>',
+            unsafe_allow_html=True,
+        )
+        me = store.get_user(ACTOR) or {}
+        member_id = st.text_input(
+            "Slack member ID", value=me.get("slack_member_id") or "",
+            placeholder="U01ABCDEFGH", key="set_slack_member",
+            label_visibility="collapsed",
+        )
+        if st.button("Save my Slack ID", key="save_slack_member"):
+            store.update_user(ACTOR, slack_member_id=member_id.strip())
+            st.session_state["toast"] = "Saved"
+            st.rerun()
 
     with st.expander("Signals & scoring — weights, parameters, classifier prompt"):
         stats = triage_stats(ledger, pipeline)
@@ -4714,6 +4825,229 @@ if nav == "Activity":
         )
     if feed:
         store.mark_read(ACTOR)
+
+
+# ============================================================ AUTOMATION
+
+
+_JOB_STATUS_TINT = {
+    "done": "#1f6f3f", "failed": "#962828", "running": "#1f6f3f",
+    "queued": "#8a6d1f", "cancelled": "var(--muted)",
+}
+
+_TIMEZONES = [
+    "UTC", "Europe/London", "America/New_York", "America/Los_Angeles",
+    "Europe/Berlin", "Asia/Singapore",
+]
+
+
+def _render_schedule_editor(row: dict | None, key: str) -> None:
+    """Add or edit one schedule. Deliberately two shapes (interval or a
+    daily wall-clock time) rather than a cron box — cron is a foot-gun for
+    the one thing anyone wants here."""
+    spec = row["spec"] if row and row["spec"] else jobs_mod.ScheduleSpec(
+        daily_at="06:00", weekdays=[0, 1, 2, 3, 4], tz="UTC")
+    kinds = [jobs_mod.KIND_RUN, jobs_mod.KIND_DIGEST, jobs_mod.KIND_VERIFY]
+    c1, c2 = st.columns(2)
+    kind = c1.selectbox(
+        "What runs", kinds,
+        index=kinds.index(row["kind"]) if row and row["kind"] in kinds else 0,
+        format_func=lambda k: jobs_mod.JOB_LABELS.get(k, k), key=f"{key}_kind",
+    )
+    name = c2.text_input("Name", value=(row["name"] if row else ""),
+                         placeholder=jobs_mod.JOB_LABELS.get(kind, kind),
+                         key=f"{key}_name")
+    mode = st.radio(
+        "When", ["Daily at a time", "Every N minutes"],
+        index=1 if spec.every_minutes else 0,
+        horizontal=True, key=f"{key}_mode", label_visibility="collapsed",
+    )
+    if mode == "Every N minutes":
+        minutes = st.number_input("Every (minutes)", min_value=5, max_value=1440,
+                                  value=spec.every_minutes or 60, step=5,
+                                  key=f"{key}_mins")
+        new_spec = jobs_mod.ScheduleSpec(every_minutes=int(minutes))
+    else:
+        t1, t2, t3 = st.columns([1, 1.4, 1.2])
+        at = t1.text_input("Time (HH:MM)", value=spec.daily_at or "06:00",
+                           key=f"{key}_at")
+        tz = t2.selectbox(
+            "Timezone", _TIMEZONES,
+            index=_TIMEZONES.index(spec.tz) if spec.tz in _TIMEZONES else 0,
+            key=f"{key}_tz",
+            help="The time is a wall-clock time in this zone, so it stays put "
+                 "across daylight saving changes.",
+        )
+        weekdays_only = t3.checkbox("Weekdays only",
+                                    value=bool(spec.weekdays), key=f"{key}_wd")
+        new_spec = jobs_mod.ScheduleSpec(
+            daily_at=at, tz=tz,
+            weekdays=[0, 1, 2, 3, 4] if weekdays_only else [],
+        )
+    try:
+        new_spec.validate_spec()
+        st.markdown(f'<div class="subtle">Runs {_e(new_spec.describe())}.</div>',
+                    unsafe_allow_html=True)
+        valid = True
+    except ValueError as exc:
+        st.markdown(f'<div class="stale-flag">{_e(str(exc))}</div>',
+                    unsafe_allow_html=True)
+        valid = False
+
+    b1, b2, _sp = st.columns([1, 1, 3])
+    if b1.button("Save schedule", key=f"{key}_save", type="primary",
+                 disabled=not valid):
+        store.upsert_schedule(
+            name or jobs_mod.JOB_LABELS.get(kind, kind), kind, new_spec,
+            row["payload"] if row else (
+                {"source": "twscrape"} if kind == jobs_mod.KIND_RUN
+                else {"window": "daily"}
+            ),
+            schedule_id=row["id"] if row else None,
+            enabled=row["enabled"] if row else True,
+            actor=ACTOR,
+        )
+        st.session_state["toast"] = "Schedule saved"
+        st.session_state.pop(f"{key}_open", None)
+        st.rerun()
+    if row and b2.button("Delete", key=f"{key}_del"):
+        store.delete_schedule(row["id"])
+        st.session_state["toast"] = "Schedule deleted"
+        st.rerun()
+
+
+if nav == "Automation":
+    st.markdown(
+        '<div class="section-title">Automation</div>'
+        '<div class="section-sub">Scout sourcing on its own schedule. '
+        'Momentum signals — hiring, launches, departures — are only worth '
+        'anything while they are fresh, so the run that matters is the one '
+        'nobody had to remember.</div>',
+        unsafe_allow_html=True,
+    )
+
+    worker_state = store.worker_status()
+    depth = store.job_queue_depth()
+    w1, w2, w3 = st.columns(3)
+    if worker_state is None:
+        w1.metric("Worker", "Never run")
+    elif worker_state["alive"]:
+        w1.metric("Worker", "Running", delta=f"seen {_ago(worker_state['last_seen'])}",
+                  delta_color="off")
+    else:
+        w1.metric("Worker", "Offline", delta=f"last seen {_ago(worker_state['last_seen'])}",
+                  delta_color="inverse")
+    w2.metric("Queued or running", depth)
+    next_up = [s for s in store.schedules() if s["enabled"] and s.get("next_run_at")]
+    w3.metric(
+        "Next scheduled",
+        _ago(min(s["next_run_at"] for s in next_up)) if next_up else "—",
+    )
+
+    if worker_state is None or not worker_state["alive"]:
+        st.markdown(
+            '<div class="stale-banner">No worker is running, so schedules '
+            'will not fire and queued jobs will sit. Start one with '
+            '<code>scout worker --bootstrap</code>, or install the systemd '
+            'unit in <code>deploy/</code>. Runs you start by hand still work '
+            '— the UI launches those itself.</div>',
+            unsafe_allow_html=True,
+        )
+
+    st.write("")
+    st.markdown('<div class="section-title">Schedules</div>', unsafe_allow_html=True)
+    schedules = store.schedules()
+    if not schedules:
+        st.markdown(
+            '<div class="subtle">Nothing scheduled yet. The usual setup is a '
+            'sourcing run early each weekday and a digest shortly after, so '
+            'the summary describes a run that has finished.</div>',
+            unsafe_allow_html=True,
+        )
+        if st.button("Add the recommended schedules", type="primary"):
+            from scout.worker import bootstrap_schedules
+
+            created = bootstrap_schedules(store, actor=ACTOR)
+            st.session_state["toast"] = f"Created {len(created)} schedules"
+            st.rerun()
+    for row in schedules:
+        s1, s2, s3, s4 = st.columns([2.6, 2, 1, 1])
+        s1.markdown(
+            f'<div class="act-row"><div class="act-what"><b>{_e(row["name"])}</b>'
+            f'<br><span class="subtle">'
+            f'{_e(row["spec"].describe()) if row["spec"] else "invalid spec"}'
+            "</span></div></div>",
+            unsafe_allow_html=True,
+        )
+        s2.markdown(
+            f'<div class="act-row"><div class="act-when">next '
+            f'{_e(_ago(row["next_run_at"]) if row["enabled"] else "—")}</div></div>',
+            unsafe_allow_html=True,
+        )
+        if s3.toggle("On", value=row["enabled"], key=f"sched_on_{row['id']}") != row["enabled"]:
+            store.set_schedule_enabled(row["id"], not row["enabled"])
+            st.rerun()
+        if s4.button("Edit", key=f"sched_edit_{row['id']}", use_container_width=True):
+            st.session_state[f"sched_{row['id']}_open"] = True
+        if st.session_state.get(f"sched_{row['id']}_open"):
+            with st.container(border=True):
+                _render_schedule_editor(row, f"sched_{row['id']}")
+
+    with st.expander("Add a schedule"):
+        _render_schedule_editor(None, "sched_new")
+
+    st.write("")
+    st.markdown('<div class="section-title">Run something now</div>',
+                unsafe_allow_html=True)
+    q1, q2, q3 = st.columns(3)
+    for col, kind, label in (
+        (q1, jobs_mod.KIND_RUN, "Queue a sourcing run"),
+        (q2, jobs_mod.KIND_DIGEST, "Queue a digest"),
+        (q3, jobs_mod.KIND_VERIFY, "Queue verification"),
+    ):
+        if col.button(label, key=f"queue_{kind}", use_container_width=True):
+            payload = ({"source": "twscrape"} if kind == jobs_mod.KIND_RUN
+                       else {"window": "daily"} if kind == jobs_mod.KIND_DIGEST
+                       else {})
+            job_id = store.enqueue_job(kind, payload, actor=ACTOR, dedupe=True)
+            st.session_state["toast"] = (
+                f"Queued job {job_id}" if job_id
+                else "Already queued or running"
+            )
+            st.rerun()
+
+    st.write("")
+    st.markdown('<div class="section-title">Recent jobs</div>', unsafe_allow_html=True)
+    job_rows = store.jobs(limit=25)
+    if not job_rows:
+        st.markdown('<div class="subtle">Nothing has run yet.</div>',
+                    unsafe_allow_html=True)
+    for job in job_rows:
+        tint = _JOB_STATUS_TINT.get(job["status"], "var(--muted)")
+        detail = job.get("error") or ", ".join(
+            f"{k} {v}" for k, v in (job.get("result") or {}).items()
+            if k != "log_path" and v not in (None, "")
+        )
+        j1, j2 = st.columns([4, 1])
+        j1.markdown(
+            f'<div class="act-row"><div class="act-what">'
+            f'<b>{_e(jobs_mod.job_label(job["kind"], job.get("payload")))}</b> '
+            f'<span style="color:{tint};font-weight:650">{_e(job["status"])}</span>'
+            f'<br><span class="subtle">{_e(detail[:160] or "—")}</span></div>'
+            f'<div class="act-when">{_e(_ago(job.get("created_at")))}</div></div>',
+            unsafe_allow_html=True,
+        )
+        if job["status"] == "queued" and j2.button(
+            "Cancel", key=f"job_cancel_{job['id']}", use_container_width=True
+        ):
+            store.cancel_job(job["id"], actor=ACTOR)
+            st.rerun()
+
+    # A running job means live progress worth watching — reuse the existing
+    # run cockpit rather than inventing a second progress display.
+    if depth:
+        st.write("")
+        _run_panel()
 
 
 # ============================================================ SETTINGS

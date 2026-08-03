@@ -517,3 +517,103 @@ def test_memo_regeneration_keeps_the_edit_restorable(tmp_path, monkeypatch) -> N
     next(b for b in at.button if b.key == "memo_restore_2").click().run()
     assert not at.exception, at.exception[0].message if at.exception else ""
     assert Store(db).get_pipeline("smoke_founder")["brief"] == "# my careful edits"
+
+
+# --- automation -----------------------------------------------------------------
+
+
+def test_automation_page_warns_when_no_worker_is_running(tmp_path, monkeypatch) -> None:
+    """The failure mode worth catching: schedules that silently never fire."""
+    db = tmp_path / "smoke.db"
+    monkeypatch.setenv("DB_PATH", str(db))
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "")
+    monkeypatch.setenv("SCOUT_DEV_USER", "alan@firm.com")
+    seed_store(db)
+
+    at = AppTest.from_file(str(UI_PATH), default_timeout=30)
+    at.session_state["nav"] = "Automation"
+    at.run()
+    assert not at.exception, at.exception[0].message if at.exception else ""
+    page = _page_text(at)
+    assert "No worker is running" in page
+    assert "scout worker --bootstrap" in page
+
+    # With a live heartbeat the warning goes away.
+    Store(db).record_worker_heartbeat("test-worker:1")
+    at2 = AppTest.from_file(str(UI_PATH), default_timeout=30)
+    at2.session_state["nav"] = "Automation"
+    at2.run()
+    assert not at2.exception, at2.exception[0].message if at2.exception else ""
+    assert "No worker is running" not in _page_text(at2)
+
+
+def test_bootstrap_button_creates_the_recommended_schedules(tmp_path, monkeypatch) -> None:
+    db = tmp_path / "smoke.db"
+    monkeypatch.setenv("DB_PATH", str(db))
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "")
+    monkeypatch.setenv("SCOUT_DEV_USER", "alan@firm.com")
+    seed_store(db)
+
+    at = AppTest.from_file(str(UI_PATH), default_timeout=30)
+    at.session_state["nav"] = "Automation"
+    at.run()
+    next(b for b in at.button if "recommended schedules" in b.label).click().run()
+    assert not at.exception, at.exception[0].message if at.exception else ""
+    kinds = {s["kind"] for s in Store(db).schedules()}
+    assert kinds == {"run_pipeline", "digest"}
+    assert all(s["enabled"] for s in Store(db).schedules())
+
+
+def test_queue_button_enqueues_and_cancels(tmp_path, monkeypatch) -> None:
+    db = tmp_path / "smoke.db"
+    monkeypatch.setenv("DB_PATH", str(db))
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "")
+    monkeypatch.setenv("SCOUT_DEV_USER", "alan@firm.com")
+    seed_store(db)
+
+    at = AppTest.from_file(str(UI_PATH), default_timeout=30)
+    at.session_state["nav"] = "Automation"
+    at.run()
+    next(b for b in at.button if b.key == "queue_digest").click().run()
+    assert not at.exception, at.exception[0].message if at.exception else ""
+    jobs = Store(db).jobs()
+    assert len(jobs) == 1
+    assert jobs[0]["kind"] == "digest"
+    assert jobs[0]["requested_by"] == "alan@firm.com"  # attributed to the clicker
+
+    # The queued job can be cancelled from the same page.
+    next(b for b in at.button if b.key == f"job_cancel_{jobs[0]['id']}").click().run()
+    assert not at.exception, at.exception[0].message if at.exception else ""
+    assert Store(db).get_job(jobs[0]["id"])["status"] == "cancelled"
+
+
+def test_run_button_queues_when_a_worker_is_live(tmp_path, monkeypatch) -> None:
+    """With a worker deployed the UI must NOT spawn its own subprocess —
+    the job belongs in the queue where it survives a Streamlit restart."""
+    db = tmp_path / "smoke.db"
+    monkeypatch.setenv("DB_PATH", str(db))
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "")
+    monkeypatch.setenv("SCOUT_DEV_USER", "alan@firm.com")
+    seed_store(db)
+    Store(db).record_worker_heartbeat("worker:1")
+
+    spawned: list = []
+    monkeypatch.setattr("subprocess.Popen",
+                        lambda *a, **kw: spawned.append(a) or _FakeProc())
+
+    at = AppTest.from_file(str(UI_PATH), default_timeout=30)
+    at.session_state["nav"] = "Thesis"  # where the run controls live
+    at.run()
+    next(b for b in at.button if b.label == "Run scout").click().run()
+    assert not at.exception, at.exception[0].message if at.exception else ""
+    assert spawned == []  # queued, not spawned
+    jobs = Store(db).jobs()
+    assert len(jobs) == 1 and jobs[0]["kind"] == "run_pipeline"
+    assert jobs[0]["payload"]["source"] in ("twscrape", "xapi")
+
+
+class _FakeProc:
+    pid = 4242
+
+    def wait(self, timeout=None):
+        return 0

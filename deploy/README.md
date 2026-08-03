@@ -51,9 +51,25 @@ sign-in is admitted, so do it first.
 cp deploy/scout-ui.service deploy/scout-worker.service /etc/systemd/system/
 cp deploy/litestream.yml /etc/litestream.yml     # fill in the S3/B2 bucket
 systemctl daemon-reload
-systemctl enable --now scout-ui litestream
-# scout-worker: enable when the jobs worker ships (Phase 3)
+systemctl enable --now scout-ui scout-worker litestream
 ```
+
+Create the default schedules once (weekday sourcing run + morning digest):
+
+```bash
+sudo -u scout DB_PATH=/var/lib/scout/scout.db \
+  /var/lib/scout/.local/bin/uv run python -m scout.cli worker --bootstrap --once
+```
+
+After that, schedules are edited in the UI under **Automation**, which also
+shows whether the worker is alive, what is queued, and what recently ran. If
+the worker is stopped the page says so plainly — the failure worth catching
+is schedules that silently never fire.
+
+Times are wall-clock in the timezone you pick, so "07:00 Europe/London"
+stays at 07:00 through daylight saving. With partners in different zones,
+set the sourcing run early enough that the digest (scheduled after it)
+describes a run that has actually finished.
 
 Caddy (TLS + reverse proxy — Streamlit's websocket proxies out of the box):
 

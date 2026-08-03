@@ -1,5 +1,10 @@
-# The job worker: scheduled sourcing runs, digests, CRM sync.
-# Ships with the jobs phase — enable once `scout worker` exists.
+# The job worker: scheduled sourcing runs, memos, and Slack digests.
+#
+# One-time setup (creates the weekday-run + morning-digest schedules):
+#   sudo -u scout DB_PATH=/var/lib/scout/scout.db \
+#     /var/lib/scout/.local/bin/uv run python -m scout.cli worker --bootstrap --once
+# Deliberately NOT in ExecStart: bootstrapping on every restart would
+# resurrect schedules an operator had deliberately deleted.
 [Unit]
 Description=Scout job worker
 After=network-online.target
@@ -14,7 +19,21 @@ Environment=DB_PATH=/var/lib/scout/scout.db
 ExecStart=/var/lib/scout/.local/bin/uv run python -m scout.cli worker
 Restart=always
 RestartSec=5
-TimeoutStopSec=30
+
+# On stop the worker finishes the job in flight rather than abandoning it
+# half-written. A sourcing run is minutes, so a short timeout would SIGKILL
+# mid-run on every deploy. If it does overrun this, nothing is lost: the
+# job's lease lapses and the next worker requeues it.
+KillSignal=SIGTERM
+TimeoutStopSec=900
+
+# The worker is the one process that shells out to scrapers, so give it the
+# usual hardening — it needs nothing outside its own data directory.
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/scout
 
 [Install]
 WantedBy=multi-user.target

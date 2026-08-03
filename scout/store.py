@@ -307,6 +307,20 @@ class Store:
             )
             self.db.conn.commit()
 
+    def update_user(self, user_id: str, **fields) -> None:
+        """Update a member's own profile fields (name, Slack id, prefs).
+
+        Role is deliberately NOT settable here — it is an authorization
+        decision with its own guarded method, and folding it into a generic
+        profile update is how privilege-escalation bugs happen.
+        """
+        allowed = {"name", "slack_member_id", "settings_json"}
+        updates = {k: v for k, v in fields.items() if k in allowed}
+        if not updates or not self.db["users"].exists():
+            return
+        with self.write_tx():
+            self.db["users"].update(user_id.strip().lower(), updates, alter=True)
+
     def set_user_role(self, user_id: str, role: str) -> None:
         if role not in ("admin", "member"):
             raise ValueError(f"unknown role: {role!r}")
@@ -2540,6 +2554,36 @@ class Store:
             "select count(*) from jobs where status in ('queued', 'running')"
         ).fetchone()
         return int(row[0]) if row else 0
+
+    def record_worker_heartbeat(self, worker_id: str) -> None:
+        """The worker's liveness beacon, written once per tick.
+
+        The UI reads this to decide whether clicking Run should enqueue a
+        job or launch a subprocess itself: with a worker deployed, queueing
+        is right; on a laptop running only `scout ui`, queueing would mean
+        nothing ever happens.
+        """
+        self.set_setting("worker_last_seen", datetime.now(timezone.utc).isoformat())
+        self.set_setting("worker_id", worker_id)
+
+    def worker_status(self, stale_after_s: int = 180) -> dict | None:
+        """{"id", "last_seen", "alive"} — None if a worker has never run."""
+        last_seen = self.get_setting("worker_last_seen")
+        if not last_seen:
+            return None
+        try:
+            seen_at = datetime.fromisoformat(last_seen)
+        except ValueError:
+            return None
+        if seen_at.tzinfo is None:
+            seen_at = seen_at.replace(tzinfo=timezone.utc)
+        age = (datetime.now(timezone.utc) - seen_at).total_seconds()
+        return {
+            "id": self.get_setting("worker_id") or "",
+            "last_seen": seen_at,
+            "alive": age <= stale_after_s,
+            "age_s": age,
+        }
 
     # -------------------------------------------------------------- schedules
 
