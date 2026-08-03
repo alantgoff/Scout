@@ -83,6 +83,14 @@ from scout.config import (
     switch_thesis,
     thesis_version,
 )
+from scout.collab import (
+    STANCE_LABELS,
+    STANCES,
+    contested_sort_key,
+    disagreements,
+    parse_mentions,
+    vote_summary,
+)
 from scout.companies import display_name, group_by_company, startup_identity
 from scout.dbfields import (
     ATTR_TYPE_LABELS,
@@ -102,7 +110,8 @@ _editor_changes = editor_changes
 _attr_display = attr_display
 _DB_COMPUTED_LABELS = DB_COMPUTED_LABELS
 from scout.export import memo_pdf_bytes, pipeline_rows, write_pipeline_csv
-from scout.insights import stats_prompt, triage_stats
+from scout.insights import actor_stats, model_disagreements, stats_prompt, triage_stats
+from scout import notify
 from scout.models import (
     FUNDING_STAGE_LABELS,
     FUNDING_STAGE_ORDER,
@@ -368,6 +377,41 @@ def _inject_css() -> None:
         .stale-banner { border:1px solid #d9b83f; background:rgba(217,184,63,.12);
           border-radius:12px; padding:11px 14px; margin:4px 0 12px;
           font-size:13px; color:var(--ink-2); }
+        /* ---- collaboration: stances, splits, activity.
+           A stance badge is one partner's initials, coloured by conviction;
+           a row of them answers "who thinks what" without opening anything. */
+        .stance-row { display:flex; gap:5px; align-items:center; margin:7px 0 2px;
+          flex-wrap:wrap; }
+        .stance-badge { display:inline-flex; align-items:center; justify-content:center;
+          width:22px; height:22px; border-radius:50%; font-size:10.5px;
+          font-weight:700; letter-spacing:.02em; border:1px solid transparent; }
+        .stance-badge.strong_yes { background:#1f6f3f; color:#fff; }
+        .stance-badge.yes { background:rgba(31,111,63,.16); color:#1f6f3f;
+          border-color:rgba(31,111,63,.35); }
+        .stance-badge.unsure { background:var(--surface); color:var(--muted);
+          border-color:var(--hair); }
+        .stance-badge.pass { background:rgba(150,40,40,.12); color:#962828;
+          border-color:rgba(150,40,40,.32); }
+        /* A split is the most interesting state a startup can be in here —
+           it earns its own mark, not a muted one. */
+        .stance-split { font-size:10.5px; font-weight:700; letter-spacing:.06em;
+          text-transform:uppercase; color:#8a4d1f; background:rgba(200,110,40,.14);
+          border:1px solid rgba(200,110,40,.34); border-radius:980px;
+          padding:2px 8px; }
+        .act-row { display:flex; gap:10px; padding:9px 0; border-bottom:1px solid var(--hair);
+          font-size:13px; align-items:baseline; }
+        .act-who { font-weight:650; color:var(--ink); min-width:78px; }
+        .act-what { color:var(--ink-2); flex:1; }
+        .act-when { color:var(--muted); font-size:11.5px; white-space:nowrap; }
+        .act-unread { background:rgba(31,111,63,.07); margin:0 -10px; padding:9px 10px;
+          border-radius:8px; }
+        .cmt { border:1px solid var(--hair); border-radius:12px; padding:10px 12px;
+          margin:7px 0; background:var(--bg); }
+        .cmt-head { font-size:11.5px; color:var(--muted); margin-bottom:4px; }
+        .cmt-body { font-size:13.5px; line-height:1.5; color:var(--ink-2);
+          white-space:pre-wrap; }
+        .presence-dot { display:inline-block; width:7px; height:7px; border-radius:50%;
+          background:#1f6f3f; margin-right:5px; vertical-align:middle; }
         .dpane-readout { margin:16px 0 4px; border:1px solid var(--hair); border-radius:14px;
           background:var(--bg); padding:16px; }
         .dpane-top { display:flex; align-items:baseline; justify-content:space-between; }
@@ -708,14 +752,21 @@ def _initials(name: str, handle: str) -> str:
 # --------------------------------------------------------------------- helpers
 
 
-def _ago(ts: str | None) -> str:
-    """Compact relative time for ISO timestamps ('just now', '2h ago')."""
+def _ago(ts: str | datetime | None) -> str:
+    """Compact relative time ('just now', '2h ago').
+
+    Accepts an ISO string (store rows) or a datetime (pydantic models like
+    Event/Comment parse their timestamps), so callers never have to convert.
+    """
     if not ts:
         return ""
-    try:
-        then = datetime.fromisoformat(ts)
-    except ValueError:
-        return ""
+    if isinstance(ts, datetime):
+        then = ts
+    else:
+        try:
+            then = datetime.fromisoformat(ts)
+        except (ValueError, TypeError):
+            return ""
     if then.tzinfo is None:
         then = then.replace(tzinfo=timezone.utc)
     seconds = (datetime.now(timezone.utc) - then).total_seconds()
@@ -1082,6 +1133,11 @@ def _load_workspace(stamp: tuple, thesis_id: str, version: str):
         store.all_overrides(),
         store.all_attrs(),
         store.stale_handles(thesis_id, version),
+        # Collaboration state is firm-global — everyone sees the same votes
+        # and comments — so it belongs in this shared cache unit.
+        store.all_votes(),
+        store.all_comment_counts(),
+        store.list_users(),
     )
 
 
@@ -1101,13 +1157,62 @@ def _load_filtered_ledger(
     )
 
 
-leads, latest_is_demo, ledger, pipeline, overrides, attrs_by_handle, _stale = (
-    _load_workspace(_db_stamp(), ACTIVE_THESIS_ID, ACTIVE_VERSION)
-)
+(
+    leads, latest_is_demo, ledger, pipeline, overrides, attrs_by_handle, _stale,
+    votes_by_handle, comment_counts, USERS,
+) = _load_workspace(_db_stamp(), ACTIVE_THESIS_ID, ACTIVE_VERSION)
 counts: dict[str, int] = {}
 for _row in pipeline.values():
     _status = _row.get("status") or "new"
     counts[_status] = counts.get(_status, 0) + 1
+
+# Stance tallies per startup — what the cards, the Contested sort, and the
+# partner-meeting agenda all read from.
+VOTE_SUMMARIES = {
+    handle: summary
+    for handle, vs in votes_by_handle.items()
+    if (summary := vote_summary(vs)) is not None
+}
+USER_NAMES = {u["id"]: (u.get("name") or u["id"].split("@")[0]) for u in USERS}
+
+
+def _who(actor: str) -> str:
+    """Short display name for an actor id (machine actors read as 'Scout')."""
+    if not actor:
+        return "—"
+    if actor.startswith(("agent:", "system:", "schedule:")):
+        return "Scout"
+    return USER_NAMES.get(actor) or actor.split("@")[0]
+
+
+def _actor_initials(actor: str) -> str:
+    """Initials for a stance badge — distinct from _initials(name, handle),
+    which builds a startup avatar."""
+    parts = [p for p in re.split(r"[\s.]+", _who(actor)) if p]
+    return "".join(p[0].upper() for p in parts[:2]) or "?"
+
+
+def _my_stance(handle: str) -> str:
+    """The signed-in member's own stance on a startup ("" if none)."""
+    for vote in votes_by_handle.get(handle.lower(), []):
+        if vote.actor == ACTOR:
+            return vote.stance
+    return ""
+
+
+def _stance_chips_html(handle: str) -> str:
+    """Each partner's stance as an initial-badge row — who thinks what, at a
+    glance, without opening anything."""
+    summary = VOTE_SUMMARIES.get(handle.lower())
+    if summary is None:
+        return ""
+    badges = "".join(
+        f'<span class="stance-badge {stance}" title="{_e(_who(actor))}: '
+        f'{_e(STANCE_LABELS.get(stance, stance))}">{_e(_actor_initials(actor))}</span>'
+        for actor, stance in sorted(summary.by_actor.items())
+    )
+    split = '<span class="stance-split">Split</span>' if summary.contested else ""
+    return f'<div class="stance-row">{badges}{split}</div>'
 
 
 def _version_number(thesis_id: str, version: str) -> int:
@@ -1182,7 +1287,19 @@ def _status_of(lead: Lead) -> str:
 # Top bar — wordmark + one-line thesis (left) and the page nav (right), on one
 # slim row. Session-state-driven nav (unlike st.tabs) so any button can route to
 # a page via nav_target + rerun. The full thesis lives on the Thesis page.
-PAGES = ["Thesis", "Startups", "Longlist", "Shortlist", "Memos", "Settings"]
+PAGES = ["Thesis", "Startups", "Longlist", "Shortlist", "Memos", "Activity",
+         "Settings"]
+# Slack deep links (?s=<handle>&p=<page>) land here: translate them into the
+# existing nav_target/selection mechanism once, then clear the params so a
+# later rerun doesn't keep forcing the same page.
+if (_qp_page := st.query_params.get("p")) or st.query_params.get("s"):
+    if _qp_page in PAGES:
+        st.session_state["nav_target"] = _qp_page
+    if _qp_handle := st.query_params.get("s"):
+        for _sel_key in ("feed_selected", "ll_selected", "sl_selected"):
+            st.session_state[_sel_key] = _qp_handle.lower()
+        st.session_state["memo_target"] = _qp_handle.lower()
+    st.query_params.clear()
 if (_nav_target := st.session_state.pop("nav_target", None)) in PAGES:
     st.session_state["nav"] = _nav_target
 st.session_state.setdefault("nav", "Thesis")
@@ -1196,7 +1313,16 @@ with _hdr_l:
     )
 with _hdr_r:
     with st.container(key="topnav"):
-        nav = st.segmented_control("Page", PAGES, key="nav", label_visibility="collapsed")
+        _unread = store.unread_count(ACTOR)
+        nav = st.segmented_control(
+            "Page", PAGES, key="nav", label_visibility="collapsed",
+            # The only decoration in the nav: how much happened while you
+            # were asleep. With partners eight hours apart that is the first
+            # question on opening the app.
+            format_func=lambda p: (
+                f"Activity ({_unread})" if p == "Activity" and _unread else p
+            ),
+        )
 if nav is None:  # clicking the active pill deselects — snap back
     st.session_state["nav_target"] = st.session_state.get("nav_last", "Thesis")
     st.rerun()
@@ -1737,6 +1863,121 @@ def _score_math_html(lead: Lead, manual_score: float | None = None) -> str:
             f'<div style="margin-top:2px">{steps}</div>')
 
 
+def _render_vote_row(lead: Lead, key_ns: str) -> None:
+    """The four stance buttons + your rationale.
+
+    A vote is separate from the pipeline status on purpose: status is the
+    firm's shared state (whoever moved it last), a vote is YOUR named
+    judgment. Two partners can hold opposite views without overwriting each
+    other — which is what makes the Split badge and the meeting agenda
+    possible."""
+    handle = lead.account.handle
+    hk = handle.lower()
+    mine = _my_stance(hk)
+    cols = st.columns(len(STANCES))
+    for col, (stance, _value) in zip(cols, STANCES.items()):
+        selected = stance == mine
+        if col.button(
+            STANCE_LABELS[stance],
+            key=f"{key_ns}_vote_{stance}_{hk}",
+            type="primary" if selected else "secondary",
+            use_container_width=True,
+            help="Click again to clear your vote" if selected else None,
+        ):
+            # Clicking your current stance clears it — no separate control.
+            store.set_vote(
+                handle, "" if selected else stance,
+                st.session_state.get(f"{key_ns}_why_{hk}", ""),
+                thesis_id=ACTIVE_THESIS_ID,
+            )
+            st.session_state["toast"] = (
+                f"Vote cleared — {display_name(lead)}" if selected
+                else f"{STANCE_LABELS[stance]} — {display_name(lead)}"
+            )
+            st.rerun()
+    my_vote = next((v for v in votes_by_handle.get(hk, []) if v.actor == ACTOR), None)
+    why = st.text_input(
+        "Why (optional)", value=(my_vote.rationale if my_vote else ""),
+        key=f"{key_ns}_why_{hk}", placeholder="One line — the reason you'd defend",
+        label_visibility="collapsed",
+    )
+    if my_vote is not None and why.strip() != (my_vote.rationale or ""):
+        if st.button("Save reason", key=f"{key_ns}_savewhy_{hk}"):
+            store.set_vote(handle, my_vote.stance, why, thesis_id=ACTIVE_THESIS_ID)
+            st.session_state["toast"] = "Reason saved"
+            st.rerun()
+    # Everyone else's stance, with their reasons — the disagreement, in full.
+    others = [v for v in votes_by_handle.get(hk, []) if v.actor != ACTOR]
+    if others:
+        st.markdown(
+            "".join(
+                f'<div class="cmt-head">{_e(_who(v.actor))} · '
+                f'<b>{_e(STANCE_LABELS.get(v.stance, v.stance))}</b>'
+                + (f" — {_e(v.rationale)}" if v.rationale else "")
+                + "</div>"
+                for v in others
+            ),
+            unsafe_allow_html=True,
+        )
+
+
+def _render_comments(lead: Lead, key_ns: str, memo_version_id: int | None = None) -> None:
+    """The comment thread for one startup. Append-only with soft delete, so
+    a thread stays readable; @mentions ping Slack."""
+    handle = lead.account.handle
+    hk = handle.lower()
+    thread = store.comments_for(hk)
+    for comment in thread:
+        st.markdown(
+            f'<div class="cmt"><div class="cmt-head">{_e(_who(comment.actor))} · '
+            f'{_e(_ago(comment.created_at.isoformat() if comment.created_at else ""))}'
+            "</div>"
+            f'<div class="cmt-body">{_e(comment.body)}</div></div>',
+            unsafe_allow_html=True,
+        )
+    draft = st.text_area(
+        "Add a comment", key=f"{key_ns}_cmt_{hk}", height=72,
+        placeholder="Context, a question, or @mention a partner…",
+        label_visibility="collapsed",
+    )
+    if st.button("Comment", key=f"{key_ns}_cmtbtn_{hk}", disabled=not draft.strip()):
+        mentions = parse_mentions(draft, USERS)
+        store.add_comment(hk, draft, mentions=mentions,
+                          memo_version_id=memo_version_id)
+        if mentions:
+            # Inline, not queued: a mention is worth a real-time ping, and
+            # post_slack swallows its own failures.
+            event = store.events(handle=hk, verbs=["comment_added"], limit=1)
+            if event:
+                notify.ping_mentions(store, event[0], display_name(lead))
+        st.session_state["toast"] = "Comment added"
+        st.rerun()
+
+
+def _render_assignment(lead: Lead, key_ns: str) -> None:
+    """Who owns this startup. Freely reassignable — partners hand off."""
+    hk = lead.account.handle.lower()
+    current = (pipeline.get(hk, {}) or {}).get("assignee") or ""
+    options = [""] + [u["id"] for u in USERS]
+    labels = {"": "Unassigned", **{u["id"]: _who(u["id"]) for u in USERS}}
+    picked = st.selectbox(
+        "Owner", options,
+        index=options.index(current) if current in options else 0,
+        format_func=lambda uid: labels.get(uid, uid),
+        key=f"{key_ns}_assign_{hk}",
+    )
+    if picked != current:
+        store.set_assignment(lead.account.handle, picked or None)
+        if picked and picked != ACTOR:
+            event = store.events(handle=hk, verbs=["assigned"], limit=1)
+            if event:
+                notify.ping_assignment(store, event[0], display_name(lead))
+        st.session_state["toast"] = (
+            f"Assigned to {_who(picked)}" if picked else "Owner cleared"
+        )
+        st.rerun()
+
+
 def _lead_card(
     lead: Lead,
     entry: LedgerEntry | None = None,
@@ -2000,7 +2241,7 @@ def _lead_card(
             st.write("")
 
             row = pipeline.get(handle_key, {})
-            b1, b2, _sp = st.columns([1.4, 1.9, 2.7])
+            b1, b2, b3, _sp = st.columns([1.4, 1.9, 1.5, 1.2])
             memo_label = "Open memo" if row.get("brief") else "Memo"
             if b1.button(memo_label, key=f"{key_ns}_brief_{handle_key}",
                          help="The full investment memo lives on the Memos page — "
@@ -2010,6 +2251,17 @@ def _lead_card(
                 st.rerun()
             with b2.popover("Adjust scoring"):
                 _override_editor(lead, ov, key_ns)
+            n_comments = comment_counts.get(handle_key, 0)
+            with b3.popover(f"Discuss{f' ({n_comments})' if n_comments else ''}"):
+                st.markdown('<div class="section-title">Your call</div>',
+                            unsafe_allow_html=True)
+                _render_vote_row(lead, key_ns)
+                st.write("")
+                _render_assignment(lead, key_ns)
+                st.write("")
+                st.markdown('<div class="section-title">Discussion</div>',
+                            unsafe_allow_html=True)
+                _render_comments(lead, key_ns)
 
 
 def _feed_row(lead: Lead, selected: bool) -> bool:
@@ -2044,6 +2296,9 @@ def _feed_row(lead: Lead, selected: bool) -> bool:
     elif verdict and verdict.stage:
         tags.append(STAGE_LABEL.get(verdict.stage, verdict.stage))
     tag_html = "".join(f'<span class="frow-tag">{_e(t)}</span>' for t in tags[:4])
+    # Partners' stances ride along in the scan list: a split is the thing you
+    # most want to notice without opening anything.
+    tag_html += _stance_chips_html(hk)
     html = (
         f'<div class="frow">'
         f'<div class="frow-av">{_e(_initials(title, account.handle))}</div>'
@@ -2122,10 +2377,17 @@ def _detail_pane(lead: Lead) -> None:
         + '</div>',
         unsafe_allow_html=True,
     )
+    # Your stance, above the funnel move: what YOU think is a separate
+    # question from where the startup sits in the firm's pipeline, and it is
+    # the one only you can answer.
+    ns = "feeddet"
+    st.markdown('<div class="dpane-meta">Your call</div>', unsafe_allow_html=True)
+    _render_vote_row(lead, ns)
+    st.write("")
+
     # Triage — status-dependent, full-width. Placed directly under the score so
     # you can act the instant you select a startup, without scrolling past the
     # reasoning below. Same funnel moves as the card face.
-    ns = "feeddet"
     if status == "longlisted":
         c1, c2 = st.columns(2)
         if c1.button("Shortlist", key=f"{ns}_short_{hk}", type="primary", use_container_width=True):
@@ -2171,6 +2433,14 @@ def _detail_pane(lead: Lead) -> None:
         if c2.button("Pass", key=f"{ns}_pass_{hk}", use_container_width=True):
             store.set_pipeline(account.handle, status="passed")
             st.session_state["toast"] = f"Passed on @{account.handle}"; st.rerun()
+
+    # Discussion sits between the action and the reasoning: it is the firm's
+    # own evidence, and it belongs next to the model's.
+    n_comments = comment_counts.get(hk, 0)
+    with st.expander(f"Discussion{f' ({n_comments})' if n_comments else ''}",
+                     expanded=bool(n_comments)):
+        _render_assignment(lead, ns)
+        _render_comments(lead, ns)
 
     # Reasoning lives BELOW the action: why this score, the full per-dimension
     # breakdown (readiness scorecard + criteria, thesis fit, X signals, firm
@@ -2628,6 +2898,47 @@ if nav == "Shortlist":
             unsafe_allow_html=True,
         )
         sl_leads = [lead_by_handle[h] for h in shortlist if h in lead_by_handle]
+
+        # Partner-meeting mode: the startups you disagree about, first.
+        # A unanimous yes needs no meeting; a 2-vs-2 split is the entire
+        # reason to have one, so the agenda writes itself.
+        contested = [
+            (h, sentence) for h, sentence in
+            disagreements(VOTE_SUMMARIES, USER_NAMES)
+            if h in {lead.account.handle.lower() for lead in sl_leads}
+        ]
+        if contested:
+            with st.expander(f"Partner meeting — {len(contested)} contested",
+                             expanded=False):
+                st.markdown(
+                    '<div class="subtle">Where you and your partners disagree, '
+                    'widest split first. Everything else is already settled.</div>',
+                    unsafe_allow_html=True,
+                )
+                for handle, sentence in contested:
+                    lead = lead_by_handle.get(handle)
+                    name = display_name(lead) if lead else f"@{handle}"
+                    c_l, c_r = st.columns([3, 1])
+                    c_l.markdown(
+                        f'<div class="act-row"><div class="act-what">'
+                        f'<b>{_e(name)}</b> — {_e(sentence)}</div></div>',
+                        unsafe_allow_html=True,
+                    )
+                    if c_r.button("Open", key=f"meet_open_{handle}",
+                                  use_container_width=True):
+                        st.session_state["sl_selected"] = handle
+                        st.rerun()
+
+        sort_mode = st.sidebar.segmented_control(
+            "Sort", ["Score", "Contested"], default="Score", key="sl_sort",
+        ) or "Score"
+        if sort_mode == "Contested":
+            sl_leads = sorted(
+                sl_leads,
+                key=lambda lead: contested_sort_key(
+                    VOTE_SUMMARIES.get(lead.account.handle.lower())
+                ),
+            )
         _render_cockpit(sl_leads, sel_key="sl_selected")
 
         st.write("")
@@ -2805,7 +3116,10 @@ def _generate_memo(handle: str) -> None:
         )
         st.rerun()
 
-    store.set_pipeline(handle, brief=memo, brief_meta=meta)
+    # Through set_memo, not set_pipeline: every generation appends an
+    # immutable version, so a regeneration can no longer destroy a human's
+    # edits — the previous text stays restorable.
+    store.set_memo(handle, memo, meta=meta, kind="generated", actor="agent:memo")
     depth_label = MEMO_DEPTH_LABEL.get(depth, depth)
     st.session_state["toast"] = (
         f"{depth_label} memo ready — {name}" if is_ai
@@ -2972,7 +3286,7 @@ if nav == "Memos":
                                     label_visibility="collapsed")
             e1, e2, _esp = st.columns([1, 0.9, 4.1])
             if e1.button("Save memo", type="primary", key="memo_save"):
-                store.set_pipeline(pick, brief=draft_md, brief_edited=True)
+                store.set_memo(pick, draft_md, kind="edited")
                 st.session_state.pop("memo_editing", None)
                 st.session_state["toast"] = f"Memo saved — {picked_name}"
                 st.rerun()
@@ -3006,6 +3320,91 @@ if nav == "Memos":
                 'landscape, market sizing, acquisition dynamics, recommendation.</div>',
                 unsafe_allow_html=True,
             )
+
+        # ---- Review & history. A memo is the artefact a partner acts on, so
+        # it gets a named reviewer and a recoverable past.
+        if existing_memo and not editing:
+            versions = store.memo_versions(pick)
+            review_status = picked_row.get("memo_review_status") or "none"
+            approved_v = picked_row.get("memo_approved_version")
+            drifted = (
+                review_status == "approved"
+                and approved_v is not None
+                and versions and versions[0].version_no != approved_v
+            )
+            st.write("")
+            r1, r2, r3 = st.columns([1.3, 1.3, 2.4])
+            if review_status in ("none", "changes_requested"):
+                if r1.button("Request review", key="memo_req_review",
+                             use_container_width=True):
+                    store.set_memo_review(pick, "requested")
+                    st.session_state["toast"] = "Review requested"
+                    st.rerun()
+            elif review_status == "requested":
+                requester = picked_row.get("memo_review_requested_by") or ""
+                # You can approve your own memo in a two-person firm — the
+                # point is the record of who signed off, not a gate.
+                if r1.button("Approve", key="memo_approve", type="primary",
+                             use_container_width=True):
+                    store.set_memo_review(
+                        pick, "approved",
+                        version_no=versions[0].version_no if versions else None,
+                    )
+                    st.session_state["toast"] = f"Memo approved — {picked_name}"
+                    st.rerun()
+                if r2.button("Request changes", key="memo_changes",
+                             use_container_width=True):
+                    store.set_memo_review(pick, "changes_requested")
+                    st.session_state["toast"] = "Changes requested"
+                    st.rerun()
+                r3.markdown(
+                    f'<div class="subtle" style="padding-top:8px">Review requested '
+                    f'by {_e(_who(requester))}</div>', unsafe_allow_html=True)
+            if review_status == "approved":
+                reviewer = _who(picked_row.get("memo_reviewed_by") or "")
+                when = _ago(picked_row.get("memo_reviewed_at"))
+                note = (
+                    f'<span class="stale-flag"> · edited since approval (v{approved_v} '
+                    f'was signed off)</span>' if drifted else ""
+                )
+                st.markdown(
+                    f'<div class="subtle">Approved by <b>{_e(reviewer)}</b> {_e(when)}'
+                    f'{note}</div>', unsafe_allow_html=True)
+
+            if len(versions) > 1:
+                with st.expander(f"Version history ({len(versions)})"):
+                    st.markdown(
+                        '<div class="subtle">Every generation and edit is kept. '
+                        'Restoring brings a version back as the current memo — '
+                        'nothing is ever overwritten.</div>',
+                        unsafe_allow_html=True,
+                    )
+                    for version in versions:
+                        v1, v2 = st.columns([3.4, 1])
+                        stamp = (version.created_at.isoformat()
+                                 if version.created_at else "")
+                        v1.markdown(
+                            f'<div class="act-row"><div class="act-what">'
+                            f'<b>v{version.version_no}</b> · {_e(version.kind)} by '
+                            f'{_e(_who(version.author))}</div>'
+                            f'<div class="act-when">{_e(_ago(stamp))}</div></div>',
+                            unsafe_allow_html=True,
+                        )
+                        if version.version_no != versions[0].version_no:
+                            if v2.button("Restore", key=f"memo_restore_{version.version_no}",
+                                         use_container_width=True):
+                                store.restore_memo_version(pick, version.version_no)
+                                st.session_state["toast"] = (
+                                    f"Restored v{version.version_no}")
+                                st.rerun()
+
+            with st.expander(f"Discussion ({comment_counts.get(pick, 0)})",
+                             expanded=bool(comment_counts.get(pick))):
+                if picked_lead is not None:
+                    _render_comments(
+                        picked_lead, "memo",
+                        memo_version_id=versions[0].id if versions else None,
+                    )
 
         st.write("")
         with st.expander("Outreach draft"):
@@ -3344,6 +3743,53 @@ if nav == "Thesis":
                     "github_topics": _from_lines(github_topics),
                     "lists": _from_lines(lists)}), SEEDS_PATH)
                 st.success("Saved."); st.rerun()
+
+    # ---- Your taste: the same contrast machinery, run over YOUR votes.
+    # Firm triage is shared state; a vote is a named judgment, so this is the
+    # only honest answer to "what do I actually like, and where does the
+    # model disagree with me".
+    with st.expander("Your taste — what your votes say, and where the model disagrees"):
+        mine = actor_stats(ledger, votes_by_handle, ACTOR)
+        if mine is None:
+            st.markdown(
+                '<div class="subtle">Vote on at least 5 startups (yes / strong '
+                'yes / pass) and your profile appears here: the sectors and '
+                'stages you actually back, and the calls where you and the '
+                'model saw it differently.</div>',
+                unsafe_allow_html=True,
+            )
+        else:
+            st.markdown(
+                f"**{_who(ACTOR)}** — {mine.shortlisted} backed · {mine.passed} passed"
+            )
+            for line in mine.findings or ["No strong contrasts yet — keep voting."]:
+                st.markdown(f'<div class="subtle">• {_e(line)}</div>',
+                            unsafe_allow_html=True)
+        gaps = model_disagreements(ledger, votes_by_handle, ACTOR)
+        if gaps:
+            st.write("")
+            st.markdown("**Where you and the model disagreed**")
+            for gap in gaps:
+                lean = (
+                    "model liked it, you passed"
+                    if gap.kind == "model_liked_you_passed"
+                    else "model was cool, you backed it"
+                )
+                st.markdown(
+                    f'<div class="act-row"><div class="act-what">'
+                    f'<b>{_e(gap.name)}</b> — score {gap.score:.0f}, '
+                    f'you voted {_e(STANCE_LABELS.get(gap.stance, gap.stance).lower())} '
+                    f'<span class="subtle">({_e(lean)})</span>'
+                    + (f' — “{_e(gap.rationale)}”' if gap.rationale else "")
+                    + "</div></div>",
+                    unsafe_allow_html=True,
+                )
+            st.markdown(
+                '<div class="subtle">The second kind is the interesting one: '
+                'conviction the scoring missed is what should eventually move '
+                'the weights.</div>',
+                unsafe_allow_html=True,
+            )
 
     with st.expander("Signals & scoring — weights, parameters, classifier prompt"):
         stats = triage_stats(ledger, pipeline)
@@ -4162,6 +4608,112 @@ if nav == "Startups":
         _render_database()
     else:
         _render_startup_feed()
+
+
+# ============================================================ ACTIVITY
+
+
+# What each verb reads as in the feed. Kept here (not in the store) because
+# it is presentation: the store records what happened, this says it in
+# English.
+_VERB_TEXT = {
+    "status_changed": lambda p: f"moved to {STATUS_LABELS.get(p.get('new', ''), p.get('new', ''))}",
+    "vote_cast": lambda p: (
+        f"voted {STANCE_LABELS.get(p.get('stance', ''), p.get('stance', '')).lower()}"
+        + (f" — “{p['rationale']}”" if p.get("rationale") else "")
+    ),
+    "vote_cleared": lambda p: "cleared their vote",
+    "votes_imported": lambda p: f"imported {p.get('count', 0)} past triage decisions as votes",
+    "comment_added": lambda p: f"commented: “{p.get('preview', '')}”",
+    "assigned": lambda p: f"assigned this to {p.get('assignee', '')}",
+    "unassigned": lambda p: "cleared the owner",
+    "memo_generated": lambda p: f"generated memo v{p.get('version_no', '')}",
+    "memo_edited": lambda p: (
+        f"restored memo v{p['restored_from']}" if p.get("restored_from")
+        else f"edited the memo (v{p.get('version_no', '')})"
+    ),
+    "memo_review_requested": lambda p: "requested a memo review",
+    "memo_approved": lambda p: "approved the memo",
+    "memo_changes_requested": lambda p: "requested changes to the memo",
+    "memo_review_cleared": lambda p: "cleared the memo review",
+    "override_set": lambda p: "adjusted the scoring",
+    "attrs_changed": lambda p: f"updated {', '.join(p.get('keys', [])) or 'fields'}",
+    "notes_edited": lambda p: "edited the notes",
+    "thesis_switched": lambda p: f"switched the workspace thesis to {p.get('name', '')}",
+}
+
+
+def _event_text(event) -> str:
+    fmt = _VERB_TEXT.get(event.verb)
+    return fmt(event.payload) if fmt else event.verb.replace("_", " ")
+
+
+if nav == "Activity":
+    st.markdown(
+        '<div class="section-title">Activity</div>'
+        '<div class="section-sub">Everything the firm has done, newest first — '
+        'the shared memory that makes an eight-hour time difference workable.</div>',
+        unsafe_allow_html=True,
+    )
+    a1, a2, a3 = st.columns([1.3, 1.3, 2.4])
+    who_filter = a1.selectbox(
+        "Member", ["Everyone"] + [u["id"] for u in USERS],
+        format_func=lambda uid: "Everyone" if uid == "Everyone" else _who(uid),
+        key="act_who",
+    )
+    kind_filter = a2.selectbox(
+        "Kind", ["Everything", "Votes & comments", "Triage", "Memos"],
+        key="act_kind",
+    )
+    verb_groups = {
+        "Votes & comments": ["vote_cast", "vote_cleared", "comment_added",
+                             "votes_imported"],
+        "Triage": ["status_changed", "assigned", "unassigned", "notes_edited",
+                   "override_set", "attrs_changed"],
+        "Memos": ["memo_generated", "memo_edited", "memo_review_requested",
+                  "memo_approved", "memo_changes_requested"],
+    }
+    unread = store.unread_count(ACTOR)
+    if unread:
+        a3.markdown(
+            f'<div class="subtle" style="padding-top:26px">'
+            f'<b>{unread}</b> new since you last looked</div>',
+            unsafe_allow_html=True,
+        )
+    feed = store.events(
+        limit=200,
+        actor=None if who_filter == "Everyone" else who_filter,
+        verbs=verb_groups.get(kind_filter),
+    )
+    # Everything above this id is new to this member — marked before we
+    # advance the cursor, so the highlight survives this render.
+    cursor_row = store.db.execute(
+        "select last_event_id from read_cursors where actor = ?", [ACTOR]
+    ).fetchone() if store.db["read_cursors"].exists() else None
+    seen_to = int(cursor_row[0]) if cursor_row and cursor_row[0] else 0
+
+    if not feed:
+        st.markdown(
+            '<div class="subtle">Nothing yet — votes, comments, triage moves '
+            'and memo work all land here.</div>',
+            unsafe_allow_html=True,
+        )
+    for event in feed:
+        is_new = (event.id or 0) > seen_to and event.actor != ACTOR
+        name = _who(event.actor)
+        target = ""
+        if event.handle:
+            lead = lead_by_handle.get(event.handle)
+            target = f" · <b>{_e(display_name(lead) if lead else '@' + event.handle)}</b>"
+        st.markdown(
+            f'<div class="act-row{" act-unread" if is_new else ""}">'
+            f'<div class="act-who">{_e(name)}</div>'
+            f'<div class="act-what">{_e(_event_text(event))}{target}</div>'
+            f'<div class="act-when">{_e(_ago(event.at))}</div></div>',
+            unsafe_allow_html=True,
+        )
+    if feed:
+        store.mark_read(ACTOR)
 
 
 # ============================================================ SETTINGS

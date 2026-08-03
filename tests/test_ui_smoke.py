@@ -390,3 +390,130 @@ def test_allowlist_blocks_unlisted_user(tmp_path, monkeypatch) -> None:
     at2.run()
     assert not at2.exception
     assert at2.session_state["nav"] == "Thesis"
+
+
+# --- collaboration surfaces -----------------------------------------------------
+
+
+def test_vote_from_the_detail_pane_persists_and_shows_the_split(
+    tmp_path, monkeypatch
+) -> None:
+    """Two partners, opposite stances: both survive, and the startup reads
+    as contested rather than one overwriting the other."""
+    db = tmp_path / "smoke.db"
+    monkeypatch.setenv("DB_PATH", str(db))
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "")
+    monkeypatch.setenv("SCOUT_DEV_USER", "alan@firm.com")
+    seed_store(db)
+
+    at = AppTest.from_file(str(UI_PATH), default_timeout=30)
+    at.session_state["nav"] = "Startups"
+    at.run()
+    assert not at.exception, at.exception[0].message if at.exception else ""
+    # The stance buttons render in the detail pane for the selected lead.
+    vote_buttons = [b for b in at.button if b.key.startswith("feeddet_vote_")]
+    assert {b.key.split("_")[2] for b in vote_buttons} >= {"strong", "yes", "unsure", "pass"}
+    next(b for b in at.button if b.key == "feeddet_vote_strong_yes_smoke_founder").click()
+    at.run()
+    assert not at.exception, at.exception[0].message if at.exception else ""
+
+    store = Store(db)
+    assert store.votes_for("smoke_founder")[0].stance == "strong_yes"
+    assert store.votes_for("smoke_founder")[0].actor == "alan@firm.com"
+
+    # The partner in another timezone disagrees.
+    store.actor = "sara@firm.com"
+    store.ensure_user("sara@firm.com", name="Sara Lin")
+    store.set_vote("smoke_founder", "pass", "crowded space")
+
+    monkeypatch.setenv("SCOUT_DEV_USER", "sara@firm.com")
+    at2 = AppTest.from_file(str(UI_PATH), default_timeout=30)
+    at2.session_state["nav"] = "Startups"
+    at2.run()
+    assert not at2.exception, at2.exception[0].message if at2.exception else ""
+    page = _page_text(at2)
+    assert "stance-badge" in page  # both partners' initials render
+    assert "Split" in page  # and the disagreement is called out
+    # Both votes survived — neither partner clobbered the other.
+    assert len(Store(db).votes_for("smoke_founder")) == 2
+
+
+def test_activity_page_renders_and_clears_the_unread_badge(tmp_path, monkeypatch) -> None:
+    db = tmp_path / "smoke.db"
+    monkeypatch.setenv("DB_PATH", str(db))
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "")
+    monkeypatch.setenv("SCOUT_DEV_USER", "alan@firm.com")
+    seed_store(db)
+    # Something happened while Alan was asleep.
+    other = Store(db, actor="sara@firm.com")
+    other.ensure_user("sara@firm.com", name="Sara Lin")
+    other.set_vote("smoke_founder", "pass", "not for us")
+    other.add_comment("smoke_founder", "passing — thin moat")
+    assert other.unread_count("alan@firm.com") == 2
+
+    at = AppTest.from_file(str(UI_PATH), default_timeout=30)
+    at.session_state["nav"] = "Activity"
+    at.run()
+    assert not at.exception, at.exception[0].message if at.exception else ""
+    page = _page_text(at)
+    assert "Sara" in page
+    assert "voted pass" in page and "not for us" in page
+    assert "commented" in page
+    # Visiting the page advances the read cursor.
+    assert Store(db).unread_count("alan@firm.com") == 0
+
+
+def test_comment_with_mention_is_stored_and_pinged(tmp_path, monkeypatch) -> None:
+    db = tmp_path / "smoke.db"
+    monkeypatch.setenv("DB_PATH", str(db))
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "")
+    monkeypatch.setenv("SCOUT_DEV_USER", "alan@firm.com")
+    seed_store(db)
+    setup = Store(db)
+    setup.ensure_user("alan@firm.com", name="Alan Goff")
+    setup.ensure_user("sara@firm.com", name="Sara Lin")
+    setup.set_setting("slack_webhook_url", "https://hooks.slack.test/x")
+    setup.set_setting("app_base_url", "https://scout.test")
+
+    sent: list[dict] = []
+    monkeypatch.setattr("scout.notify._post",
+                        lambda url, payload: sent.append(payload))
+
+    at = AppTest.from_file(str(UI_PATH), default_timeout=30)
+    at.session_state["nav"] = "Startups"
+    at.run()
+    assert not at.exception, at.exception[0].message if at.exception else ""
+    box = next(t for t in at.text_area if t.key == "feeddet_cmt_smoke_founder")
+    box.set_value("@sara worth a look — ex-OpenAI team").run()
+    next(b for b in at.button if b.key == "feeddet_cmtbtn_smoke_founder").click().run()
+    assert not at.exception, at.exception[0].message if at.exception else ""
+
+    comments = Store(db).comments_for("smoke_founder")
+    assert len(comments) == 1
+    assert comments[0].mentions == ["sara@firm.com"]
+    # And the mention pinged Slack with a deep link back to the startup.
+    assert sent and "Sara" in sent[0]["text"]
+    assert "https://scout.test/?s=smoke_founder" in sent[0]["text"]
+
+
+def test_memo_regeneration_keeps_the_edit_restorable(tmp_path, monkeypatch) -> None:
+    """The failure memo versioning exists to fix, end to end through the UI's
+    store calls."""
+    db = tmp_path / "smoke.db"
+    monkeypatch.setenv("DB_PATH", str(db))
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "")
+    seed_store(db)
+    store = Store(db, actor="alan@firm.com")
+    store.set_memo("smoke_founder", "# generated", kind="generated", actor="agent:memo")
+    store.set_memo("smoke_founder", "# my careful edits", kind="edited")
+    store.set_memo("smoke_founder", "# regenerated", kind="generated", actor="agent:memo")
+
+    at = AppTest.from_file(str(UI_PATH), default_timeout=30)
+    at.session_state["nav"] = "Memos"
+    at.session_state["memo_target"] = "smoke_founder"
+    at.run()
+    assert not at.exception, at.exception[0].message if at.exception else ""
+    assert any(b.key.startswith("memo_restore_") for b in at.button)
+    next(b for b in at.button if b.key == "memo_restore_2").click().run()
+    assert not at.exception, at.exception[0].message if at.exception else ""
+    assert Store(db).get_pipeline("smoke_founder")["brief"] == "# my careful edits"
