@@ -1471,6 +1471,16 @@ def hindsight(
                                        "how much the model is recognising rather "
                                        "than judging."),
     ] = False,
+    sweep: Annotated[
+        int,
+        typer.Option("--sweep", help="Run N cutoffs six months apart, to show "
+                                     "how each signal's power moves over time."),
+    ] = 0,
+    suggest: Annotated[
+        bool,
+        typer.Option("--suggest-weights", help="Propose thesis weights from the "
+                                               "measured predictive power."),
+    ] = False,
     out: Annotated[
         Path, typer.Option("--out", help="Where to write the markdown report.")
     ] = Path("out"),
@@ -1564,12 +1574,88 @@ def hindsight(
            if metrics.median_lead_days else "")
     )
 
+    # ---- Which individual signals carried the information.
+    evaluation = report.evaluate_signals(thesis.weights)
+    if evaluation.underpowered:
+        console.print(f"\n[yellow]{evaluation.notes[0]}[/yellow]")
+    else:
+        sig_table = Table(box=box.SIMPLE, title="Which signals predicted it")
+        for column in ("signal", "AUC", "95% CI", "coverage", "adds", "verdict"):
+            sig_table.add_column(column)
+        for finding in evaluation.ranked:
+            marginal = ("—" if finding.marginal_auc is None
+                        else f"{finding.marginal_auc:+.3f}")
+            tint = "green" if finding.significant else "dim"
+            sig_table.add_row(
+                finding.name,
+                f"[{tint}]{finding.auc:.2f}[/{tint}]",
+                f"{finding.ci_low:.2f}–{finding.ci_high:.2f}",
+                f"{finding.coverage:.0%}", marginal, finding.verdict,
+            )
+        console.print(sig_table)
+        for note in evaluation.notes:
+            console.print(f"[dim]{note}[/dim]")
+
+    trends = []
+    if sweep > 1:
+        console.print(f"\nSweeping [bold]{sweep}[/bold] cutoffs six months apart…")
+        cutoffs = hs.sweep_cutoffs(when, n_windows=sweep, months_apart=6)
+        sweep_results = hs.run_sweep(
+            outcomes, controls, cutoffs, thesis, settings, threshold=threshold,
+        )
+        trends = hs.build_signal_trends(sweep_results, thesis.weights)
+        if trends:
+            trend_table = Table(box=box.SIMPLE, title="Signal power over time")
+            trend_table.add_column("signal")
+            for point in trends[0].points:
+                trend_table.add_column(point[0][:7])
+            trend_table.add_column("reading")
+            for trend in trends:
+                trend_table.add_row(
+                    trend.name,
+                    *[f"{point[1]:.2f}" for point in trend.points],
+                    ("[yellow]" + trend.summary + "[/yellow]"
+                     if trend.decayed else trend.summary),
+                )
+            console.print(trend_table)
+        for saved_cutoff, saved in sweep_results:
+            store.save_backtest({**saved.model_dump(mode="json"),
+                                 "metrics": saved.metrics().model_dump()})
+
+    if suggest:
+        from scout.signal_eval import suggest_weights as _suggest
+
+        proposals = _suggest(evaluation, thesis.weights)
+        if not proposals:
+            console.print("\n[yellow]Not enough evidence to propose weights.[/]")
+        else:
+            weight_table = Table(box=box.SIMPLE,
+                                 title="Weights suggested by the evidence")
+            for column in ("signal", "current", "suggested", "why"):
+                weight_table.add_column(column)
+            for proposal in proposals:
+                weight_table.add_row(
+                    proposal.name, f"{proposal.current:.0f}",
+                    f"{proposal.suggested:.0f} ({proposal.delta:+.0f})"
+                    if proposal.delta else f"{proposal.suggested:.0f}",
+                    proposal.reason,
+                )
+            console.print(weight_table)
+            console.print(
+                "[dim]Shrunk halfway toward the evidence on purpose — one "
+                "backtest on one window is evidence, not proof. Apply in "
+                "Settings → Signals & scoring.[/dim]"
+            )
+
     out.mkdir(parents=True, exist_ok=True)
     report_path = out / f"hindsight_{when:%Y%m%d}.md"
-    report_path.write_text(hs.render_report(report), encoding="utf-8")
+    markdown = hs.render_report(report, signal_evaluation=evaluation)
+    if trends:
+        markdown += "\n" + "\n".join(hs.render_trend_section(trends))
+    report_path.write_text(markdown, encoding="utf-8")
     store.save_backtest({**report.model_dump(mode="json"),
                          "metrics": metrics.model_dump()})
-    console.print(f"Report: [bold]{report_path}[/bold]")
+    console.print(f"\nReport: [bold]{report_path}[/bold]")
 
 
 @app.command()

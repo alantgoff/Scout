@@ -689,3 +689,54 @@ def test_evidence_view_flags_an_untrustworthy_backtest(tmp_path, monkeypatch) ->
     at.run()
     assert not at.exception, at.exception[0].message if at.exception else ""
     assert "not usable" in _page_text(at)
+
+
+def test_evidence_view_attributes_power_to_individual_signals(tmp_path, monkeypatch) -> None:
+    """The upgrade from 'did the score work' to 'which signals worked'."""
+    from datetime import datetime, timezone
+
+    db = tmp_path / "smoke.db"
+    monkeypatch.setenv("DB_PATH", str(db))
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "")
+    monkeypatch.setenv("SCOUT_DEV_USER", "alan@firm.com")
+    seed_store(db)
+
+    from scout import hindsight as hs
+
+    cutoff = datetime(2025, 2, 1, tzinfo=timezone.utc)
+    report = hs.BacktestReport(cutoff=cutoff, thesis_id="ai-infra", threshold=60.0)
+    # bio_intent tracks the outcome; noise does not.
+    for i in range(8):
+        report.verdicts.append(hs.Verdict(
+            key=f"w{i}", company=f"Winner {i}", surfaced=True, score=70.0 + i,
+            signal_values={"bio_intent": 0.9 - i * 0.02,
+                           "smart_money_follow": 0.5}))
+    for i in range(10):
+        control = hs.Verdict(key=f"c{i}", company=f"Control {i}", surfaced=False,
+                             score=20.0 + i,
+                             signal_values={"bio_intent": 0.2 + i * 0.01,
+                                            "smart_money_follow": 0.5})
+        control.is_control = True
+        report.controls.append(control)
+    report.limitations = hs.default_limitations()
+    Store(db).save_backtest({**report.model_dump(mode="json"),
+                             "metrics": report.metrics().model_dump()})
+
+    at = AppTest.from_file(str(UI_PATH), default_timeout=30)
+    at.session_state["nav"] = "Automation"
+    at.session_state["automation_view"] = "Evidence"
+    at.run()
+    assert not at.exception, at.exception[0].message if at.exception else ""
+    page = _page_text(at)
+    assert "Which signals predicted it" in page
+    # The power statement travels with the table, so a null result cannot be
+    # mistaken for a measured absence of effect.
+    assert "unmeasured" in page
+    assert "multiple comparisons" in page
+
+    # And the per-signal numbers are computed, not just the composite.
+    evaluation = report.evaluate_signals({"bio_intent": 20.0,
+                                          "smart_money_follow": 20.0})
+    findings = {f.name: f for f in evaluation.findings}
+    assert findings["bio_intent"].auc > 0.9
+    assert findings["smart_money_follow"].auc == 0.5   # constant → no information

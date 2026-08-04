@@ -134,6 +134,11 @@ class Verdict(BaseModel):
     evidence: str = ""
     blinded_score: float | None = None
     is_control: bool = False
+    # Normalized 0..1 signal values, kept per company so predictive power
+    # can be attributed to individual signals rather than only to the
+    # composite. Weight-free on purpose: scoring signals through the current
+    # weights would measure our own assumptions reflected back at us.
+    signal_values: dict[str, float] = Field(default_factory=dict)
 
     @property
     def lead_time_months(self) -> float | None:
@@ -171,6 +176,22 @@ class BacktestReport(BaseModel):
             [v.lead_time_days for v in self.outcomes if v.surfaced],
             threshold=self.threshold,
         )
+
+    def observations(self) -> list:
+        """Per-company signal values, for attributing predictive power to
+        individual signals rather than only to the composite."""
+        from scout.signal_eval import Observation
+
+        return [
+            Observation(key=v.key, raised=not v.is_control,
+                        signal_values=v.signal_values, composite=v.score)
+            for v in self.outcomes + self.controls
+        ]
+
+    def evaluate_signals(self, weights: dict[str, float] | None = None):
+        from scout.signal_eval import evaluate_signals as _evaluate
+
+        return _evaluate(self.observations(), weights)
 
 
 class Metrics(BaseModel):
@@ -555,7 +576,7 @@ def evidence_to_account(evidence: Evidence, blinded: bool = False) -> Account:
 # ------------------------------------------------------------------ report
 
 
-def render_report(report: BacktestReport) -> str:
+def render_report(report: BacktestReport, signal_evaluation=None) -> str:
     """Markdown an investor can read without needing the code explained."""
     metrics = report.metrics()
     surfaced = [v for v in report.outcomes if v.surfaced]
@@ -634,10 +655,37 @@ def render_report(report: BacktestReport) -> str:
                     f"{verdict.blinded_score:.0f} blinded ({delta:+.0f})"
                 )
 
+    if signal_evaluation is not None:
+        lines += render_signal_section(signal_evaluation)
+
     lines += ["", "## What this does and does not show", ""]
     for limitation in report.limitations or default_limitations():
         lines.append(f"- {limitation}")
     return "\n".join(lines)
+
+
+def render_signal_section(evaluation) -> list[str]:
+    """Which individual signals carried information — the part that turns a
+    validation report into an instrument you can tune against."""
+    lines = ["", "## Which signals actually predicted this", ""]
+    if evaluation.underpowered:
+        lines += [f"_{note}_" for note in evaluation.notes]
+        return lines
+
+    lines += [
+        "| Signal | AUC | 95% CI | Coverage | Adds beyond the rest | Verdict |",
+        "| --- | ---: | :---: | ---: | ---: | --- |",
+    ]
+    for finding in evaluation.ranked:
+        marginal = (f"{finding.marginal_auc:+.3f}"
+                    if finding.marginal_auc is not None else "—")
+        lines.append(
+            f"| {finding.name} | {finding.auc:.2f} | "
+            f"{finding.ci_low:.2f}–{finding.ci_high:.2f} | "
+            f"{finding.coverage:.0%} | {marginal} | {finding.verdict} |"
+        )
+    lines += [""] + [f"- {note}" for note in evaluation.notes]
+    return lines
 
 
 def default_limitations() -> list[str]:
@@ -705,8 +753,11 @@ def score_evidence(
     settings,
     store=None,
     blinded: bool = False,
-) -> dict[str, float]:
+) -> dict[str, tuple[float, dict[str, float]]]:
     """Score reconstructed evidence with the SAME pipeline production uses.
+
+    Returns {company key: (score, {signal name: normalized value})} — the
+    per-signal values are what makes signal attribution possible later.
 
     Deliberately not a reimplementation: heuristics → classifier → weighted
     score, exactly as a live run does. A backtest against a parallel scoring
@@ -741,7 +792,10 @@ def score_evidence(
         ))
     scored = score_leads(leads, thesis)
     return {
-        by_handle[lead.account.handle.lower()].key: lead.score
+        by_handle[lead.account.handle.lower()].key: (
+            lead.score,
+            {signal.name: signal.value for signal in lead.signals},
+        )
         for lead in scored
         if lead.account.handle.lower() in by_handle
     }
@@ -816,16 +870,21 @@ def run_backtest(
     for outcome in usable:
         ev = by_key.get(outcome.key) or Evidence(
             key=outcome.key, company=outcome.company, as_of=cutoff)
-        report.verdicts.append(build_verdict(
-            outcome, ev, scores.get(outcome.key, 0.0), cutoff, threshold,
-            blinded_scores.get(outcome.key) if blinded else None,
-        ))
+        score, signal_values = scores.get(outcome.key, (0.0, {}))
+        blinded_pair = blinded_scores.get(outcome.key) if blinded else None
+        verdict = build_verdict(
+            outcome, ev, score, cutoff, threshold,
+            blinded_pair[0] if blinded_pair else None,
+        )
+        verdict.signal_values = signal_values
+        report.verdicts.append(verdict)
     for control in controls:
         ev = by_key.get(control.key) or Evidence(
             key=control.key, company=control.company, as_of=cutoff)
-        verdict = build_verdict(
-            control, ev, scores.get(control.key, 0.0), cutoff, threshold)
+        score, signal_values = scores.get(control.key, (0.0, {}))
+        verdict = build_verdict(control, ev, score, cutoff, threshold)
         verdict.is_control = True
+        verdict.signal_values = signal_values
         report.controls.append(verdict)
 
     report.limitations = default_limitations()
@@ -876,3 +935,95 @@ def load_outcomes(path) -> tuple[list[Outcome], list[Outcome]]:
     outcomes = [Outcome.model_validate(item) for item in raw.get("outcomes", [])]
     controls = [Outcome.model_validate(item) for item in raw.get("controls", [])]
     return outcomes, controls
+
+
+# ------------------------------------------------------- longitudinal sweep
+
+
+def sweep_cutoffs(
+    latest: datetime, n_windows: int = 3, months_apart: int = 6
+) -> list[datetime]:
+    """Evenly spaced cutoffs, oldest first.
+
+    Spacing matters more than count. Windows a month apart share almost all
+    their evidence, so their results are not independent observations and a
+    "trend" across them is mostly the same measurement repeated. Six months
+    is roughly the shortest gap at which a signal's power can actually have
+    moved.
+    """
+    return [
+        latest - timedelta(days=int(months_apart * 30.44 * i))
+        for i in range(n_windows - 1, -1, -1)
+    ]
+
+
+def run_sweep(
+    outcomes: list[Outcome],
+    controls: list[Outcome],
+    cutoffs: list[datetime],
+    thesis,
+    settings,
+    *,
+    threshold: float = 60.0,
+    on_progress=None,
+    on_window=None,
+) -> list[tuple[datetime, BacktestReport]]:
+    """Backtest at several points in the past, oldest first.
+
+    This is what answers "is this signal wearing out?". A signal like
+    stealth language in a bio worked when few founders used it and stopped
+    working once everyone did; measured at one cutoff that is invisible,
+    and across three it is obvious.
+
+    Each window drops outcomes whose round predates it, so later windows
+    naturally have fewer companies — which is exactly why the per-signal
+    power check refuses to report on an underpowered window rather than
+    letting a shrinking sample masquerade as a declining signal.
+    """
+    results: list[tuple[datetime, BacktestReport]] = []
+    for cutoff in sorted(cutoffs):
+        report = run_backtest(
+            outcomes, controls, cutoff, thesis, settings,
+            threshold=threshold, blinded=False, on_progress=on_progress,
+        )
+        results.append((cutoff, report))
+        if on_window:
+            on_window(cutoff, report)
+    return results
+
+
+def build_signal_trends(
+    sweep: list[tuple[datetime, BacktestReport]],
+    weights: dict[str, float] | None = None,
+):
+    """Per-signal power across the sweep's windows."""
+    from scout.signal_eval import build_trends
+
+    return build_trends([
+        (cutoff.date().isoformat(), report.evaluate_signals(weights))
+        for cutoff, report in sweep
+    ])
+
+
+def render_trend_section(trends) -> list[str]:
+    """How each signal's power has moved — including the ones going stale."""
+    if not trends:
+        return []
+    lines = ["", "## Signal power over time", "",
+             "Each signal measured at successive cutoffs. A falling number "
+             "is only called a decay when the confidence intervals separate "
+             "— at these sample sizes two AUCs can look far apart and be "
+             "perfectly consistent with no change at all.", ""]
+    decayed = [t for t in trends if t.decayed]
+    if decayed:
+        lines += [
+            "**Losing power:** " + ", ".join(t.name for t in decayed),
+            "",
+        ]
+    lines += ["| Signal | " + " | ".join(
+        point[0] for point in trends[0].points) + " | Reading |",
+        "| --- |" + " ---: |" * len(trends[0].points) + " --- |"]
+    for trend in trends:
+        cells = " | ".join(f"{point[1]:.2f}" for point in trend.points)
+        lines.append(f"| {trend.name} | {cells} | {trend.summary} |")
+    return lines

@@ -4887,6 +4887,7 @@ def _render_hindsight() -> None:
     worker; this surfaces what those produced.
     """
     from scout.hindsight import BacktestReport, render_report
+    from scout.signal_eval import suggest_weights as suggest_signal_weights
 
     st.markdown(
         '<div class="section-title">Does this work?</div>'
@@ -4980,6 +4981,97 @@ def _render_hindsight() -> None:
             unsafe_allow_html=True,
         )
 
+    # ---- Which signals carried the information. The part that makes this
+    # an instrument you tune against rather than a one-off validation.
+    st.write("")
+    st.markdown('<div class="section-title">Which signals predicted it</div>'
+                '<div class="section-sub">Measured on each signal\'s raw '
+                'value, independent of the weight it currently carries — '
+                'otherwise this would just reflect our own assumptions back '
+                'at us.</div>',
+                unsafe_allow_html=True)
+    evaluation = report.evaluate_signals(thesis.weights)
+    if evaluation.underpowered:
+        st.markdown(f'<div class="stale-banner">{_e(evaluation.notes[0])}</div>',
+                    unsafe_allow_html=True)
+    else:
+        st.dataframe(
+            [
+                {
+                    "signal": f.name,
+                    "AUC": f.auc,
+                    "95% CI": f"{f.ci_low:.2f}–{f.ci_high:.2f}",
+                    "coverage": f"{f.coverage:.0%}",
+                    "adds beyond rest": (
+                        "—" if f.marginal_auc is None else f"{f.marginal_auc:+.3f}"),
+                    "verdict": f.verdict,
+                }
+                for f in evaluation.ranked
+            ],
+            hide_index=True, use_container_width=True,
+        )
+        for note in evaluation.notes:
+            st.markdown(f'<div class="subtle">• {_e(note)}</div>',
+                        unsafe_allow_html=True)
+
+        proposals = suggest_signal_weights(evaluation, thesis.weights)
+        movers = [p for p in proposals if p.delta]
+        if movers:
+            with st.expander(f"Weights the evidence suggests ({len(movers)} would move)"):
+                st.markdown(
+                    '<div class="subtle">Shrunk halfway toward the evidence '
+                    'on purpose — one backtest on one window is evidence, not '
+                    'proof. Signals that duplicate another, or point the wrong '
+                    'way, are held back for a human rather than moved '
+                    'automatically.</div>',
+                    unsafe_allow_html=True,
+                )
+                st.dataframe(
+                    [{"signal": p.name, "current": p.current,
+                      "suggested": p.suggested, "change": p.delta,
+                      "why": p.reason} for p in proposals],
+                    hide_index=True, use_container_width=True,
+                )
+                if IS_ADMIN and st.button("Apply these weights", key="hs_apply_w"):
+                    updated = dict(thesis.weights)
+                    for proposal in proposals:
+                        updated[proposal.name] = proposal.suggested
+                    _save_thesis(thesis.model_copy(update={"weights": updated}))
+                    st.session_state["toast"] = "Weights updated from the backtest"
+                    st.rerun()
+
+    # ---- The same signals measured across several cutoffs.
+    history = [r for r in runs if r.get("thesis_id") == report.thesis_id]
+    if len(history) > 1:
+        from scout.hindsight import build_signal_trends
+
+        sweep = []
+        for row in history:
+            try:
+                sweep.append((
+                    datetime.fromisoformat(row["cutoff"]),
+                    BacktestReport.model_validate(row["report"]),
+                ))
+            except Exception:  # noqa: BLE001
+                continue
+        trends = [t for t in build_signal_trends(sweep, thesis.weights)
+                  if len(t.points) > 1]
+        if trends:
+            st.write("")
+            st.markdown(
+                '<div class="section-title">Signal power over time</div>'
+                '<div class="section-sub">A falling number is only called a '
+                'decay when the confidence intervals separate — at these '
+                'sample sizes two results can look far apart and be entirely '
+                'consistent with no change.</div>',
+                unsafe_allow_html=True)
+            st.dataframe(
+                [{"signal": t.name,
+                  **{point[0]: point[1] for point in t.points},
+                  "reading": t.summary} for t in trends],
+                hide_index=True, use_container_width=True,
+            )
+
     with st.expander("What this does and does not show", expanded=False):
         for limitation in report.limitations:
             st.markdown(f'<div class="subtle">• {_e(limitation)}</div>',
@@ -4988,7 +5080,7 @@ def _render_hindsight() -> None:
     st.write("")
     st.download_button(
         "Download the report (Markdown)",
-        render_report(report).encode("utf-8"),
+        render_report(report, signal_evaluation=evaluation).encode("utf-8"),
         file_name=f"hindsight_{report.cutoff:%Y%m%d}.md",
         help="The shareable version, limitations included.",
     )
