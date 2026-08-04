@@ -2349,6 +2349,47 @@ class Store:
             out[row["handle"]] = row
         return out
 
+    # ------------------------------------------------------------- backtests
+
+    def save_backtest(self, report: dict) -> int:
+        """Keep every backtest run.
+
+        Worth storing rather than just writing a file: a backtest's value
+        compounds when you can show the numbers moving as the thesis is
+        tuned, and an investor asking "has this got better?" deserves a
+        series rather than one screenshot.
+        """
+        metrics = report.get("metrics") or {}
+        return int(self.db["backtests"].insert(
+            {
+                "cutoff": report.get("cutoff"),
+                "thesis_id": report.get("thesis_id") or "",
+                "threshold": report.get("threshold"),
+                "n_outcomes": len(report.get("verdicts") or []),
+                "n_controls": len(report.get("controls") or []),
+                "recall": metrics.get("recall"),
+                "auc": metrics.get("auc"),
+                "report_json": json.dumps(report, default=str),
+                "created_at": datetime.now(timezone.utc).isoformat(),
+                "created_by": self.actor or "",
+            },
+            alter=True,
+        ).last_pk)
+
+    def backtests(self, limit: int = 20) -> list[dict]:
+        if not self.db["backtests"].exists():
+            return []
+        rows = self.db["backtests"].rows_where(order_by="id desc", limit=limit)
+        out = []
+        for row in rows:
+            row = dict(row)
+            try:
+                row["report"] = json.loads(row.get("report_json") or "{}")
+            except (TypeError, ValueError):
+                row["report"] = {}
+            out.append(row)
+        return out
+
     # ------------------------------------------------------------- job queue
 
     def _ensure_job_tables(self) -> None:

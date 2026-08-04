@@ -1,0 +1,52 @@
+# Hindsight backtest input.
+#
+#   scout hindsight --outcomes outcomes.yaml --cutoff 2025-02-01 --blinded
+#
+# `outcomes` are companies that RAISED after the cutoff — the ones you hope
+# the scorer would have surfaced early. `controls` are companies visible in
+# the same sources and window that did NOT go on to raise.
+#
+# The controls are not optional in any meaningful sense. Recall on its own
+# proves nothing: a scorer that rates everyone 90 recalls everything. The
+# headline number is the SEPARATION between the two groups, and without
+# controls it cannot be computed.
+#
+# The most persuasive version of this file is a firm's own history — the
+# companies you passed on or missed, and a handful you saw and correctly
+# skipped. Public rounds work fine for a first pass.
+#
+# Identifiers: supply whatever you have. GitHub and Hacker News are the two
+# sources with a genuinely queryable past, so a company with neither will
+# score zero here — which counts against the system, not for it.
+
+outcomes:
+  - company: Example Labs
+    round_date: 2025-09-15
+    round_stage: Series A
+    amount: $18M
+    github_users: [examplelabs]           # org or personal account
+    github_repos: [examplelabs/inference]  # specific repos, "owner/name"
+    hn_users: [examplefounder]
+    domain: examplelabs.com
+    x_handles: [examplelabs]               # recorded, but not scoreable — see below
+    note: Ex-DeepMind team, open-sourced the runtime a year before the round
+
+  - company: Another Startup
+    round_date: 2025-06-02
+    round_stage: Seed
+    amount: $4M
+    github_users: [anotherfounder]
+    domain: another.dev
+
+controls:
+  # Same window, same sources, no round. Aim for a similar profile to the
+  # outcomes — comparing funded AI startups against abandoned weekend
+  # projects would flatter the scorer and tell you nothing.
+  - company: Quiet Tools
+    round_date: 2099-01-01   # never raised; a far-future date keeps it eligible
+    github_users: [quiettools]
+    domain: quiettools.io
+
+  - company: Weekend Project
+    round_date: 2099-01-01
+    github_repos: [someone/side-project]

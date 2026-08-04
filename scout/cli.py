@@ -1450,6 +1450,129 @@ def _short_ts(value: str | None) -> str:
 
 
 @app.command()
+def hindsight(
+    outcomes_path: Annotated[
+        Path,
+        typer.Option("--outcomes", help="YAML of companies that raised, plus controls."),
+    ] = Path("outcomes.yaml"),
+    cutoff: Annotated[
+        str, typer.Option("--cutoff", help="Point-in-time date, YYYY-MM-DD.")
+    ] = "",
+    months_ago: Annotated[
+        int,
+        typer.Option("--months-ago", help="Cutoff as N months back (if --cutoff unset)."),
+    ] = 18,
+    threshold: Annotated[
+        float, typer.Option(help="Score at or above which a lead counts as surfaced.")
+    ] = 60.0,
+    blinded: Annotated[
+        bool,
+        typer.Option("--blinded", help="Also score with names redacted, to measure "
+                                       "how much the model is recognising rather "
+                                       "than judging."),
+    ] = False,
+    out: Annotated[
+        Path, typer.Option("--out", help="Where to write the markdown report.")
+    ] = Path("out"),
+    thesis_path: Annotated[
+        Path, typer.Option("--thesis", help="Path to thesis.yaml.")
+    ] = Path("thesis.yaml"),
+) -> None:
+    """Backtest the scorer: would it have surfaced these companies pre-round?
+
+    Reconstructs each company's public evidence as it stood on the cutoff
+    date (HN archive + GitHub starring timestamps), scores it with the same
+    pipeline production uses, and compares against a control group that did
+    not go on to raise. Writes a report with recall, separation (AUC), lead
+    time, and a plainly stated list of what the exercise cannot show.
+    """
+    from scout import hindsight as hs
+
+    settings = Settings()
+    store = _open_store(settings)
+    thesis = _resolve_thesis_or_exit(store, thesis_path)
+
+    if not outcomes_path.exists():
+        console.print(
+            f"[red]No outcomes file at[/] {outcomes_path}\n"
+            "Create one listing companies that raised (and controls that did "
+            "not) — see outcomes.example.yaml for the shape."
+        )
+        raise typer.Exit(1)
+    try:
+        outcomes, controls = hs.load_outcomes(outcomes_path)
+    except Exception as exc:
+        console.print(f"[red]Could not read {outcomes_path}:[/] {exc}")
+        raise typer.Exit(1) from exc
+    if not outcomes:
+        console.print(f"[red]{outcomes_path} lists no outcomes.[/]")
+        raise typer.Exit(1)
+
+    if cutoff:
+        try:
+            when = datetime.fromisoformat(cutoff).replace(tzinfo=timezone.utc)
+        except ValueError:
+            console.print(f"[red]--cutoff must be YYYY-MM-DD, got[/] {cutoff!r}")
+            raise typer.Exit(1) from None
+    else:
+        when = datetime.now(timezone.utc) - timedelta(days=int(months_ago * 30.44))
+
+    console.print(
+        f"Backtesting [bold]{len(outcomes)}[/bold] outcomes against "
+        f"[bold]{len(controls)}[/bold] controls, as of "
+        f"[bold]{when:%d %B %Y}[/bold]."
+    )
+    if not controls:
+        console.print(
+            "[yellow]No controls supplied[/] — recall without a control group "
+            "cannot show whether the scorer discriminates. Add a `controls:` "
+            "list of companies from the same window that did not raise."
+        )
+
+    with Progress(console=console) as progress:
+        task = progress.add_task("Reconstructing evidence…",
+                                 total=len(outcomes) + len(controls))
+
+        def on_progress(done: int, total: int, company: str) -> None:
+            progress.update(task, completed=done,
+                            description=f"Reconstructing… {company[:32]}")
+
+        report = hs.run_backtest(
+            outcomes, controls, when, thesis, settings,
+            threshold=threshold, blinded=blinded, on_progress=on_progress,
+        )
+
+    metrics = report.metrics()
+    table = Table(box=box.SIMPLE, title=f"Hindsight — as of {when:%d %b %Y}")
+    for column in ("company", "score", "rank", "surfaced", "lead time", "evidence"):
+        table.add_column(column)
+    for verdict in sorted(report.outcomes, key=lambda v: -v.score):
+        table.add_row(
+            verdict.company,
+            f"{verdict.score:.0f}",
+            str(verdict.rank or "—"),
+            "[green]yes[/green]" if verdict.surfaced else "[red]no[/red]",
+            f"{verdict.lead_time_months} mo" if verdict.lead_time_months else "—",
+            verdict.evidence[:48],
+        )
+    console.print(table)
+    console.print(
+        f"Recall [bold]{metrics.recall:.0%}[/bold] at a threshold of "
+        f"{threshold:.0f} · AUC [bold]{metrics.auc:.2f}[/bold] "
+        f"(0.5 = coin flip)"
+        + (f" · median lead [bold]{metrics.median_lead_days / 30.44:.1f}[/bold] months"
+           if metrics.median_lead_days else "")
+    )
+
+    out.mkdir(parents=True, exist_ok=True)
+    report_path = out / f"hindsight_{when:%Y%m%d}.md"
+    report_path.write_text(hs.render_report(report), encoding="utf-8")
+    store.save_backtest({**report.model_dump(mode="json"),
+                         "metrics": metrics.model_dump()})
+    console.print(f"Report: [bold]{report_path}[/bold]")
+
+
+@app.command()
 def migrate(
     owner: Annotated[
         str, typer.Option("--owner", help="Email of the person whose solo work this is.")
