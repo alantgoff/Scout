@@ -416,6 +416,22 @@ def _inject_css() -> None:
           white-space:pre-wrap; }
         .presence-dot { display:inline-block; width:7px; height:7px; border-radius:50%;
           background:#1f6f3f; margin-right:5px; vertical-align:middle; }
+        /* ---- backtest separation strip. Every scored company as a dot on
+           the 0–100 axis: what AUC is a number for. The overlap between the
+           rows is the honest part, and a chart shows it where a metric
+           cannot. */
+        .sep { width:100%; height:78px; display:block; overflow:visible; }
+        .sep-win { fill:#1f6f3f; fill-opacity:.75; }
+        .sep-lose { fill:#962828; fill-opacity:.5; }
+        .sep-th { stroke:var(--muted); stroke-width:.35; stroke-dasharray:1.5 1.5; }
+        .sep-wrap { border:1px solid var(--hair); border-radius:14px;
+          background:var(--bg); padding:12px 14px 6px; margin:6px 0 4px; }
+        .sep-lab { display:flex; justify-content:space-between; font-size:11px;
+          letter-spacing:.04em; text-transform:uppercase; color:var(--muted);
+          font-weight:600; }
+        .sep-key { font-size:12px; color:var(--ink-2); margin-top:2px; }
+        .sep-key b.win { color:#1f6f3f; }
+        .sep-key b.lose { color:#962828; }
         .dpane-readout { margin:16px 0 4px; border:1px solid var(--hair); border-radius:14px;
           background:var(--bg); padding:16px; }
         .dpane-top { display:flex; align-items:baseline; justify-content:space-between; }
@@ -4934,23 +4950,88 @@ def _evidence_empty_state() -> None:
 
 
 def _evidence_pick_run(runs: list[dict]):
-    """Run selector + the parsed report. None when it cannot be read."""
+    """(row, report) for the selected backtest — (None, None) if unreadable.
+
+    The picker only appears once there is something to choose between; a
+    single-run dropdown is furniture.
+    """
     from scout.hindsight import BacktestReport
 
-    labels = {
-        f"{r['cutoff'][:10]} · {r.get('n_outcomes', 0)} outcomes "
-        f"· AUC {r.get('auc') if r.get('auc') is not None else '—'} "
-        f"(run {r['id']})": r
-        for r in runs
-    }
-    picked = st.selectbox("Backtest run", list(labels), key="ev_pick",
-                          label_visibility="collapsed")
-    row = labels[picked]
+    if len(runs) == 1:
+        row = runs[0]
+    else:
+        labels = {
+            f"{r['cutoff'][:10]} · {r.get('n_outcomes', 0)} outcomes "
+            f"· AUC {r.get('auc') if r.get('auc') is not None else '—'} "
+            f"(run {r['id']})": r
+            for r in runs
+        }
+        row = labels[st.selectbox("Backtest run", list(labels), key="ev_pick",
+                                  label_visibility="collapsed")]
     try:
-        return BacktestReport.model_validate(row["report"])
+        return row, BacktestReport.model_validate(row["report"])
     except Exception:  # noqa: BLE001 — a bad row must not take the page down
         st.warning("This backtest could not be read back.")
-        return None
+        return None, None
+
+
+@st.cache_data(show_spinner=False, max_entries=8)
+def _signal_evaluation(report_json: str, weights_key: tuple):
+    """Per-signal statistics, cached against the stored report.
+
+    Bootstrap and permutation testing cost roughly half a second per
+    evaluation, and Streamlit re-executes this script on EVERY interaction
+    — so without a cache, changing a rail switch would spend a second
+    recomputing numbers that cannot have changed. A stored backtest is
+    immutable, which makes its JSON a perfect cache key.
+    """
+    from scout.hindsight import BacktestReport
+
+    report = BacktestReport.model_validate_json(report_json)
+    return report.evaluate_signals(dict(weights_key))
+
+
+def _weights_key() -> tuple:
+    """Hashable form of the thesis weights, for the cache key."""
+    return tuple(sorted(thesis.weights.items()))
+
+
+def _separation_strip(report) -> str:
+    """Every scored company as a dot on the 0–100 axis, in two rows.
+
+    This is the picture AUC is a number for. A reader sees in one glance
+    what a metric asks them to take on trust: whether the companies that
+    raised actually sit to the right of the ones that did not, and how much
+    the two groups overlap. The overlap is the honest part — a clean
+    separation and a messy one can share a headline figure.
+    """
+    outcomes = report.outcomes
+    controls = report.controls
+    if not outcomes and not controls:
+        return ""
+    width, row_h, pad = 100.0, 26.0, 14.0
+    height = pad * 2 + row_h * 2
+
+    def dots(verdicts, y: float, css: str) -> str:
+        return "".join(
+            f'<circle cx="{max(0.6, min(99.4, v.score))}" cy="{y}" r="1.5" '
+            f'class="{css}"><title>{_e(v.company)} — {v.score:.0f}</title>'
+            "</circle>"
+            for v in verdicts
+        )
+
+    threshold_x = max(0.0, min(100.0, report.threshold))
+    return (
+        f'<svg class="sep" viewBox="0 0 {width} {height}" '
+        f'preserveAspectRatio="none" role="img" '
+        f'aria-label="Score distribution: companies that raised versus '
+        f'controls">'
+        f'<line x1="{threshold_x}" y1="4" x2="{threshold_x}" y2="{height - 4}" '
+        f'class="sep-th"/>'
+        f'{dots(outcomes, pad, "sep-win")}'
+        f'{dots(controls, pad + row_h, "sep-lose")}'
+        "</svg>"
+    )
 
 
 def _evidence_trust_banner(report) -> None:
@@ -4997,6 +5078,22 @@ def _render_evidence_results(report) -> None:
         + '.</div>',
         unsafe_allow_html=True,
     )
+
+    strip = _separation_strip(report)
+    if strip:
+        st.markdown(
+            '<div class="sep-wrap">'
+            '<div class="sep-lab"><span>score 0</span>'
+            f'<span>threshold {report.threshold:.0f}</span><span>100</span></div>'
+            f"{strip}"
+            f'<div class="sep-key"><b class="win">■</b> '
+            f'{len(report.outcomes)} raised afterwards &nbsp; '
+            f'<b class="lose">■</b> {len(report.controls)} did not — '
+            'the overlap between the two rows is what the AUC above '
+            'measures.</div></div>',
+            unsafe_allow_html=True,
+        )
+
     st.write("")
     for verdict in sorted(report.outcomes, key=lambda v: -v.score):
         tint = "#1f6f3f" if verdict.surfaced else "#962828"
@@ -5017,7 +5114,7 @@ def _render_evidence_results(report) -> None:
         )
 
 
-def _render_evidence_signals(report) -> None:
+def _render_evidence_signals(report, evaluation) -> None:
     """Which individual signals carried the information — and what the
     evidence says the weights should be."""
     from scout.signal_eval import suggest_weights as suggest_signal_weights
@@ -5030,7 +5127,6 @@ def _render_evidence_signals(report) -> None:
         "not.</div>",
         unsafe_allow_html=True,
     )
-    evaluation = report.evaluate_signals(thesis.weights)
     if evaluation.underpowered:
         st.markdown(f'<div class="stale-banner">{_e(evaluation.notes[0])}</div>',
                     unsafe_allow_html=True)
@@ -5041,14 +5137,37 @@ def _render_evidence_signals(report) -> None:
                 "signal": f.name,
                 "AUC": f.auc,
                 "95% CI": f"{f.ci_low:.2f}–{f.ci_high:.2f}",
-                "coverage": f"{f.coverage:.0%}",
-                "adds beyond rest": ("—" if f.marginal_auc is None
-                                     else f"{f.marginal_auc:+.3f}"),
+                "coverage": f.coverage * 100,  # the column formats as a %
+                "adds beyond rest": f.marginal_auc,
                 "verdict": f.verdict,
             }
             for f in evaluation.ranked
         ],
         hide_index=True, use_container_width=True,
+        column_config={
+            # A bar makes the distance from 0.5 legible at a glance, which
+            # a bare float does not.
+            "AUC": st.column_config.ProgressColumn(
+                "AUC", min_value=0.0, max_value=1.0, format="%.2f",
+                help="Chance a company that raised scored higher on this "
+                     "signal than one that did not. 0.5 is a coin flip.",
+            ),
+            "95% CI": st.column_config.TextColumn(
+                "95% CI",
+                help="An interval spanning 0.5 means the effect is not "
+                     "distinguishable from chance at this sample size.",
+            ),
+            "coverage": st.column_config.NumberColumn(
+                "coverage", format="%.0f%%",
+                help="Share of companies where this signal fired at all. A "
+                     "strong signal that rarely fires moves few decisions.",
+            ),
+            "adds beyond rest": st.column_config.NumberColumn(
+                "adds beyond rest", format="%+.3f",
+                help="Composite AUC lost by dropping this signal. Near zero "
+                     "means it is redundant with the others.",
+            ),
+        },
     )
     for note in evaluation.notes:
         st.markdown(f'<div class="subtle">• {_e(note)}</div>',
@@ -5173,13 +5292,18 @@ if nav == "Evidence":
             "View", ["Results", "Signals", "Over time"], default="Results",
             key="evidence_view", label_visibility="collapsed",
         ) or "Results"
-        _evidence_report = _evidence_pick_run(_evidence_runs)
+        _evidence_row, _evidence_report = _evidence_pick_run(_evidence_runs)
         if _evidence_report is not None:
             _evidence_trust_banner(_evidence_report)
+            # Computed once per (run, weights) and cached: the bootstrap and
+            # permutation passes cost half a second, and Streamlit re-runs
+            # this script on every interaction.
+            _evaluation = _signal_evaluation(
+                _evidence_row["report_json"], _weights_key())
             if _evidence_view == "Results":
                 _render_evidence_results(_evidence_report)
             elif _evidence_view == "Signals":
-                _render_evidence_signals(_evidence_report)
+                _render_evidence_signals(_evidence_report, _evaluation)
             else:
                 _render_evidence_trends(_evidence_runs, _evidence_report)
 
@@ -5192,9 +5316,7 @@ if nav == "Evidence":
             st.download_button(
                 "Download the report (Markdown)",
                 hindsight_report_markdown(
-                    _evidence_report,
-                    signal_evaluation=_evidence_report.evaluate_signals(
-                        thesis.weights),
+                    _evidence_report, signal_evaluation=_evaluation,
                 ).encode("utf-8"),
                 file_name=f"hindsight_{_evidence_report.cutoff:%Y%m%d}.md",
                 help="The shareable version, limitations included.",

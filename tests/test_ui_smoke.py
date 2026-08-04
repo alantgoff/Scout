@@ -792,3 +792,80 @@ def test_evidence_trends_view_explains_what_a_trend_needs(tmp_path, monkeypatch)
     assert "--sweep 3" in page
     # And the reason the windows are spaced, not just the instruction.
     assert "not independent observations" in page
+
+
+def test_evidence_results_plots_the_separation(tmp_path, monkeypatch) -> None:
+    """AUC is a number for a picture. The Results view should draw it —
+    both groups on one axis, so the overlap is visible rather than implied."""
+    from datetime import datetime, timezone
+
+    db = tmp_path / "smoke.db"
+    monkeypatch.setenv("DB_PATH", str(db))
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "")
+    monkeypatch.setenv("SCOUT_DEV_USER", "alan@firm.com")
+    seed_store(db)
+
+    from scout import hindsight as hs
+
+    report = hs.BacktestReport(
+        cutoff=datetime(2025, 2, 1, tzinfo=timezone.utc),
+        thesis_id="ai-infra", threshold=60.0)
+    for i in range(4):
+        report.verdicts.append(hs.Verdict(
+            key=f"w{i}", company=f"Winner {i}", surfaced=True, score=70.0 + i))
+    for i in range(6):
+        control = hs.Verdict(key=f"c{i}", company=f"Control {i}",
+                             surfaced=False, score=20.0 + i)
+        control.is_control = True
+        report.controls.append(control)
+    Store(db).save_backtest({**report.model_dump(mode="json"),
+                             "metrics": report.metrics().model_dump()})
+
+    at = AppTest.from_file(str(UI_PATH), default_timeout=30)
+    at.session_state["nav"] = "Evidence"
+    at.run()
+    assert not at.exception, at.exception[0].message if at.exception else ""
+    page = _page_text(at)
+    # One dot per company, both groups, on a single axis.
+    assert page.count("<circle") == 10
+    assert "sep-win" in page and "sep-lose" in page
+    # The threshold is drawn, so "surfaced" is visible rather than inferred.
+    assert 'class="sep-th"' in page
+    assert "the overlap between the two rows" in page
+
+
+def test_evidence_skips_the_run_picker_when_there_is_only_one(tmp_path, monkeypatch) -> None:
+    """A dropdown with a single option is furniture."""
+    from datetime import datetime, timedelta, timezone
+
+    db = tmp_path / "smoke.db"
+    monkeypatch.setenv("DB_PATH", str(db))
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "")
+    monkeypatch.setenv("SCOUT_DEV_USER", "alan@firm.com")
+    seed_store(db)
+
+    from scout import hindsight as hs
+
+    def _save(cutoff):
+        report = hs.BacktestReport(cutoff=cutoff, thesis_id="ai-infra",
+                                   threshold=60.0)
+        report.verdicts = [hs.Verdict(key="a", company="Alpha", surfaced=True,
+                                      score=80.0)]
+        Store(db).save_backtest({**report.model_dump(mode="json"),
+                                 "metrics": report.metrics().model_dump()})
+
+    base = datetime(2025, 2, 1, tzinfo=timezone.utc)
+    _save(base)
+    at = AppTest.from_file(str(UI_PATH), default_timeout=30)
+    at.session_state["nav"] = "Evidence"
+    at.run()
+    assert not at.exception, at.exception[0].message if at.exception else ""
+    assert not [s for s in at.selectbox if s.key == "ev_pick"]
+
+    # A second run makes the choice meaningful, so the picker appears.
+    _save(base - timedelta(days=180))
+    at2 = AppTest.from_file(str(UI_PATH), default_timeout=30)
+    at2.session_state["nav"] = "Evidence"
+    at2.run()
+    assert not at2.exception, at2.exception[0].message if at2.exception else ""
+    assert [s for s in at2.selectbox if s.key == "ev_pick"]
