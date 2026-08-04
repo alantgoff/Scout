@@ -585,11 +585,12 @@ class SignalTrend(BaseModel):
         """
         if len(self.points) < 2:
             return False
-        _, _first_auc, _first_low, first_high = self.points[0]
-        _, _last_auc, last_low, _last_high = self.points[-1]
-        return last_low < first_high and _last_auc < _first_auc and (
-            _first_low > _last_high
-        )
+        _, _first_auc, first_low, _first_high = self.points[0]
+        _, _last_auc, _last_low, last_high = self.points[-1]
+        # Disjoint intervals with the later one below: the whole condition.
+        # (An earlier version also tested the point estimates, which is
+        # implied by disjointness and only obscured the intent.)
+        return last_high < first_low
 
     @property
     def summary(self) -> str:

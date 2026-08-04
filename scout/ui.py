@@ -5094,6 +5094,55 @@ def _render_evidence_results(report) -> None:
             unsafe_allow_html=True,
         )
 
+    # ---- What the measured rates mean at a realistic prevalence. The
+    # single most dangerous misreading on this page is the precision figure
+    # above: this sample is ~40% companies that raised, the real funnel is
+    # one or two percent.
+    from scout.hindsight import evidence_symmetry, realistic_performance
+
+    if metrics.n_controls:
+        with st.expander("What this means in production", expanded=True):
+            st.markdown(
+                f'<div class="subtle">At the {report.threshold:.0f}-point '
+                f'threshold this run caught <b>{metrics.true_positive_rate:.0%}</b> '
+                f'of the companies that raised and flagged '
+                f'<b>{metrics.false_positive_rate:.0%}</b> of those that did '
+                'not. Those two rates are what transfer to production — '
+                'precision does not, because it depends on how many controls '
+                'happened to be chosen.</div>',
+                unsafe_allow_html=True,
+            )
+            st.dataframe(
+                [{"if this share raise": f"{row.base_rate:.0%}",
+                  "precision": f"{row.precision:.1%}",
+                  "lift vs random": f"{row.lift:.1f}×",
+                  "companies read per find": row.reviewed_per_find}
+                 for row in realistic_performance(metrics)],
+                hide_index=True, use_container_width=True,
+            )
+            st.markdown(
+                '<div class="subtle">Lift is the honest headline. Precision '
+                'of 14% sounds poor until you notice the base rate is 2%, '
+                'making it a 7× improvement — which is what a sourcing tool '
+                'is for.</div>',
+                unsafe_allow_html=True,
+            )
+
+    fairness = evidence_symmetry(report)
+    if fairness.unfair:
+        st.markdown(f'<div class="stale-banner"><b>The two groups are not '
+                    f'comparable.</b> {_e(fairness.message)}</div>',
+                    unsafe_allow_html=True)
+    elif report.controls:
+        st.markdown(f'<div class="subtle">{_e(fairness.message)}</div>',
+                    unsafe_allow_html=True)
+
+    if report.circular:
+        from scout.hindsight import CIRCULARITY_WARNING
+
+        st.markdown(f'<div class="stale-banner">{_e(CIRCULARITY_WARNING)}</div>',
+                    unsafe_allow_html=True)
+
     st.write("")
     for verdict in sorted(report.outcomes, key=lambda v: -v.score):
         tint = "#1f6f3f" if verdict.surfaced else "#962828"
@@ -5213,8 +5262,15 @@ def _render_evidence_signals(report, evaluation) -> None:
                     for proposal in proposals:
                         updated[proposal.name] = proposal.suggested
                     _save_thesis(thesis.model_copy(update={"weights": updated}))
+                    # Remember that these weights came from a backtest, so
+                    # the NEXT backtest can say it is scoring an exam with
+                    # its own answer key. Without this the circularity is
+                    # invisible and the numbers quietly improve.
+                    store.set_setting("weights_from_backtest",
+                                      str(_evidence_row["id"]))
                     st.session_state["toast"] = (
-                        "Weights updated from the backtest")
+                        "Weights updated — the next backtest will flag that "
+                        "they came from this one")
                     st.rerun()
             elif movers:
                 st.markdown('<div class="subtle">An admin can apply these.</div>',

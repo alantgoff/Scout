@@ -658,7 +658,10 @@ def test_evidence_view_shows_backtest_results(tmp_path, monkeypatch) -> None:
     assert "not an assertion" in page  # the page's own framing
     # The caveats travel with the numbers rather than being demo-only.
     assert "lower bound" in page
-    assert "measures the scorer, not the sourcing" in page
+    assert "measures the SCORER" in page
+    # Including the two that most change how the headline should be read.
+    assert "THE THESIS IS NOT FROZEN AT THE CUTOFF" in page
+    assert "NOT PRODUCTION PRECISION" in page
 
 
 def test_evidence_view_flags_an_untrustworthy_backtest(tmp_path, monkeypatch) -> None:

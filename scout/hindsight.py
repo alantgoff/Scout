@@ -157,6 +157,14 @@ class BacktestReport(BaseModel):
     limitations: list[str] = Field(default_factory=list)
     blinded: bool = False
     unreachable: list[str] = Field(default_factory=list)
+    # Set when the weights being tested were themselves derived from a
+    # backtest. Scoring them against the same companies that produced them
+    # is in-sample, and nothing else in this module would notice.
+    weights_from_backtest: int | None = None
+
+    @property
+    def circular(self) -> bool:
+        return self.weights_from_backtest is not None
 
     @property
     def trustworthy(self) -> bool:
@@ -205,6 +213,11 @@ class Metrics(BaseModel):
     median_lead_days: float | None = None
     mean_outcome_score: float = 0.0
     mean_control_score: float = 0.0
+    # Rates at the threshold, which are what transfer to production. Unlike
+    # precision, they do not depend on how many controls happened to be
+    # chosen.
+    true_positive_rate: float = 0.0
+    false_positive_rate: float = 0.0
 
 
 # ----------------------------------------------------------------- metrics
@@ -260,8 +273,14 @@ def compute_metrics(
         top = pooled[:n_out]
         precision = round(sum(1 for _, is_outcome in top if is_outcome) / n_out, 3)
 
+    tpr = recall
+    fpr = (sum(1 for s in control_scores if s >= threshold) / n_ctl
+           if n_ctl else 0.0)
+
     clean_leads = [d for d in (lead_times or []) if d is not None]
     return Metrics(
+        true_positive_rate=round(tpr, 3),
+        false_positive_rate=round(fpr, 3),
         n_outcomes=n_out,
         n_controls=n_ctl,
         recall=round(recall, 3),
@@ -612,7 +631,9 @@ def render_report(report: BacktestReport, signal_evaluation=None) -> str:
         lines.append(
             f"- Reviewing the top {metrics.n_outcomes} of all "
             f"{metrics.n_outcomes + metrics.n_controls} scored companies would "
-            f"have surfaced **{metrics.precision_at_n:.0%}** real outcomes"
+            f"have surfaced **{metrics.precision_at_n:.0%}** real outcomes "
+            "— but see the base-rate table below before reading anything "
+            "into that figure"
         )
     if metrics.median_lead_days is not None:
         lines.append(
@@ -655,11 +676,20 @@ def render_report(report: BacktestReport, signal_evaluation=None) -> str:
                     f"{verdict.blinded_score:.0f} blinded ({delta:+.0f})"
                 )
 
+    # The two sections that stop the headline being read as better than it
+    # is. Placed BEFORE the signal detail, because a reader who stops early
+    # should still have seen them.
+    lines += render_base_rate_section(metrics)
+    lines += render_fairness_section(evidence_symmetry(report))
+
     if signal_evaluation is not None:
         lines += render_signal_section(signal_evaluation)
 
     lines += ["", "## What this does and does not show", ""]
-    for limitation in report.limitations or default_limitations():
+    limitations = list(report.limitations or default_limitations())
+    if report.circular:
+        limitations.insert(0, CIRCULARITY_WARNING)
+    for limitation in limitations:
         lines.append(f"- {limitation}")
     return "\n".join(lines)
 
@@ -689,26 +719,76 @@ def render_signal_section(evaluation) -> list[str]:
 
 
 def default_limitations() -> list[str]:
-    """Stated up front, because a backtest that hides these is marketing."""
+    """Every way this exercise can mislead, stated up front.
+
+    Ordered by how badly each one distorts the headline, not by how
+    comfortable it is to admit. A backtest that omits these is marketing,
+    and the omissions are exactly what a competent reader will find.
+    """
     return [
+        # 1. The deepest problem, and the one most backtests never mention.
+        "THE THESIS IS NOT FROZEN AT THE CUTOFF. Evidence is rewound, but "
+        "the thesis, weights, prompt and rubric being applied are today's — "
+        "and they were written and tuned by people who already know which "
+        "companies went on to raise. So this measures 'would today's thesis "
+        "have ranked these companies highly, given only past evidence', NOT "
+        "'would Scout have caught them at the time'. The second claim is "
+        "stronger and this exercise cannot support it.",
+        # 2. Selection, on both sides.
+        "OUTCOMES ARE CHOSEN FROM MEMORY, and memorable companies are the "
+        "ones with loud public footprints. A list assembled by recall is "
+        "biased toward exactly the companies GitHub and Hacker News cover "
+        "well, which inflates measured recall relative to a random sample "
+        "of companies that raised.",
+        "CONTROLS ARE HAND-PICKED, so the comparison is only as honest as "
+        "the choosing. Controls with weaker public presence than the "
+        "outcomes turn this into a test of whether a company has a GitHub "
+        "org. Some 'controls' will also have raised quietly — unannounced "
+        "rounds are common — which makes them mislabelled positives and "
+        "pushes the measured separation DOWN.",
+        # 3. The number most likely to be misread.
+        "PRECISION MEASURED HERE IS NOT PRODUCTION PRECISION. The pooled "
+        "sample is perhaps 40% companies that raised; the real funnel is one "
+        "or two percent. Read the base-rate table, which restates the same "
+        "measured rates at plausible production prevalence — precision falls "
+        "by an order of magnitude even when lift stays strong.",
+        # 4. Leakage, honestly bounded.
+        "The language model has training knowledge of companies famous "
+        "enough to appear in it, which inflates scores for names it "
+        "recognises. Blinding measures part of that, but only part: "
+        "redacting a name removes information as well as recognition, so "
+        "the named-versus-blinded gap OVERSTATES leakage, while surviving "
+        "descriptive detail in the evidence means it also misses some.",
+        # 5. Missing modality.
         "X/Twitter history cannot be reconstructed without paid full-archive "
         "access, so these runs score without the X signals production uses. "
-        "Every number here is therefore a lower bound: real recall should be "
-        "HIGHER in production, not lower.",
-        "The language model has training knowledge of well-known companies, "
-        "which can inflate scores for names it recognises. The blinded column "
-        "measures that effect directly rather than assuming it away.",
-        "GitHub star counts are rebuilt from starring timestamps; repos with "
-        "more than "
-        f"{_STAR_PAGES_MAX * _STARS_PER_PAGE:,} stars report a floor, not an "
-        "exact figure.",
-        "Controls are companies visible in the same sources and window that "
-        "did not go on to raise. They are a sample, not the full negative "
-        "universe, so precision is indicative rather than absolute.",
-        "A backtest measures the scorer, not the sourcing. It cannot show "
-        "whether discovery would have found a company in the first place — "
-        "only how it would have ranked once seen.",
+        "That particular gap makes the numbers a lower bound: real recall "
+        "should be HIGHER in production, not lower.",
+        # 6. The scope of the claim.
+        "A backtest measures the SCORER, not the SOURCING. It cannot show "
+        "whether discovery would have surfaced a company in the first "
+        "place — only how it would have ranked once seen. Recall here is "
+        "conditional on the company being found at all.",
+        # 7. Longitudinal caveat.
+        "Successive cutoffs are NOT independent observations: they largely "
+        "share the same companies, and later windows drop outcomes whose "
+        "round predates them. A trend across windows is therefore weaker "
+        "evidence than the number of points suggests, and a change in "
+        "sample composition can masquerade as a change in signal power.",
+        # 8. Measurement floor.
+        "GitHub star counts are rebuilt from starring timestamps; repos "
+        f"with more than {_STAR_PAGES_MAX * _STARS_PER_PAGE:,} stars report "
+        "a floor, not an exact figure.",
     ]
+
+
+CIRCULARITY_WARNING = (
+    "CIRCULAR: the weights in use were themselves derived from a backtest. "
+    "Measuring them against that same set of companies is scoring an exam "
+    "using its own answer key, and the result will flatter itself. Judge "
+    "tuned weights on companies that were NOT used to tune them — a "
+    "different cutoff, or an outcomes list assembled afterwards."
+)
 
 
 def build_verdict(
@@ -1027,3 +1107,209 @@ def render_trend_section(trends) -> list[str]:
         cells = " | ".join(f"{point[1]:.2f}" for point in trend.points)
         lines.append(f"| {trend.name} | {cells} | {trend.summary} |")
     return lines
+
+
+# ------------------------------------------------- base rates and fairness
+# The two corrections that stop a backtest being read as far better than it
+# is. Both are pure, and both are computed from numbers the report already
+# has — they only needed stating.
+
+
+# What share of companies Scout scores actually go on to raise a notable
+# round within the following 18 months. Nobody knows this precisely; these
+# are the plausible range a fund should reason over. The point is not the
+# exact figure — it is that the figure is nowhere near the ~40% implied by
+# a backtest with 14 outcomes and 20 controls.
+BASE_RATES = (0.01, 0.02, 0.05)
+
+
+def precision_at_base_rate(tpr: float, fpr: float, base_rate: float) -> float:
+    """Precision you would actually see in production, via Bayes.
+
+    THE most important correction in this module. A backtest pools a
+    handful of outcomes against a handful of controls, so positives are
+    perhaps 40% of the pool; in the real funnel they are one or two
+    percent. Precision measured on the backtest pool is therefore
+    inflated by more than an order of magnitude, and "75% of the top
+    fourteen were real" is read by a partner as "three in four companies
+    this flags will raise" — which is simply false.
+
+    precision = (TPR · p) / (TPR · p + FPR · (1 − p))
+    """
+    if base_rate <= 0 or base_rate >= 1:
+        return 0.0
+    signal = tpr * base_rate
+    noise = fpr * (1 - base_rate)
+    return round(signal / (signal + noise), 4) if (signal + noise) > 0 else 0.0
+
+
+def lift_at_base_rate(tpr: float, fpr: float, base_rate: float) -> float:
+    """How many times better than random the flagged set is.
+
+    The honest headline. Precision of 12% sounds poor until you see that
+    the base rate is 2%, making it a 6× improvement — which is what a
+    sourcing tool is actually for. Lift survives the base-rate problem
+    where raw precision does not.
+    """
+    precision = precision_at_base_rate(tpr, fpr, base_rate)
+    return round(precision / base_rate, 2) if base_rate > 0 else 0.0
+
+
+class RealisticPerformance(BaseModel):
+    """What the measured rates imply at plausible production base rates."""
+
+    base_rate: float
+    precision: float
+    lift: float
+    reviewed_per_find: float  # companies you would read per real outcome
+
+
+def bounded_rates(metrics: Metrics) -> tuple[float, float, bool]:
+    """(tpr, fpr, was_bounded) — rates safe to extrapolate from.
+
+    Observing zero false positives in eighteen controls does NOT mean the
+    false-positive rate is zero, and feeding a literal 0.0 into Bayes
+    produces "100% precision, 100× lift" — which is exactly the kind of
+    confident nonsense this module exists to prevent, and the same mistake
+    as a bootstrap interval collapsing under perfect separation.
+
+    So boundary rates are replaced by the rule of three: with no events in
+    n trials, the 95% upper bound on the rate is about 3/n. Eighteen clean
+    controls bound the false-positive rate at 17%, not 0%. The same applies
+    in reverse to a perfect catch rate.
+    """
+    tpr, fpr = metrics.true_positive_rate, metrics.false_positive_rate
+    bounded = False
+    if fpr <= 0 and metrics.n_controls:
+        fpr = min(1.0, 3.0 / metrics.n_controls)
+        bounded = True
+    if tpr >= 1 and metrics.n_outcomes:
+        tpr = max(0.0, 1.0 - 3.0 / metrics.n_outcomes)
+        bounded = True
+    return tpr, fpr, bounded
+
+
+def realistic_performance(metrics: Metrics,
+                          base_rates=BASE_RATES) -> list[RealisticPerformance]:
+    tpr, fpr, _bounded = bounded_rates(metrics)
+    out: list[RealisticPerformance] = []
+    for rate in base_rates:
+        precision = precision_at_base_rate(tpr, fpr, rate)
+        out.append(RealisticPerformance(
+            base_rate=rate,
+            precision=precision,
+            lift=lift_at_base_rate(tpr, fpr, rate),
+            reviewed_per_find=round(1 / precision, 1) if precision > 0 else 0.0,
+        ))
+    return out
+
+
+class FairnessCheck(BaseModel):
+    """Whether the two groups were comparable in the first place."""
+
+    outcome_evidence_rate: float   # share with any evidence found
+    control_evidence_rate: float
+    gap: float
+    unfair: bool
+    message: str
+
+
+def evidence_symmetry(report: "BacktestReport") -> FairnessCheck:
+    """Did outcomes and controls have comparable public footprints?
+
+    The most likely way this backtest gets rigged, usually without anyone
+    intending to. If every company that raised has a GitHub org and half
+    the controls have nothing at all, the scorer is not being tested on
+    judgment — it is being tested on whether a company has a public
+    footprint, and it will separate the groups perfectly while telling you
+    nothing about picking startups.
+
+    Selection is done by hand from memory, and memorable companies are the
+    ones with loud public evidence, so this skew is the default outcome
+    rather than an unusual failure.
+    """
+    def rate(verdicts) -> float:
+        if not verdicts:
+            return 0.0
+        found = sum(
+            1 for v in verdicts
+            if v.evidence and v.evidence != "no public evidence found"
+        )
+        return round(found / len(verdicts), 3)
+
+    outcome_rate = rate(report.outcomes)
+    control_rate = rate(report.controls)
+    gap = round(outcome_rate - control_rate, 3)
+    unfair = gap >= 0.3 and bool(report.controls)
+    if not report.controls:
+        message = ("No controls, so there is nothing to compare against and "
+                   "no separation can be claimed.")
+    elif unfair:
+        message = (
+            f"{outcome_rate:.0%} of the companies that raised had public "
+            f"evidence at the cutoff, against {control_rate:.0%} of the "
+            "controls. That gap means the comparison is substantially "
+            "measuring WHETHER A COMPANY HAS A PUBLIC FOOTPRINT, not "
+            "whether it is a good startup. Choose controls with comparable "
+            "GitHub and Hacker News presence before trusting the "
+            "separation."
+        )
+    else:
+        message = (
+            f"Evidence coverage is comparable ({outcome_rate:.0%} of "
+            f"outcomes vs {control_rate:.0%} of controls), so the "
+            "separation is not simply a public-footprint artefact."
+        )
+    return FairnessCheck(
+        outcome_evidence_rate=outcome_rate, control_evidence_rate=control_rate,
+        gap=gap, unfair=unfair, message=message,
+    )
+
+
+def render_base_rate_section(metrics: Metrics) -> list[str]:
+    """Restate the measured rates at plausible production prevalence."""
+    if not metrics.n_controls:
+        return []
+    lines = [
+        "", "## What this means in production", "",
+        f"At the {60 if metrics.n_outcomes else 0:.0f}-point threshold this "
+        f"run caught **{metrics.true_positive_rate:.0%}** of the companies "
+        f"that raised and flagged **{metrics.false_positive_rate:.0%}** of "
+        "those that did not. Those two rates are what transfer; the "
+        "precision above does not, because this sample is roughly "
+        f"{metrics.n_outcomes / max(1, metrics.n_outcomes + metrics.n_controls):.0%} "
+        "companies that raised and the real funnel is one or two percent.",
+        "",
+        "| If this share of sourced companies raise | Precision | Lift vs random | Companies read per find |",
+        "| ---: | ---: | ---: | ---: |",
+    ]
+    for row in realistic_performance(metrics):
+        lines.append(
+            f"| {row.base_rate:.0%} | {row.precision:.1%} | {row.lift:.1f}× | "
+            f"{row.reviewed_per_find:.0f} |"
+        )
+    _tpr, _fpr, bounded = bounded_rates(metrics)
+    if bounded:
+        lines += [
+            "",
+            f"_A boundary rate was observed ({metrics.true_positive_rate:.0%} "
+            f"caught, {metrics.false_positive_rate:.0%} false positives), and "
+            "a rate of exactly zero or one cannot be extrapolated from this "
+            f"few companies. The projection uses the rule-of-three bounds "
+            f"({_tpr:.0%} and {_fpr:.0%}) instead, which is why the table "
+            "does not simply restate the numbers above._",
+        ]
+    lines += [
+        "",
+        "_Lift is the honest headline. Precision of 14% sounds poor until "
+        "you notice the base rate is 2%, making it a 7× improvement — which "
+        "is what a sourcing tool is for._",
+    ]
+    return lines
+
+
+def render_fairness_section(check: FairnessCheck) -> list[str]:
+    """Whether the two groups were comparable enough to compare."""
+    heading = ("⚠ The two groups are not comparable" if check.unfair
+               else "Were the groups comparable?")
+    return ["", f"## {heading}", "", check.message]

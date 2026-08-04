@@ -1532,6 +1532,12 @@ def hindsight(
         f"[bold]{len(controls)}[/bold] controls, as of "
         f"[bold]{when:%d %B %Y}[/bold]."
     )
+    # If the weights under test were derived from an earlier backtest, this
+    # run is in-sample and will flatter itself. Say so before it produces a
+    # number, not after.
+    prior_backtest = store.get_setting("weights_from_backtest")
+    if prior_backtest:
+        console.print(f"[yellow]{hs.CIRCULARITY_WARNING}[/yellow]")
     if not controls:
         console.print(
             "[yellow]No controls supplied[/] — recall without a control group "
@@ -1551,6 +1557,11 @@ def hindsight(
             outcomes, controls, when, thesis, settings,
             threshold=threshold, blinded=blinded, on_progress=on_progress,
         )
+    if prior_backtest:
+        try:
+            report.weights_from_backtest = int(prior_backtest)
+        except ValueError:
+            report.weights_from_backtest = 0
 
     metrics = report.metrics()
     table = Table(box=box.SIMPLE, title=f"Hindsight — as of {when:%d %b %Y}")
