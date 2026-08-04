@@ -122,6 +122,16 @@ class Store:
             pk="id",
             if_not_exists=True,
         )
+        self.db["backtests"].create(
+            {
+                "id": int, "cutoff": str, "thesis_id": str, "threshold": float,
+                "n_outcomes": int, "n_controls": int, "recall": float,
+                "auc": float, "report_json": str, "created_at": str,
+                "created_by": str,
+            },
+            pk="id",
+            if_not_exists=True,
+        )
         self.db["memo_versions"].create(
             {
                 "id": int, "handle": str, "version_no": int, "body": str,

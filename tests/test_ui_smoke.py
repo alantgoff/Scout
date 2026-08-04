@@ -617,3 +617,75 @@ class _FakeProc:
 
     def wait(self, timeout=None):
         return 0
+
+
+def test_evidence_view_shows_backtest_results(tmp_path, monkeypatch) -> None:
+    """The 'does this work?' surface, including its own caveats."""
+    from datetime import datetime, timedelta, timezone
+
+    db = tmp_path / "smoke.db"
+    monkeypatch.setenv("DB_PATH", str(db))
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "")
+    monkeypatch.setenv("SCOUT_DEV_USER", "alan@firm.com")
+    seed_store(db)
+
+    from scout import hindsight as hs
+
+    cutoff = datetime(2025, 2, 1, tzinfo=timezone.utc)
+    report = hs.BacktestReport(cutoff=cutoff, thesis_id="ai-infra",
+                               threshold=60.0)
+    report.verdicts = [
+        hs.Verdict(key="sierra", company="Sierra Systems", surfaced=True,
+                   score=88.0, lead_time_days=240,
+                   round_date=cutoff + timedelta(days=240),
+                   evidence="3 repos, 1240 stars"),
+    ]
+    report.controls = [
+        hs.Verdict(key="quiet", company="QuietCo", surfaced=False, score=20.0,
+                   is_control=True),
+    ]
+    report.limitations = hs.default_limitations()
+    hs.rank_verdicts(report)
+    Store(db).save_backtest({**report.model_dump(mode="json"),
+                             "metrics": report.metrics().model_dump()})
+
+    at = AppTest.from_file(str(UI_PATH), default_timeout=30)
+    at.session_state["nav"] = "Automation"
+    at.session_state["automation_view"] = "Evidence"
+    at.run()
+    assert not at.exception, at.exception[0].message if at.exception else ""
+    page = _page_text(at)
+    assert "Sierra Systems" in page
+    assert "Does this work?" in page
+    # The caveats travel with the numbers rather than being demo-only.
+    assert "lower bound" in page
+    assert "measures the scorer, not the sourcing" in page
+
+
+def test_evidence_view_flags_an_untrustworthy_backtest(tmp_path, monkeypatch) -> None:
+    """A run where sources were unreachable must not read as a bad result."""
+    from datetime import datetime, timezone
+
+    db = tmp_path / "smoke.db"
+    monkeypatch.setenv("DB_PATH", str(db))
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "")
+    monkeypatch.setenv("SCOUT_DEV_USER", "alan@firm.com")
+    seed_store(db)
+
+    from scout import hindsight as hs
+
+    report = hs.BacktestReport(
+        cutoff=datetime(2025, 2, 1, tzinfo=timezone.utc), thesis_id="ai-infra",
+        threshold=60.0, unreachable=["Sierra Systems"],
+    )
+    report.verdicts = [hs.Verdict(key="sierra", company="Sierra Systems",
+                                  surfaced=False, score=0.0)]
+    Store(db).save_backtest({**report.model_dump(mode="json"),
+                             "metrics": report.metrics().model_dump()})
+
+    at = AppTest.from_file(str(UI_PATH), default_timeout=30)
+    at.session_state["nav"] = "Automation"
+    at.session_state["automation_view"] = "Evidence"
+    at.run()
+    assert not at.exception, at.exception[0].message if at.exception else ""
+    assert "not usable" in _page_text(at)

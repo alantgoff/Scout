@@ -4876,6 +4876,124 @@ if nav == "Activity":
         store.mark_read(ACTOR)
 
 
+# ============================================================ EVIDENCE
+
+
+def _render_hindsight() -> None:
+    """Backtest results: the answer to "does this actually work?".
+
+    Read-only here. Running a backtest is minutes of network work against
+    HN and GitHub, so it belongs on the CLI (`scout hindsight`) or the
+    worker; this surfaces what those produced.
+    """
+    from scout.hindsight import BacktestReport, render_report
+
+    st.markdown(
+        '<div class="section-title">Does this work?</div>'
+        '<div class="section-sub">A backtest scores companies using only '
+        'evidence that was public on a past date, then checks where the ones '
+        'that went on to raise actually ranked. It is the only claim here '
+        'that is measured rather than asserted.</div>',
+        unsafe_allow_html=True,
+    )
+    runs = store.backtests(limit=10)
+    if not runs:
+        st.markdown(
+            '<div class="subtle">No backtest yet. Build an outcomes file '
+            '(see <code>outcomes.example.yaml</code>) listing companies that '
+            'raised plus controls that did not, then run:<br>'
+            '<code>scout hindsight --outcomes outcomes.yaml '
+            '--cutoff 2025-02-01 --blinded</code><br><br>'
+            'The most persuasive version is your own history — the ones you '
+            'passed on, and a few you correctly skipped.</div>',
+            unsafe_allow_html=True,
+        )
+        return
+
+    labels = {
+        f"{r['cutoff'][:10]} · {r.get('n_outcomes', 0)} outcomes "
+        f"(run {r['id']})": r
+        for r in runs
+    }
+    picked = st.selectbox("Backtest run", list(labels), key="hs_pick")
+    row = labels[picked]
+    try:
+        report = BacktestReport.model_validate(row["report"])
+    except Exception:  # noqa: BLE001 — a bad row must not take the page down
+        st.warning("This backtest could not be read back.")
+        return
+    metrics = report.metrics()
+
+    if not report.trustworthy:
+        st.markdown(
+            f'<div class="stale-banner"><b>These numbers are not usable.</b> '
+            f'{len(report.unreachable)} company/companies could not be checked '
+            '— the sources were unreachable, and an unchecked company scores '
+            'zero, so this run understates the scorer. Re-run with working '
+            'network access before showing it to anyone.</div>',
+            unsafe_allow_html=True,
+        )
+
+    m1, m2, m3, m4 = st.columns(4)
+    m1.metric("Recall", f"{metrics.recall:.0%}",
+              help=f"Share of companies that raised which scored at or above "
+                   f"{report.threshold:.0f}.")
+    m2.metric("AUC", f"{metrics.auc:.2f}",
+              help="Chance a company that raised outranks one that did not. "
+                   "0.5 is a coin flip; 1.0 is perfect separation.")
+    m3.metric(
+        "Median lead",
+        f"{metrics.median_lead_days / 30.44:.1f} mo"
+        if metrics.median_lead_days else "—",
+        help="How far ahead of the announced round the cutoff sat.",
+    )
+    m4.metric("Controls", metrics.n_controls,
+              help="Companies from the same window that did not raise. "
+                   "Without these, recall proves nothing.")
+
+    st.markdown(
+        f'<div class="subtle">Cutoff <b>{report.cutoff:%d %B %Y}</b> · '
+        f'mean score <b>{metrics.mean_outcome_score}</b> for companies that '
+        f'raised vs <b>{metrics.mean_control_score}</b> for those that did '
+        f'not.</div>',
+        unsafe_allow_html=True,
+    )
+    st.write("")
+
+    for verdict in sorted(report.outcomes, key=lambda v: -v.score):
+        tint = "#1f6f3f" if verdict.surfaced else "#962828"
+        lead = (f"{verdict.lead_time_months} months before the round"
+                if verdict.lead_time_months is not None else "")
+        blinded = (
+            f" · blinded {verdict.blinded_score:.0f}"
+            if verdict.blinded_score is not None else ""
+        )
+        st.markdown(
+            f'<div class="act-row"><div class="act-what">'
+            f'<b>{_e(verdict.company)}</b> '
+            f'<span style="color:{tint};font-weight:650">'
+            f'{verdict.score:.0f}{_e(blinded)}</span>'
+            f'<span class="subtle"> · rank {verdict.rank or "—"} of '
+            f'{metrics.n_outcomes + metrics.n_controls}</span>'
+            f'<br><span class="subtle">{_e(verdict.evidence)}</span></div>'
+            f'<div class="act-when">{_e(lead)}</div></div>',
+            unsafe_allow_html=True,
+        )
+
+    with st.expander("What this does and does not show", expanded=False):
+        for limitation in report.limitations:
+            st.markdown(f'<div class="subtle">• {_e(limitation)}</div>',
+                        unsafe_allow_html=True)
+
+    st.write("")
+    st.download_button(
+        "Download the report (Markdown)",
+        render_report(report).encode("utf-8"),
+        file_name=f"hindsight_{report.cutoff:%Y%m%d}.md",
+        help="The shareable version, limitations included.",
+    )
+
+
 # ============================================================ AUTOMATION
 
 
@@ -4966,6 +5084,17 @@ def _render_schedule_editor(row: dict | None, key: str) -> None:
 
 
 if nav == "Automation":
+    st.sidebar.markdown('<div class="rail-title">Automation</div>',
+                        unsafe_allow_html=True)
+    automation_view = st.sidebar.segmented_control(
+        "View", ["Schedules", "Evidence"], default="Schedules",
+        key="automation_view", label_visibility="collapsed",
+    ) or "Schedules"
+    if automation_view == "Evidence":
+        _render_hindsight()
+
+if nav == "Automation" and st.session_state.get("automation_view",
+                                                "Schedules") == "Schedules":
     st.markdown(
         '<div class="section-title">Automation</div>'
         '<div class="section-sub">Scout sourcing on its own schedule. '
