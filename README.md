@@ -30,7 +30,7 @@ in Finder instead.
 
 ---
 
-## The six pages
+## The nine pages
 
 **Thesis** — the control room. Write your thesis in plain language and the
 strategy agent generates the whole sourcing configuration: X query bank, bio
@@ -66,7 +66,26 @@ real company site, researches founders by name, verifies funding, and cites its
 sources. Memos are editable in place and export as Markdown or styled PDF.
 AI-drafted outreach sits below each one.
 
-**Settings** — API keys, the X spend ledger, and defaults.
+**Activity** — the firm's shared memory. Every vote, comment, triage move and
+memo edit, newest first, filterable by member and kind, with an unread count in
+the nav. With partners in different timezones this is the first thing you open:
+what happened while you were asleep.
+
+**Evidence** — whether any of this actually works. A backtest scores companies
+using only evidence that was public on a past date, then checks where the ones
+that went on to raise actually ranked. Three views: **Results** (recall,
+separation, lead time, and every company plotted against the controls),
+**Signals** (which individual signals carried the information, with confidence
+intervals and a check for two signals measuring the same thing), and **Over
+time** (whether a signal is wearing out as the world catches on). Every report
+carries its own limitations — including the ones that undercut it.
+
+**Automation** — schedules, the job queue, and whether the worker is alive.
+Momentum signals decay in days, so the run that matters is the one nobody had
+to remember. Sourcing runs, digests and memos can all be scheduled or queued.
+
+**Settings** — API keys, the X spend ledger, Slack notifications, your own
+taste profile, and firm-wide defaults.
 
 ## How it works
 
@@ -152,11 +171,55 @@ verify       Hydrate the shortlist with fresh paid X data and re-score
 budget       X API spend against the cap
 demo         $0 offline end-to-end test
 ui           Launch the workspace
+
+migrate      Adopt a single-user database into the multi-member schema
+  --owner you@firm.com     attribute existing judgments, snapshot memos,
+                           import past triage as votes. Idempotent.
+
+worker       Run the background worker: schedules fire, queued jobs execute
+  --bootstrap              create the default weekday-run + morning-digest
+  --once                   drain the queue and exit (for cron)
+jobs         Queue state · --enqueue <kind> · --cancel <id>
+schedule     --list · --add <kind> --at 06:00 --weekdays --tz Europe/London
+digest       Post the Slack digest now (the scheduled one runs via the worker)
+memo <handle>  Write one memo headlessly · --depth quick|standard|deep
+
+hindsight    Backtest the scorer against companies that went on to raise
+  --outcomes outcomes.yaml   companies that raised, plus controls that did not
+  --cutoff 2025-02-01        score only evidence public on that date
+  --sweep 3                  three cutoffs six months apart, for signal decay
+  --suggest-weights          propose weights from the measured predictive power
+  --blinded                  re-score with names redacted, to measure how much
+                             the model is recognising rather than judging
 ```
 
 Use `./scout-cli <cmd>`. On macOS, uv marks `.venv` hidden and CPython then
 skips the editable-install `.pth`, which breaks the bare `scout` command;
 `./scout-cli` runs `python -m scout.cli` and is immune.
+
+## Running it for a firm
+
+Scout is one shared instance, not a copy per person: partners sign in with
+Google, vote and comment on the same startups, and a worker sources on a
+schedule so momentum signals get caught while they are still fresh.
+
+```bash
+scout migrate --owner you@firm.com      # adopt an existing single-user database
+scout worker --bootstrap --once         # create the default schedules
+scout worker                            # run them (systemd unit in deploy/)
+```
+
+[`deploy/`](deploy/) has the whole kit — systemd units, Caddy for TLS, and
+litestream for continuous backup to object storage. One small VM is enough;
+SQLite in WAL mode handles a firm's concurrency comfortably, and the database
+is a single file you can copy.
+
+To run the backtest, describe the companies you want to test against in an
+outcomes file — see [`outcomes.example.yaml`](outcomes.example.yaml). It needs
+both companies that raised **and** controls that did not: recall on its own
+proves nothing, because a scorer that rates everyone 90 recalls everything.
+The most persuasive version is a firm's own history — the ones you passed on,
+and a few you correctly skipped.
 
 ## Known limitations
 
@@ -174,6 +237,15 @@ skips the editable-install `.pth`, which breaks the bare `scout` command;
   per-read prices, never reconciled against X's actual rate card.
 - **Without `ANTHROPIC_API_KEY`** you get heuristics-only ranking: no
   stage/sector/summary enrichment, and memos fall back to a data-only skeleton.
+- **The backtest cannot prove what people will read it as proving.** Evidence
+  is rewound to the cutoff, but the thesis and weights applied are today's —
+  written by people who already know which companies raised. So it supports
+  "would today's thesis have ranked these highly given only past evidence",
+  not "would Scout have caught them at the time". Only running a frozen thesis
+  forward settles the second. Outcomes and controls are also chosen by hand,
+  and X history cannot be reconstructed at all, so every figure is a floor
+  with a selection bias on top. Each report states all of this itself; the
+  Evidence page will not show a number without them.
 
 ---
 

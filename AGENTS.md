@@ -5,6 +5,12 @@ everything lives, the data flow, the invariants you must not break, and the
 non-obvious gotchas that will otherwise waste your time. (`README.md` is the
 user-facing version; this file is denser and aimed at contributors.)
 
+**If you are short on time, read §7 (invariants), §11 (why the backtest's
+statistical guards exist) and §12 (traps in this stack).** Those three are
+where a well-intentioned change does real damage: §7 is how two members'
+edits stay intact, §11 is why several "over-cautious" statistics must not be
+simplified, and §12 is the library behaviour that has already cost hours.
+
 ---
 
 ## 1. What this is
@@ -16,11 +22,18 @@ the classifier extracts `company_name`/`company_url` and `scout/companies.py`
 resolves every founder-like lead to a startup identity (real company name, or
 a synthesized "Ada Lin's stealth startup" placeholder when unnamed) and folds
 founder + company accounts into one entry, in every view and the report. It's
-a Python 3.12 package with a **Typer CLI** and a **Streamlit UI** (Headline design
-language, funnel-ordered: Thesis · Startups (Latest run / Database) · Longlist ·
-Shortlist · Memos · Settings; session-state nav, so buttons route across
-pages), managed by **uv**. A thesis
-(`thesis.yaml`) drives all targeting; nothing is hardcoded.
+a Python 3.12 package with a **Typer CLI**, a **Streamlit UI** (Headline design
+language, funnel-ordered: Thesis · Startups (Feed / Database) · Longlist ·
+Shortlist · Memos · Activity · Evidence · Automation · Settings; session-state
+nav, so buttons route across pages) and a **background worker**, managed by
+**uv**. A thesis drives all targeting; nothing is hardcoded.
+
+**Scout is a multi-member tool.** It runs as one shared instance for a firm —
+Google sign-in, per-member votes and comments, an activity feed, a job worker
+that sources on a schedule, and per-member theses over shared data. Everything
+in §7's multiplayer invariants exists to keep two people editing the same
+database from destroying each other's work. If you are tempted to simplify
+something back to single-user, read that section first.
 
 The pipeline: **discover** candidate accounts (free) → run cheap deterministic
 **heuristics** → gate + rank → **read each candidate's company website**
@@ -60,12 +73,26 @@ time.
 ## 2. Run it / test it — always via `./scout-cli` or `uv run`
 
 ```bash
-uv run pytest -q                 # ~205 tests, ~4s, no network (incl. AppTest UI smoke tests)
+uv run pytest -q                 # ~445 tests, ~25s, no network (incl. AppTest UI smoke tests)
 ./scout-cli demo                 # $0 offline end-to-end run on sample founders — best smoke test
 ./scout-cli source --strategy github,hn   # free live discovery, no scoring
 ./scout-cli ui                   # Streamlit workspace on :8501
 ./start                          # user-facing launcher: sync → seed-if-empty → serve → open browser
+
+# multiplayer / background
+./scout-cli migrate --owner you@firm.com  # adopt a single-user DB (idempotent)
+./scout-cli worker --bootstrap --once     # create default schedules, drain, exit
+./scout-cli worker                        # the loop (systemd in deploy/)
+./scout-cli jobs                          # queue state;  --enqueue / --cancel
+./scout-cli schedule --list               # recurring work;  --add / --enable / --delete
+./scout-cli digest --window daily         # post the Slack digest now
+./scout-cli memo <handle> --depth deep    # headless memo (what the worker shells to)
+./scout-cli hindsight --outcomes outcomes.yaml --sweep 3 --suggest-weights
 ```
+
+**Signing in locally.** The UI expects an authenticated member. Set
+`SCOUT_DEV_USER=you@firm.com` to bypass Google sign-in in development; without
+it and without OAuth configured, the actor falls back to `local@scout`.
 
 **Never rely on the bare `scout` console script.** macOS + uv marks `.venv`
 hidden; CPython's `site.py` skips hidden `.pth` files, so after any dependency
@@ -91,11 +118,14 @@ about the hidden-`.pth` issue).
 
 ```
 scout/
-  cli.py            Typer app — ALL orchestration. Commands: run, source, inspect,
-                    verify, probe, demo, export, budget, strategy, ui. Pipeline
+  cli.py            Typer app — ALL orchestration. Commands: run, source,
+                    inspect, verify, reclassify, probe, demo, export, budget,
+                    strategy, thesis, publish, ui + the v9 additions: migrate,
+                    worker, jobs, schedule, digest, memo, hindsight. Pipeline
                     helpers: _run_pipeline, _enrich_accounts, _run_discovery,
                     _merge_accounts (fills Account.sources), _fetch_tweets
-                    (parallel for free adapters).
+                    (parallel for free adapters), _resolve_thesis_or_exit
+                    (explicit --thesis-id → workspace default → file).
   config.py         Pydantic Settings (.env) + Thesis/Seeds/SignalParams (yaml)
                     + save_thesis/save_seeds (shared by CLI + UI).
                     STAGE_* maps: stage → search categories / discovery sources.
@@ -140,6 +170,51 @@ scout/
   insights.py       Pure triage analytics: triage_stats/stats_prompt contrast
                     shortlisted-vs-passed leads per signal/sector/stage/fit;
                     feeds the UI insights panel and the weight-tuning agent.
+                    Plus actor_stats (the same contrast over ONE member's
+                    votes — status is shared state, a vote is a named
+                    judgment) and model_disagreements (where a partner and
+                    the model parted ways, both directions).
+  collab.py         Pure collaboration logic, no DB: STANCES (the four vote
+                    weights — `pass` is deliberately −2, mirroring
+                    strong_yes, so one holdout vs one champion reads as a
+                    split rather than a mild positive), vote_summary,
+                    contested_sort_key, disagreements (the partner-meeting
+                    agenda), parse_mentions.
+  theses.py         Which thesis a caller works against. Precedence: explicit
+                    id → the member's own pointer (users.active_thesis_id) →
+                    the workspace default (theses.is_active) → thesis.yaml.
+                    The DB holds the config; YAML is a readable export.
+                    sync_files_to_db adopts file-only installs, idempotently.
+  memos.py          Headless memo generation, lifted out of ui.py so the
+                    worker can write memos overnight. The UI keeps its live
+                    deep-research narration and shares everything below it.
+  jobs.py           Pure background-work logic: job kinds, deterministic
+                    backoff, and ScheduleSpec/next_occurrence — deliberately
+                    NOT cron ("weekdays at 07:00 Europe/London" is what
+                    anyone wants, and it survives DST because the arithmetic
+                    happens in the schedule's own zone).
+  worker.py         The job loop: reap stale leases → materialize due
+                    schedules → claim one job → run it. One job at a time on
+                    purpose (the X budget guard, the SQLite writer and the
+                    scraper rate limits each get exactly one contender).
+                    Long jobs run as SUBPROCESSES so a scraper segfault kills
+                    a child, not the scheduler.
+  notify.py         Slack: mention/assignment pings (inline) and digests
+                    (worker). Pure builders (digest_data → digest_blocks) so
+                    message shape tests without network; post_slack swallows
+                    its own failures — a Slack outage must never break a
+                    triage click.
+  hindsight.py      The backtest. Reconstructs public evidence as it stood on
+                    a past date (HN Algolia archive + GitHub starring
+                    TIMESTAMPS, never today's counts), scores it with the
+                    SAME pipeline production uses, and compares against
+                    controls. Read §11 before touching the methodology.
+  signal_eval.py    Which individual signals predict outcomes: AUC with
+                    bootstrap CIs, permutation p-values, Benjamini-Hochberg
+                    correction, minimum detectable effect, marginal
+                    contribution, correlation-based double-counting
+                    detection, and shrunk weight suggestions. All pure,
+                    seeded, heavily tested. Also read §11.
   companies.py      Pure startup identity + grouping: startup_identity resolves
                     every founder-like lead to (name, synthesized) — real
                     company, or "Ada Lin's stealth startup" when unnamed;
@@ -150,19 +225,26 @@ scout/
   publish.py        Phone digest: renders the ledger to docs/index.html (mobile
                     page for GitHub Pages in the separate public DIGEST_REPO
                     checkout); `scout publish [--push]`.
-  ui.py             Streamlit app: Thesis / Startups (Latest run + Database) /
-                    Longlist / Shortlist / Memos / Settings. Session-state nav
+  ui.py             Streamlit app, NINE pages: Thesis / Startups (Feed +
+                    Database) / Longlist / Shortlist / Memos / Activity /
+                    Evidence / Automation / Settings. Session-state nav
                     (nav_target routes across pages — the card Memo button lands
-                    on Memos and auto-generates); startup database with dossier
+                    on Memos and auto-generates); Slack deep links arrive as
+                    ?s=<handle>&p=<page> and are translated into that same
+                    mechanism once, then cleared. Startup database with dossier
                     row-select; per-card Q/F/S score breakout + Adjust-scoring
-                    popover; Memos page with in-place editing and .md/.pdf
-                    export. Headline design language. ~2600 lines. Heavy reads
-                    (latest leads, ledger, pipeline, overrides, attrs, stale
-                    handles) load through st.cache_data keyed on the DB file
-                    stamp (_db_stamp) — Streamlit reruns the whole script per
-                    click, and re-parsing every stored lead's JSON dominated
-                    latency; provenance backfills are session-gated
-                    (st.session_state["thesis_synced"]).
+                    popover; Memos page with in-place editing, version history
+                    and .md/.pdf export. Headline design language. ~5200 lines.
+                    Heavy reads (latest leads, ledger, pipeline, overrides,
+                    attrs, stale handles, votes, comment counts, users) load
+                    through st.cache_data keyed on the DB file stamp
+                    (_db_stamp) — Streamlit reruns the whole script per click,
+                    and re-parsing every stored lead's JSON dominated latency;
+                    provenance backfills are session-gated
+                    (st.session_state["thesis_synced"]). The backtest's
+                    per-signal statistics are cached separately
+                    (_signal_evaluation) because bootstrap + permutation cost
+                    ~480ms and a stored backtest is immutable.
   ingest/
     base.py         SourceAdapter ABC (X sources) + DiscoverySource ABC (github/hn).
     twscrape_src.py Primary free X adapter: query bank, bio search, list members,
@@ -194,7 +276,14 @@ tests/              pytest, no network — test_agents (incl. mocked memo
                     overwrite guard, database modes), test_web (incl. site
                     bundle), test_heuristics, test_grounding, test_sourcing_v2,
                     test_companies, test_insights, test_value_add, test_publish,
-                    test_cli_helpers.
+                    test_cli_helpers, test_collab (stance maths, the events
+                    atomicity invariant, memo version recovery, notes
+                    conflict detection, single-user migration), test_jobs
+                    (schedule arithmetic incl. DST, queue claim/lease/retry,
+                    digests), test_theses (per-member resolution),
+                    test_hindsight (point-in-time discipline, base rates,
+                    fairness), test_signal_eval (the statistics, against
+                    known answers).
 thesis.yaml         Targeting + weights + signal_params + firm value-add levers
                     + llm_prompt. User-owned.
 seeds.yaml          Query bank, bio_searches, watchlist, github_topics. User-owned.
@@ -208,7 +297,8 @@ conftest.py         sys.path shim for pytest.
 ```
 
 Future-hook stubs that are intentionally unbuilt: `linkedin_src.py`, star-velocity
-diffing in `github_src.py`, `--watch` in `cli.run`.
+diffing in `github_src.py`. (`--watch` in `cli.run` is no longer one of them —
+it was removed rather than left as a lie, and now points at `scout worker`.)
 
 ---
 
@@ -356,6 +446,26 @@ in the DB keep the model's numbers; overrides live only in their own table.
 | websites | **site cache** — extracted company-site text per normalized root URL; TTL `WEBSITE_TTL_DAYS` (7d), failures expire after 1 day |
 | xapi_usage | **budget ledger** — every paid call, cumulative spend |
 | scan, scan_history | live run status (drives the UI cockpit) + completed-scan phase timings (drives time estimates) |
+| users | firm members: id (email), name, role (admin/member), slack_member_id, active_thesis_id, last_seen_at. Role is settable ONLY via `set_user_role`, never via the generic `update_user` — folding an authorization decision into a profile update is how privilege escalation happens |
+| settings | firm-shared runtime knobs (spend cap, model, run sizes, Slack webhook, app base URL, digest threshold) that OUTRANK .env, so every session and worker run agrees. `apply_settings_overrides` overlays them onto a loaded Settings |
+| events | **the activity spine.** Append-only, written INSIDE the same transaction as the change it describes (see §7). Powers the Activity feed, unread counts, and digests |
+| read_cursors | per-member last-seen event id — how "3 new since you looked" is computed without marking your own actions unread |
+| votes | one row per (handle, actor): stance + rationale. Separate from `pipeline.status` on purpose — status is the firm's shared state, a vote is a named person's judgment, and two partners must be able to disagree without overwriting each other |
+| comments | threaded discussion per startup, soft-deleted, with @mentions that ping Slack |
+| memo_versions | **every generation and edit of a memo.** `pipeline.brief` stays the current text so all existing read paths are untouched; this accumulates the history that makes regeneration safe. Before it existed, regenerating destroyed a human's edits with no way back |
+| jobs | the work queue: kind, payload, status, attempts, lease_expires_at, worker_id. Claimed atomically under BEGIN IMMEDIATE |
+| schedules | recurring work: kind + payload + ScheduleSpec + next_run_at. Materialized into jobs by the worker, at most one per schedule per pass |
+| backtests | stored hindsight runs (report JSON + headline metrics), so "has this got better as we tuned?" is a series rather than one screenshot |
+
+**Two table-creation styles, and the rule for choosing.** Most tables are born
+from their first `upsert(..., alter=True)` — sqlite-utils infers the columns,
+which is fine for string or composite primary keys (`users`, `settings`,
+`votes`, `read_cursors`, `pipeline`, …). Tables that need an **auto-assigning
+INTEGER PRIMARY KEY**, or that are written by **two different code paths**, must
+be declared up front in `_ensure_collab_tables` / `_ensure_job_tables`
+(`events`, `comments`, `memo_versions`, `jobs`, `schedules`, `backtests`,
+`theses`) — see §12 for the two failure modes that forces. Every read path
+guards with `db[...].exists()`, so a fresh database is never a crash.
 
 DB path defaults to `~/.scout/scout.db` (not cwd) so the budget guard can't be
 defeated by running from another directory; `DB_PATH` overrides. Handle lookups
@@ -424,6 +534,38 @@ silently widen its input set to all-time).
 - **Tests never make live network calls.** Adapter tests hit pure parser
   functions on fixture JSON.
 
+### Multiplayer invariants (added when Scout became a two-partner tool)
+
+- **Every multi-statement write goes through `store.write_tx()`**, which opens
+  `BEGIN IMMEDIATE`. SQLite's default deferred transaction upgrades to a write
+  lock mid-transaction, which is exactly how two people editing the same
+  startup produce a lost update. WAL is on so readers never block the writer.
+- **An event exists if and only if the change it describes committed.**
+  `_append_event` is called INSIDE the same `write_tx` as the state write —
+  never after it, never in a second transaction. A feed that can disagree with
+  the data is worse than no feed. `test_collab.py` pins this by rolling back
+  mid-transaction and asserting neither survived.
+- **A vote is not a status.** Don't "simplify" by deriving one from the other.
+  Status is the firm's shared funnel position (whoever moved it last); a vote
+  is one member's named judgment. The Split badge, the contested sort and the
+  partner-meeting agenda all exist because those are different facts.
+- **The thesis is resolved per member** (`theses.resolve`), never from a
+  global. Reintroducing a single active thesis would mean one partner
+  exploring a new space silently re-aims the other's workspace and the
+  scheduled run. Unattended work (worker, digests) uses the workspace default
+  precisely because it belongs to the firm, not to whoever clicked Switch last.
+- **Judgment rows carry an actor.** pipeline, votes, comments, overrides,
+  attrs and memo versions all record who. `Store.actor` is bound at login (UI)
+  or from `SCOUT_ACTOR` (subprocesses the UI and worker spawn).
+- **The worker runs one job at a time.** Serial execution is what leaves the
+  budget guard, the SQLite writer and the scraper rate limits each with a
+  single contender. Adding concurrency here buys nothing and costs those
+  invariants.
+- **A lease is not a lock.** A claimed job holds a lease with a heartbeat; a
+  worker that dies has its job requeued once the lease lapses. If you add long
+  work, heartbeat it (`_Heartbeat`), or the reaper will double-execute a job
+  that was progressing fine.
+
 ---
 
 ## 8. External facts (verified; don't re-research)
@@ -475,6 +617,32 @@ silently widen its input set to all-time).
   `_MEMO_SYSTEM` prompt; depths/timeouts in `MEMO_DEPTHS`/`MEMO_TIMEOUTS_S`;
   research budgets in `MEMO_MAX_SEARCHES/_FETCHES/_CONTINUATIONS`. The UI's
   verdict chip greps `VERDICT: (PURSUE|TRACK|PASS)`; keep that line format.
+  **Write memos through `store.set_memo`, never `set_pipeline(brief=...)`** —
+  set_memo appends the immutable version that makes regeneration safe.
+- **Add a page:** append to `PAGES` in ui.py and add an `if nav == "…":` block.
+  Sub-views within a page are a sidebar `segmented_control`, NOT `st.tabs` —
+  st.tabs renders every tab server-side, which once leaked the feed's sidebar
+  controls onto the Database view. Route to it from elsewhere by setting
+  `st.session_state["nav_target"]` then `st.rerun()`.
+- **Add a job kind:** add the constant + label to `jobs.JOB_KINDS/JOB_LABELS`,
+  write `handle_x(store, settings, job) -> dict` in worker.py, register it in
+  `worker.HANDLERS`. Long or crash-prone work should shell out via `_run_cli`
+  so a child dies instead of the scheduler; short in-process work (digests)
+  should not. Raise on failure — the loop turns that into retry-or-fail.
+- **Add an event verb:** emit it from the store method inside the same
+  `write_tx` as the state change, then add its sentence to `_VERB_TEXT` in
+  ui.py (that map is presentation; the store records what happened, the UI
+  says it in English). Add it to a `verb_groups` filter if it belongs in one.
+- **Add a firm-wide setting:** `store.set_setting`/`get_setting`, and if it
+  should override a `.env` field add it to `Store.RUNTIME_SETTING_FIELDS` so
+  `apply_settings_overrides` picks it up for every session and worker run.
+- **Add a signal to the backtest:** nothing to do — `score_evidence` records
+  every signal's normalized value per company, so a new heuristic appears in
+  the per-signal table automatically. It will show near-zero coverage until
+  the reconstructed evidence can actually trigger it, which is honest.
+- **Change the backtest methodology:** read §11 first. Every guard there was
+  added because the naive version produced a confident wrong number, and the
+  tests pin the behaviour, not the implementation.
 
 ---
 
@@ -543,3 +711,145 @@ silently widen its input set to all-time).
   just-launched startups).
 - Two secrets were pasted into chat historically (Anthropic + X bearer) — the
   user plans to regenerate them; treat any in-repo key as disposable.
+
+---
+
+- **v9 — Scout became a multi-member tool** (this is the largest change since
+  v8; every item validated live):
+  - **Multiplayer foundation.** WAL + `write_tx()` (BEGIN IMMEDIATE) so two
+    people editing the same startup merge rather than clobber; Google sign-in
+    with a `SCOUT_DEV_USER` bypass for local work; `users` table with roles and
+    a domain allowlist; actor attribution on every judgment row; firm-shared
+    settings in the DB that outrank `.env`; the `deploy/` kit (systemd, Caddy,
+    litestream).
+  - **Collaboration core.** The `events` spine (append-only, transactional with
+    the change it describes), per-member votes with a Split badge and a
+    partner-meeting agenda, comment threads with @mentions that ping Slack,
+    memo versioning with restore and review/approval, an Activity feed with
+    unread counts, and per-partner taste analytics.
+  - **Background work.** A SQLite job queue with atomic claim, leases and
+    heartbeats, retry with deterministic backoff, and dedupe; DST-correct
+    schedules; Slack digests ordered by what should change a partner's next
+    hour. `scout worker`, `jobs`, `schedule`, `digest`, `memo`.
+  - **Per-member theses.** The DB is the source of truth for thesis config
+    (`theses.config_json`); YAML is a readable export. Three pointers with
+    precedence: explicit id → member → workspace default → file.
+  - **Evidence.** The hindsight backtest and per-signal evaluation, with the
+    statistical guards in §11, surfaced as a top-level Evidence page
+    (Results / Signals / Over time).
+  - `run --watch` is GONE rather than left as a stub; scheduling is the worker.
+  - **Not yet built:** CRM write-back (Affinity/Attio — deliberately deferred
+    until a firm names theirs), warm-intro paths from the `follow_edges` data
+    already collected, funnel/source-attribution analytics, and a self-host
+    (Docker Compose) bundle for firms that will not put dealflow on a
+    third-party server.
+
+---
+
+## 11. The backtest's methodological commitments (read before editing)
+
+`hindsight.py` and `signal_eval.py` contain guards that look like excessive
+caution and are not. Each exists because the naive version produces a
+confident, wrong number — the worst possible output for a tool whose entire
+purpose is evidence. Do not "simplify" any of these without reading why:
+
+- **Ties count as half a win** in AUC. Without it a scorer that rates
+  everything identically scores 1.0 instead of 0.5.
+- **Perfect separation does not use the bootstrap.** Every resample
+  reproduces the same ordering, so the percentile interval collapses to
+  `[1.00, 1.00]` — certainty from three companies a side. `auc_ci` falls
+  back to a bound derived from the number of pairwise comparisons made.
+- **A zero observed rate is not a zero rate.** `bounded_rates` applies the
+  rule of three (no events in n trials bounds the rate at ~3/n) before any
+  Bayes projection. Feeding a literal FPR of 0.0 in produced "100%
+  precision, 100× lift" from eighteen controls, which is how this guard was
+  found.
+- **Precision is restated at production base rates.** The backtest pool is
+  ~40% companies that raised; the real funnel is 1–2%. Unadjusted precision
+  overstates production by an order of magnitude, and a reader will hear
+  "three in four companies this flags will raise". Lift is the honest
+  headline because it survives the base-rate shift.
+- **p-values are corrected for multiple comparisons** (Benjamini-Hochberg).
+  Testing a dozen signals at p<0.05 yields a false positive more often than
+  not; significance uses the corrected q-value.
+- **Under-powered evaluations withhold results entirely** rather than
+  showing them with a caveat. A caveat under a number still leaves the
+  number on the slide.
+- **The minimum detectable effect is stated**, so "we found nothing" is
+  distinguishable from "we could never have found anything with this much
+  data" — which changes the action from re-tune to collect more.
+- **Decay requires disjoint confidence intervals**, not merely a lower point
+  estimate. Otherwise the tool invents a decay story from noise.
+- **Weight suggestions are a shrunk heuristic, not a fitted model.** At
+  fifteen outcomes a logistic regression yields coefficients whose intervals
+  span the plausible range; presenting those as "learned weights" would be
+  the most misleading thing this code could do.
+- **Redundancy is detected by correlation, not leave-one-out.** With other
+  noisy signals present, dropping one of two duplicates lets the noise take
+  more weight, so the duplicate looks uniquely valuable. Correlation answers
+  it outright.
+
+**Two limitations are structural and cannot be fixed in code.** Say so
+rather than engineering around them:
+
+1. **The thesis is not frozen at the cutoff.** Evidence is rewound; the
+   weights and prompt are today's, written by people who already know who
+   raised. The supportable claim is "would today's thesis have ranked these
+   highly given only past evidence", NOT "would Scout have caught them at
+   the time". Only forward measurement against a frozen thesis settles the
+   second.
+2. **Outcomes and controls are chosen by hand**, and memorable companies are
+   the ones with loud public footprints. `evidence_symmetry` detects the
+   worst version of this (comparing companies with GitHub orgs against
+   companies without), but it cannot fix selection itself.
+
+`default_limitations()` renders all of this into every report. If you add a
+capability that could mislead, add its limitation there in the same commit.
+
+---
+
+## 12. Traps in this stack (each cost real debugging time)
+
+**sqlite-utils**
+
+- `db["table"]` builds a **new `Table` object on every access**. So
+  `db["t"].insert(row)` followed by `db["t"].last_pk` reads a different
+  object and returns `None`. Chain it: `db["t"].insert(row).last_pk`.
+- `db.execute(...)` returns **raw tuples**, not dicts — `dict(row)` raises
+  "cannot convert dictionary update sequence element #0". Use
+  `table.rows_where(...)` when you need dicts; keep `db.execute` for
+  aggregates read by index.
+- A table whose rows are ordered by an **autoincrement `id` must be created
+  explicitly** (`table.create({...}, pk="id", if_not_exists=True)`).
+  sqlite-utils infers columns from the first inserted row, which never
+  carries an id, so `order_by="id desc"` then fails with "no such column:
+  id". This bit events, comments, memo_versions, jobs, schedules and
+  backtests — all of them are created up front in `_ensure_*_tables`.
+- A table written by **two different paths** needs its full shape declared
+  up front too, or whichever writes first leaves the other's columns
+  missing (`theses` is written by per-run metadata AND per-save config;
+  `is_active` was read before either had run).
+
+**Streamlit**
+
+- The whole script re-executes on **every interaction**. Anything expensive
+  must go through `st.cache_data` keyed on something that actually changes
+  (`_db_stamp()` for store reads, the immutable report JSON for backtest
+  statistics). A 480ms computation called twice per render is a full second
+  of latency per click.
+- `st.column_config.NumberColumn(format="%.0f%%")` expects the value
+  **already scaled to 0–100**, not a 0–1 fraction.
+- Widget keys must be unique across the whole app; in a 5,000-line module
+  prefix them by surface (`feeddet_`, `ev_`, `sched_`).
+- **Name collisions are silent.** `_initials(name, handle)` (startup avatar)
+  and a new `_initials(actor)` (stance badge) simply shadowed each other at
+  import. Grep before naming a helper here.
+
+**AppTest (tests/test_ui_smoke.py)**
+
+- `at.markdown` contains expander **contents but not expander labels**.
+  Assert on text inside the expander, not its title.
+- Buttons are found by `.label` or `.key`; a page that renders behind a rail
+  switch needs its `session_state` view key set before `at.run()`.
+- Setting `at.session_state["nav"]` is how you route to a page — the nav is
+  session-state driven precisely so tests (and buttons) can route.
