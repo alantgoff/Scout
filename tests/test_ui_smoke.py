@@ -650,13 +650,12 @@ def test_evidence_view_shows_backtest_results(tmp_path, monkeypatch) -> None:
                              "metrics": report.metrics().model_dump()})
 
     at = AppTest.from_file(str(UI_PATH), default_timeout=30)
-    at.session_state["nav"] = "Automation"
-    at.session_state["automation_view"] = "Evidence"
+    at.session_state["nav"] = "Evidence"
     at.run()
     assert not at.exception, at.exception[0].message if at.exception else ""
     page = _page_text(at)
     assert "Sierra Systems" in page
-    assert "Does this work?" in page
+    assert "not an assertion" in page  # the page's own framing
     # The caveats travel with the numbers rather than being demo-only.
     assert "lower bound" in page
     assert "measures the scorer, not the sourcing" in page
@@ -684,8 +683,7 @@ def test_evidence_view_flags_an_untrustworthy_backtest(tmp_path, monkeypatch) ->
                              "metrics": report.metrics().model_dump()})
 
     at = AppTest.from_file(str(UI_PATH), default_timeout=30)
-    at.session_state["nav"] = "Automation"
-    at.session_state["automation_view"] = "Evidence"
+    at.session_state["nav"] = "Evidence"
     at.run()
     assert not at.exception, at.exception[0].message if at.exception else ""
     assert "not usable" in _page_text(at)
@@ -723,12 +721,12 @@ def test_evidence_view_attributes_power_to_individual_signals(tmp_path, monkeypa
                              "metrics": report.metrics().model_dump()})
 
     at = AppTest.from_file(str(UI_PATH), default_timeout=30)
-    at.session_state["nav"] = "Automation"
-    at.session_state["automation_view"] = "Evidence"
+    at.session_state["nav"] = "Evidence"
+    at.session_state["evidence_view"] = "Signals"
     at.run()
     assert not at.exception, at.exception[0].message if at.exception else ""
     page = _page_text(at)
-    assert "Which signals predicted it" in page
+    assert "independent of the weight it currently carries" in page
     # The power statement travels with the table, so a null result cannot be
     # mistaken for a measured absence of effect.
     assert "unmeasured" in page
@@ -740,3 +738,57 @@ def test_evidence_view_attributes_power_to_individual_signals(tmp_path, monkeypa
     findings = {f.name: f for f in evaluation.findings}
     assert findings["bio_intent"].auc > 0.9
     assert findings["smart_money_follow"].auc == 0.5   # constant → no information
+
+
+def test_evidence_page_teaches_when_there_is_no_backtest(tmp_path, monkeypatch) -> None:
+    """The first thing a visitor sees. It should explain the exercise and
+    give the command, not apologise for being empty."""
+    db = tmp_path / "smoke.db"
+    monkeypatch.setenv("DB_PATH", str(db))
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "")
+    monkeypatch.setenv("SCOUT_DEV_USER", "alan@firm.com")
+    seed_store(db)
+
+    at = AppTest.from_file(str(UI_PATH), default_timeout=30)
+    at.session_state["nav"] = "Evidence"
+    at.run()
+    assert not at.exception, at.exception[0].message if at.exception else ""
+    page = _page_text(at)
+    assert "No backtest yet" in page
+    # It explains why controls are mandatory rather than just asking for them.
+    assert "recalls everything" in page
+    assert "outcomes.example.yaml" in page
+    # And hands over the exact command.
+    assert any("scout hindsight" in block.value for block in at.code)
+
+
+def test_evidence_trends_view_explains_what_a_trend_needs(tmp_path, monkeypatch) -> None:
+    """With one backtest there is no trend — say so, and say how to get one."""
+    from datetime import datetime, timezone
+
+    db = tmp_path / "smoke.db"
+    monkeypatch.setenv("DB_PATH", str(db))
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "")
+    monkeypatch.setenv("SCOUT_DEV_USER", "alan@firm.com")
+    seed_store(db)
+
+    from scout import hindsight as hs
+
+    report = hs.BacktestReport(
+        cutoff=datetime(2025, 2, 1, tzinfo=timezone.utc),
+        thesis_id="ai-infra", threshold=60.0)
+    report.verdicts = [hs.Verdict(key="a", company="Alpha", surfaced=True,
+                                  score=80.0, signal_values={"bio_intent": 0.9})]
+    Store(db).save_backtest({**report.model_dump(mode="json"),
+                             "metrics": report.metrics().model_dump()})
+
+    at = AppTest.from_file(str(UI_PATH), default_timeout=30)
+    at.session_state["nav"] = "Evidence"
+    at.session_state["evidence_view"] = "Over time"
+    at.run()
+    assert not at.exception, at.exception[0].message if at.exception else ""
+    page = _page_text(at)
+    assert "at least two backtests" in page
+    assert "--sweep 3" in page
+    # And the reason the windows are spaced, not just the instruction.
+    assert "not independent observations" in page

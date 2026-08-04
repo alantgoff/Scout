@@ -110,6 +110,8 @@ _editor_changes = editor_changes
 _attr_display = attr_display
 _DB_COMPUTED_LABELS = DB_COMPUTED_LABELS
 from scout.export import memo_pdf_bytes, pipeline_rows, write_pipeline_csv
+from scout.hindsight import default_limitations as hindsight_limitations
+from scout.hindsight import render_report as hindsight_report_markdown
 from scout.insights import actor_stats, model_disagreements, stats_prompt, triage_stats
 from scout import jobs as jobs_mod
 from scout import notify
@@ -1331,7 +1333,7 @@ def _status_of(lead: Lead) -> str:
 # slim row. Session-state-driven nav (unlike st.tabs) so any button can route to
 # a page via nav_target + rerun. The full thesis lives on the Thesis page.
 PAGES = ["Thesis", "Startups", "Longlist", "Shortlist", "Memos", "Activity",
-         "Automation", "Settings"]
+         "Evidence", "Automation", "Settings"]
 # Slack deep links (?s=<handle>&p=<page>) land here: translate them into the
 # existing nav_target/selection mechanism once, then clear the params so a
 # later rerun doesn't keep forcing the same page.
@@ -4879,62 +4881,94 @@ if nav == "Activity":
 # ============================================================ EVIDENCE
 
 
-def _render_hindsight() -> None:
-    """Backtest results: the answer to "does this actually work?".
+def _evidence_empty_state() -> None:
+    """What the page says before any backtest exists.
 
-    Read-only here. Running a backtest is minutes of network work against
-    HN and GitHub, so it belongs on the CLI (`scout hindsight`) or the
-    worker; this surfaces what those produced.
+    This is the first thing a visitor sees, so it teaches rather than
+    apologising: what the exercise is, what it needs, and the one command
+    that produces it.
     """
-    from scout.hindsight import BacktestReport, render_report
-    from scout.signal_eval import suggest_weights as suggest_signal_weights
-
     st.markdown(
-        '<div class="section-title">Does this work?</div>'
-        '<div class="section-sub">A backtest scores companies using only '
-        'evidence that was public on a past date, then checks where the ones '
-        'that went on to raise actually ranked. It is the only claim here '
-        'that is measured rather than asserted.</div>',
+        '<div class="dpane-readout">'
+        '<div class="dpane-meta">No backtest yet</div>'
+        '<div class="dpane-summary">A backtest scores companies using only '
+        'evidence that was public on a chosen past date, then checks where '
+        'the ones that went on to raise actually ranked. Until one has run, '
+        'every claim this workspace makes about its own accuracy is an '
+        'assertion.</div></div>',
         unsafe_allow_html=True,
     )
-    runs = store.backtests(limit=10)
-    if not runs:
-        st.markdown(
-            '<div class="subtle">No backtest yet. Build an outcomes file '
-            '(see <code>outcomes.example.yaml</code>) listing companies that '
-            'raised plus controls that did not, then run:<br>'
-            '<code>scout hindsight --outcomes outcomes.yaml '
-            '--cutoff 2025-02-01 --blinded</code><br><br>'
-            'The most persuasive version is your own history — the ones you '
-            'passed on, and a few you correctly skipped.</div>',
-            unsafe_allow_html=True,
-        )
-        return
+    st.write("")
+    c1, c2 = st.columns(2)
+    c1.markdown(
+        '<div class="dpane-meta">1 · Build the outcomes file</div>'
+        '<div class="dpane-p">List companies that raised after your cutoff, '
+        'plus <b>controls</b> that did not. The controls are not optional: '
+        'recall alone proves nothing, because a scorer that rates everyone '
+        '90 recalls everything. See <code>outcomes.example.yaml</code>.</div>'
+        '<div class="dpane-p">The most persuasive version is your own '
+        'history — the ones you passed on, and a few you correctly '
+        'skipped.</div>',
+        unsafe_allow_html=True,
+    )
+    c2.markdown(
+        '<div class="dpane-meta">2 · Run it</div>'
+        '<div class="dpane-p">Minutes of network work against the Hacker '
+        'News archive and GitHub starring history, so it runs on the command '
+        'line or the worker rather than in a browser tab.</div>',
+        unsafe_allow_html=True,
+    )
+    c2.code(
+        "scout hindsight \\\n"
+        "  --outcomes outcomes.yaml \\\n"
+        "  --cutoff 2025-02-01 \\\n"
+        "  --sweep 3 --suggest-weights --blinded",
+        language="bash",
+    )
+    st.markdown(
+        '<div class="subtle">A GitHub token raises the rate limit from 60 to '
+        '5,000 requests an hour, which matters at roughly ten repository '
+        'lookups per company.</div>',
+        unsafe_allow_html=True,
+    )
+
+
+def _evidence_pick_run(runs: list[dict]):
+    """Run selector + the parsed report. None when it cannot be read."""
+    from scout.hindsight import BacktestReport
 
     labels = {
         f"{r['cutoff'][:10]} · {r.get('n_outcomes', 0)} outcomes "
+        f"· AUC {r.get('auc') if r.get('auc') is not None else '—'} "
         f"(run {r['id']})": r
         for r in runs
     }
-    picked = st.selectbox("Backtest run", list(labels), key="hs_pick")
+    picked = st.selectbox("Backtest run", list(labels), key="ev_pick",
+                          label_visibility="collapsed")
     row = labels[picked]
     try:
-        report = BacktestReport.model_validate(row["report"])
+        return BacktestReport.model_validate(row["report"])
     except Exception:  # noqa: BLE001 — a bad row must not take the page down
         st.warning("This backtest could not be read back.")
+        return None
+
+
+def _evidence_trust_banner(report) -> None:
+    if report.trustworthy:
         return
+    st.markdown(
+        f'<div class="stale-banner"><b>These numbers are not usable.</b> '
+        f'{len(report.unreachable)} company/companies could not be checked '
+        '— the sources were unreachable, and an unchecked company scores '
+        'zero, so this run understates the scorer. Re-run with working '
+        'network access before showing it to anyone.</div>',
+        unsafe_allow_html=True,
+    )
+
+
+def _render_evidence_results(report) -> None:
+    """Did the composite score work? Headline metrics, then every company."""
     metrics = report.metrics()
-
-    if not report.trustworthy:
-        st.markdown(
-            f'<div class="stale-banner"><b>These numbers are not usable.</b> '
-            f'{len(report.unreachable)} company/companies could not be checked '
-            '— the sources were unreachable, and an unchecked company scores '
-            'zero, so this run understates the scorer. Re-run with working '
-            'network access before showing it to anyone.</div>',
-            unsafe_allow_html=True,
-        )
-
     m1, m2, m3, m4 = st.columns(4)
     m1.metric("Recall", f"{metrics.recall:.0%}",
               help=f"Share of companies that raised which scored at or above "
@@ -4951,24 +4985,25 @@ def _render_hindsight() -> None:
     m4.metric("Controls", metrics.n_controls,
               help="Companies from the same window that did not raise. "
                    "Without these, recall proves nothing.")
-
     st.markdown(
         f'<div class="subtle">Cutoff <b>{report.cutoff:%d %B %Y}</b> · '
         f'mean score <b>{metrics.mean_outcome_score}</b> for companies that '
         f'raised vs <b>{metrics.mean_control_score}</b> for those that did '
-        f'not.</div>',
+        f'not'
+        + (f' · reviewing the top {metrics.n_outcomes} of all '
+           f'{metrics.n_outcomes + metrics.n_controls} would have surfaced '
+           f'{metrics.precision_at_n:.0%} real outcomes'
+           if metrics.precision_at_n is not None else "")
+        + '.</div>',
         unsafe_allow_html=True,
     )
     st.write("")
-
     for verdict in sorted(report.outcomes, key=lambda v: -v.score):
         tint = "#1f6f3f" if verdict.surfaced else "#962828"
         lead = (f"{verdict.lead_time_months} months before the round"
                 if verdict.lead_time_months is not None else "")
-        blinded = (
-            f" · blinded {verdict.blinded_score:.0f}"
-            if verdict.blinded_score is not None else ""
-        )
+        blinded = (f" · blinded {verdict.blinded_score:.0f}"
+                   if verdict.blinded_score is not None else "")
         st.markdown(
             f'<div class="act-row"><div class="act-what">'
             f'<b>{_e(verdict.company)}</b> '
@@ -4981,109 +5016,189 @@ def _render_hindsight() -> None:
             unsafe_allow_html=True,
         )
 
-    # ---- Which signals carried the information. The part that makes this
-    # an instrument you tune against rather than a one-off validation.
-    st.write("")
-    st.markdown('<div class="section-title">Which signals predicted it</div>'
-                '<div class="section-sub">Measured on each signal\'s raw '
-                'value, independent of the weight it currently carries — '
-                'otherwise this would just reflect our own assumptions back '
-                'at us.</div>',
-                unsafe_allow_html=True)
+
+def _render_evidence_signals(report) -> None:
+    """Which individual signals carried the information — and what the
+    evidence says the weights should be."""
+    from scout.signal_eval import suggest_weights as suggest_signal_weights
+
+    st.markdown(
+        '<div class="section-sub">Each signal measured on its raw value, '
+        "independent of the weight it currently carries — otherwise this "
+        "would reflect our own assumptions back at us. AUC is the chance a "
+        "company that raised scored higher on this signal than one that did "
+        "not.</div>",
+        unsafe_allow_html=True,
+    )
     evaluation = report.evaluate_signals(thesis.weights)
     if evaluation.underpowered:
         st.markdown(f'<div class="stale-banner">{_e(evaluation.notes[0])}</div>',
                     unsafe_allow_html=True)
-    else:
-        st.dataframe(
-            [
-                {
-                    "signal": f.name,
-                    "AUC": f.auc,
-                    "95% CI": f"{f.ci_low:.2f}–{f.ci_high:.2f}",
-                    "coverage": f"{f.coverage:.0%}",
-                    "adds beyond rest": (
-                        "—" if f.marginal_auc is None else f"{f.marginal_auc:+.3f}"),
-                    "verdict": f.verdict,
-                }
-                for f in evaluation.ranked
-            ],
-            hide_index=True, use_container_width=True,
-        )
-        for note in evaluation.notes:
-            st.markdown(f'<div class="subtle">• {_e(note)}</div>',
-                        unsafe_allow_html=True)
+        return
+    st.dataframe(
+        [
+            {
+                "signal": f.name,
+                "AUC": f.auc,
+                "95% CI": f"{f.ci_low:.2f}–{f.ci_high:.2f}",
+                "coverage": f"{f.coverage:.0%}",
+                "adds beyond rest": ("—" if f.marginal_auc is None
+                                     else f"{f.marginal_auc:+.3f}"),
+                "verdict": f.verdict,
+            }
+            for f in evaluation.ranked
+        ],
+        hide_index=True, use_container_width=True,
+    )
+    for note in evaluation.notes:
+        st.markdown(f'<div class="subtle">• {_e(note)}</div>',
+                    unsafe_allow_html=True)
 
-        proposals = suggest_signal_weights(evaluation, thesis.weights)
-        movers = [p for p in proposals if p.delta]
-        if movers:
-            with st.expander(f"Weights the evidence suggests ({len(movers)} would move)"):
-                st.markdown(
-                    '<div class="subtle">Shrunk halfway toward the evidence '
-                    'on purpose — one backtest on one window is evidence, not '
-                    'proof. Signals that duplicate another, or point the wrong '
-                    'way, are held back for a human rather than moved '
-                    'automatically.</div>',
-                    unsafe_allow_html=True,
-                )
-                st.dataframe(
-                    [{"signal": p.name, "current": p.current,
-                      "suggested": p.suggested, "change": p.delta,
-                      "why": p.reason} for p in proposals],
-                    hide_index=True, use_container_width=True,
-                )
-                if IS_ADMIN and st.button("Apply these weights", key="hs_apply_w"):
+    if evaluation.redundant:
+        st.write("")
+        st.markdown('<div class="dpane-meta">Measuring the same thing</div>',
+                    unsafe_allow_html=True)
+        for first, second, correlation in evaluation.redundant:
+            st.markdown(
+                f'<div class="subtle">{_e(first)} and {_e(second)} correlate '
+                f'at {correlation:.2f} — each carrying its own weight makes '
+                'one signal count twice.</div>',
+                unsafe_allow_html=True,
+            )
+
+    proposals = suggest_signal_weights(evaluation, thesis.weights)
+    movers = [p for p in proposals if p.delta]
+    if proposals:
+        st.write("")
+        with st.expander(
+            f"Weights the evidence suggests ({len(movers)} would move)",
+            expanded=bool(movers),
+        ):
+            st.markdown(
+                '<div class="subtle">Shrunk halfway toward the evidence on '
+                'purpose — one backtest on one window is evidence, not proof. '
+                'Signals that duplicate another, or point the wrong way, are '
+                'held back for a human rather than moved automatically.</div>',
+                unsafe_allow_html=True,
+            )
+            st.dataframe(
+                [{"signal": p.name, "current": p.current,
+                  "suggested": p.suggested, "change": p.delta,
+                  "why": p.reason} for p in proposals],
+                hide_index=True, use_container_width=True,
+            )
+            if movers and IS_ADMIN:
+                if st.button("Apply these weights", key="ev_apply_w",
+                             type="primary"):
                     updated = dict(thesis.weights)
                     for proposal in proposals:
                         updated[proposal.name] = proposal.suggested
                     _save_thesis(thesis.model_copy(update={"weights": updated}))
-                    st.session_state["toast"] = "Weights updated from the backtest"
+                    st.session_state["toast"] = (
+                        "Weights updated from the backtest")
                     st.rerun()
+            elif movers:
+                st.markdown('<div class="subtle">An admin can apply these.</div>',
+                            unsafe_allow_html=True)
 
-    # ---- The same signals measured across several cutoffs.
-    history = [r for r in runs if r.get("thesis_id") == report.thesis_id]
-    if len(history) > 1:
-        from scout.hindsight import build_signal_trends
 
-        sweep = []
-        for row in history:
-            try:
-                sweep.append((
-                    datetime.fromisoformat(row["cutoff"]),
-                    BacktestReport.model_validate(row["report"]),
-                ))
-            except Exception:  # noqa: BLE001
-                continue
-        trends = [t for t in build_signal_trends(sweep, thesis.weights)
-                  if len(t.points) > 1]
-        if trends:
-            st.write("")
-            st.markdown(
-                '<div class="section-title">Signal power over time</div>'
-                '<div class="section-sub">A falling number is only called a '
-                'decay when the confidence intervals separate — at these '
-                'sample sizes two results can look far apart and be entirely '
-                'consistent with no change.</div>',
-                unsafe_allow_html=True)
-            st.dataframe(
-                [{"signal": t.name,
-                  **{point[0]: point[1] for point in t.points},
-                  "reading": t.summary} for t in trends],
-                hide_index=True, use_container_width=True,
-            )
+def _render_evidence_trends(runs: list[dict], report) -> None:
+    """The same signals measured at successive cutoffs — what is wearing out."""
+    from scout.hindsight import BacktestReport, build_signal_trends
 
-    with st.expander("What this does and does not show", expanded=False):
-        for limitation in report.limitations:
-            st.markdown(f'<div class="subtle">• {_e(limitation)}</div>',
-                        unsafe_allow_html=True)
-
-    st.write("")
-    st.download_button(
-        "Download the report (Markdown)",
-        render_report(report, signal_evaluation=evaluation).encode("utf-8"),
-        file_name=f"hindsight_{report.cutoff:%Y%m%d}.md",
-        help="The shareable version, limitations included.",
+    st.markdown(
+        '<div class="section-sub">The same signals measured at successive '
+        'cutoffs. A falling number is only called a decay when the '
+        'confidence intervals separate — at these sample sizes two results '
+        'can look far apart and be entirely consistent with no change.</div>',
+        unsafe_allow_html=True,
     )
+    sweep = []
+    for row in runs:
+        if row.get("thesis_id") != report.thesis_id:
+            continue
+        try:
+            sweep.append((datetime.fromisoformat(row["cutoff"]),
+                          BacktestReport.model_validate(row["report"])))
+        except Exception:  # noqa: BLE001
+            continue
+    trends = [t for t in build_signal_trends(sweep, thesis.weights)
+              if len(t.points) > 1]
+    if not trends:
+        st.markdown(
+            '<div class="subtle">A trend needs at least two backtests at '
+            'different cutoffs against the same thesis. Produce them in one '
+            'pass with <code>--sweep 3</code>, which runs three windows six '
+            'months apart — closer windows share almost all their evidence, '
+            'so their results are not independent observations.</div>',
+            unsafe_allow_html=True,
+        )
+        return
+    decayed = [t for t in trends if t.decayed]
+    if decayed:
+        st.markdown(
+            '<div class="stale-banner"><b>Losing power:</b> '
+            + ", ".join(_e(t.name) for t in decayed)
+            + ". A signal stops working once enough people use it — these "
+              "are the ones the evidence says have crossed over.</div>",
+            unsafe_allow_html=True,
+        )
+    st.dataframe(
+        [{"signal": t.name,
+          **{point[0]: point[1] for point in t.points},
+          "reading": t.summary} for t in trends],
+        hide_index=True, use_container_width=True,
+    )
+
+
+
+if nav == "Evidence":
+    st.markdown(
+        '<div class="section-title">Evidence</div>'
+        '<div class="section-sub">Whether the scoring actually works, and '
+        'which public signals are doing the work. Everything here is '
+        'measured against companies that went on to raise — it is the only '
+        'claim this workspace makes that is not an assertion.</div>',
+        unsafe_allow_html=True,
+    )
+    _evidence_runs = store.backtests(limit=20)
+    if not _evidence_runs:
+        _evidence_empty_state()
+    else:
+        st.sidebar.markdown('<div class="rail-title">Evidence</div>',
+                            unsafe_allow_html=True)
+        # Three questions, in the order they should be asked: did it work,
+        # what made it work, and is that still true.
+        _evidence_view = st.sidebar.segmented_control(
+            "View", ["Results", "Signals", "Over time"], default="Results",
+            key="evidence_view", label_visibility="collapsed",
+        ) or "Results"
+        _evidence_report = _evidence_pick_run(_evidence_runs)
+        if _evidence_report is not None:
+            _evidence_trust_banner(_evidence_report)
+            if _evidence_view == "Results":
+                _render_evidence_results(_evidence_report)
+            elif _evidence_view == "Signals":
+                _render_evidence_signals(_evidence_report)
+            else:
+                _render_evidence_trends(_evidence_runs, _evidence_report)
+
+            with st.expander("What this does and does not show"):
+                for _limitation in (_evidence_report.limitations
+                                    or hindsight_limitations()):
+                    st.markdown(f'<div class="subtle">• {_e(_limitation)}</div>',
+                                unsafe_allow_html=True)
+            st.write("")
+            st.download_button(
+                "Download the report (Markdown)",
+                hindsight_report_markdown(
+                    _evidence_report,
+                    signal_evaluation=_evidence_report.evaluate_signals(
+                        thesis.weights),
+                ).encode("utf-8"),
+                file_name=f"hindsight_{_evidence_report.cutoff:%Y%m%d}.md",
+                help="The shareable version, limitations included.",
+            )
 
 
 # ============================================================ AUTOMATION
@@ -5176,17 +5291,6 @@ def _render_schedule_editor(row: dict | None, key: str) -> None:
 
 
 if nav == "Automation":
-    st.sidebar.markdown('<div class="rail-title">Automation</div>',
-                        unsafe_allow_html=True)
-    automation_view = st.sidebar.segmented_control(
-        "View", ["Schedules", "Evidence"], default="Schedules",
-        key="automation_view", label_visibility="collapsed",
-    ) or "Schedules"
-    if automation_view == "Evidence":
-        _render_hindsight()
-
-if nav == "Automation" and st.session_state.get("automation_view",
-                                                "Schedules") == "Schedules":
     st.markdown(
         '<div class="section-title">Automation</div>'
         '<div class="section-sub">Scout sourcing on its own schedule. '
