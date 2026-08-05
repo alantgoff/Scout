@@ -159,8 +159,11 @@ STAGE_SEARCH_CATEGORIES: dict[str, set[str]] = {
 
 # Which supplementary discovery sources fit each stage.
 STAGE_DISCOVERY_SOURCES: dict[str, set[str]] = {
-    "idea": set(),
-    "stealth": {"github"},
+    # arXiv is the earliest instrument here: it surfaces researchers before
+    # there is a company to find, which is exactly the idea/stealth window
+    # and useless by the time a company is scaling.
+    "idea": {"arxiv"},
+    "stealth": {"github", "arxiv"},
     "launched": {"github", "hn"},
     "scaling": {"hn"},
 }
@@ -287,6 +290,10 @@ class Seeds(BaseModel):
     searches_hiring: list[str] = Field(default_factory=list)
     searches_launch: list[str] = Field(default_factory=list)  # just-launched language
     bio_searches: list[str] = Field(default_factory=list)  # twscrape people search
+    # arXiv categories to sweep (cs.LG, cs.AI, cs.CL, …). Targeting,
+    # so it lives here; which affiliations count as a top lab is
+    # signal mechanics and stays in arxiv_src.TOP_LABS.
+    arxiv_categories: list[str] = Field(default_factory=list)
     watchlist: list[str] = Field(default_factory=list)  # investors/operators to follow-diff
     tastemakers: list[str] = Field(default_factory=list)  # legacy alias for watchlist
     github_topics: list[str] = Field(default_factory=list)  # GitHub repo topics

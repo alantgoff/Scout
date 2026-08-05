@@ -252,6 +252,15 @@ scout/
     xapi_src.py     Paid X API v2 adapter — BUDGET-GUARDED. BudgetExceededError.
     github_src.py   GitHub discovery (repo search → owner → X-handle bridge).
     hn_src.py       Hacker News (Algolia) discovery.
+    arxiv_src.py    arXiv discovery — the EARLIEST founder signal available.
+                    A researcher publishes, keeps publishing, then the
+                    affiliation changes and a company follows months later.
+                    Free, unauthenticated, and (unlike X) a complete
+                    timestamped archive, so anything sourced here is
+                    admissible in the hindsight backtest. Pure parsers over
+                    the Atom feed; authors that cannot be bridged to an X
+                    handle become UnlinkedLeads, which is most of them and
+                    is the correct outcome rather than a guess.
     linkedin_src.py Stub (NotImplementedError) — LinkedIn automation is a dead end.
   signals/
     heuristics.py   8 deterministic signals + run_heuristics + intent_appeared.
@@ -455,6 +464,7 @@ in the DB keep the model's numbers; overrides live only in their own table.
 | memo_versions | **every generation and edit of a memo.** `pipeline.brief` stays the current text so all existing read paths are untouched; this accumulates the history that makes regeneration safe. Before it existed, regenerating destroyed a human's edits with no way back |
 | jobs | the work queue: kind, payload, status, attempts, lease_expires_at, worker_id. Claimed atomically under BEGIN IMMEDIATE |
 | schedules | recurring work: kind + payload + ScheduleSpec + next_run_at. Materialized into jobs by the worker, at most one per schedule per pass |
+| papers, paper_authors | arXiv record + **per-author affiliation snapshots**. The affiliation HISTORY is the asset: `departure_signal` infers a lab exit from self-reported bio language, while a change of institution across a publication record is the same event observed at the source and typically far earlier (`authors_who_moved`). An absent affiliation is "unknown", never "unaffiliated" — arXiv's field is optional and reading a gap as a move would manufacture departures out of metadata sparsity |
 | backtests | stored hindsight runs (report JSON + headline metrics), so "has this got better as we tuned?" is a series rather than one screenshot |
 
 **Two table-creation styles, and the rule for choosing.** Most tables are born

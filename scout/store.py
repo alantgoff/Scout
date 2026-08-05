@@ -7,6 +7,7 @@ Every fetched account/tweet is upserted here so repeat runs are incremental
 from __future__ import annotations
 
 import json
+import re
 import os
 import shutil
 from contextlib import contextmanager
@@ -34,6 +35,14 @@ from scout.models import (
 
 # Pre-~/.scout location: a scout.db relative to wherever scout was run from.
 _LEGACY_DB_PATH = Path("scout.db")
+
+
+def _author_key(name: str) -> str:
+    """Author matching key. Mirrors `arxiv_src.normalize_author` — kept here
+    rather than imported so the store never depends on an ingest adapter;
+    a test pins the two implementations together."""
+    cleaned = re.sub(r"[^\w\s-]", " ", (name or "").lower())
+    return re.sub(r"\s+", " ", cleaned).strip()
 
 
 class Store:
@@ -2357,6 +2366,138 @@ class Store:
                 row[key] = (float(row[key])
                             if row.get(key) not in (None, "") else None)
             out[row["handle"]] = row
+        return out
+
+    # ---------------------------------------------------------------- papers
+
+    def record_paper(self, paper: dict) -> None:
+        """Store one paper and snapshot each author's affiliation.
+
+        The affiliation history is the point. A single paper says where
+        someone worked; the SEQUENCE says when they left — which is the
+        same event `departure_signal` currently infers from self-reported
+        bio language, observed at the source and typically much earlier.
+
+        Snapshot-diffing follows the `bio_snapshots` / `follow_edges`
+        pattern: rows are per (author, affiliation) with a first_seen, so a
+        change appears as a new row rather than an overwrite, and the
+        history survives.
+        """
+        arxiv_id = (paper.get("arxiv_id") or "").strip()
+        if not arxiv_id:
+            return
+        now = datetime.now(timezone.utc).isoformat()
+        with self.write_tx():
+            self.db["papers"].upsert(
+                {
+                    "arxiv_id": arxiv_id,
+                    "title": paper.get("title") or "",
+                    "abstract": (paper.get("abstract") or "")[:4000],
+                    "url": paper.get("url") or "",
+                    "published": paper.get("published") or "",
+                    "categories": ",".join(paper.get("categories") or []),
+                    "comment": paper.get("comment") or "",
+                    "first_seen": now,
+                },
+                pk="arxiv_id",
+                alter=True,
+            )
+            for position, author in enumerate(paper.get("authors") or []):
+                key = _author_key(author.get("name") or "")
+                if not key:
+                    continue
+                affiliation = (author.get("affiliation") or "").strip()
+                self.db["paper_authors"].upsert(
+                    {
+                        "author_key": key,
+                        "arxiv_id": arxiv_id,
+                        "name": author.get("name") or "",
+                        "affiliation": affiliation,
+                        "position": position,
+                        "published": paper.get("published") or "",
+                        "first_seen": now,
+                    },
+                    pk=("author_key", "arxiv_id"),
+                    alter=True,
+                )
+
+    def author_affiliations(self, author_key: str) -> list[dict]:
+        """One author's affiliation record, oldest first.
+
+        Rows with an empty affiliation are dropped: arXiv's affiliation
+        field is optional and frequently absent, and a missing value means
+        "unknown", never "unaffiliated". Treating a gap as a move would
+        manufacture departures out of metadata sparsity.
+        """
+        if not self.db["paper_authors"].exists():
+            return []
+        rows = [
+            dict(r) for r in self.db["paper_authors"].rows_where(
+                "author_key = ? and affiliation != ''", [author_key],
+                order_by="published",
+            )
+        ]
+        return rows
+
+    def authors_who_moved(self, since: datetime | None = None) -> list[dict]:
+        """Authors whose affiliation changed — the departure signal, observed
+        at the source rather than inferred from a bio.
+
+        Returns {author_key, name, from, to, at}. Only the most recent move
+        per author, because what matters is where they are now and when
+        they left, not their whole career.
+        """
+        if not self.db["paper_authors"].exists():
+            return []
+        by_author: dict[str, list[dict]] = {}
+        for row in self.db["paper_authors"].rows_where(
+            "affiliation != ''", order_by="author_key, published"
+        ):
+            by_author.setdefault(row["author_key"], []).append(dict(row))
+
+        moves: list[dict] = []
+        for key, rows in by_author.items():
+            previous = None
+            latest_move = None
+            for row in rows:
+                current = row["affiliation"].strip().lower()
+                if previous is not None and current != previous:
+                    latest_move = {
+                        "author_key": key,
+                        "name": row.get("name") or "",
+                        "from": previous,
+                        "to": row["affiliation"],
+                        "at": row.get("published") or "",
+                    }
+                previous = current
+            if latest_move is None:
+                continue
+            if since is not None:
+                moved_at = latest_move["at"]
+                try:
+                    when = datetime.fromisoformat(moved_at.replace("Z", "+00:00"))
+                except ValueError:
+                    when = None
+                if when is not None and when < since:
+                    continue
+            moves.append(latest_move)
+        return sorted(moves, key=lambda m: m["at"], reverse=True)
+
+    def papers_by_author(self, author_key: str, limit: int = 10) -> list[dict]:
+        """An author's papers, newest first — memo and dossier evidence."""
+        if not self.db["paper_authors"].exists():
+            return []
+        rows = list(self.db["paper_authors"].rows_where(
+            "author_key = ?", [author_key], order_by="published desc",
+            limit=limit))
+        out = []
+        for row in rows:
+            paper = list(self.db["papers"].rows_where(
+                "arxiv_id = ?", [row["arxiv_id"]], limit=1))
+            if paper:
+                merged = dict(paper[0])
+                merged["position"] = row.get("position")
+                out.append(merged)
         return out
 
     # ------------------------------------------------------------- backtests

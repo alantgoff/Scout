@@ -63,3 +63,12 @@ github_topics:
 - domain-specific-llm
 - retrieval-augmented-generation
 - autonomous-agents
+# arXiv categories swept for on-thesis papers. These are the earliest place a
+# technical founder appears — often a year before a repo or a stealth bio.
+# Which affiliations count as a frontier lab is signal mechanics and lives in
+# scout/ingest/arxiv_src.py (TOP_LABS), not here.
+arxiv_categories:
+  - cs.LG
+  - cs.AI
+  - cs.CL
+  - cs.MA

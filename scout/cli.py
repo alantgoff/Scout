@@ -349,6 +349,10 @@ def _discovery_sources(
         from scout.ingest.hn_src import HackerNewsSource
 
         sources.append(HackerNewsSource(settings, store))
+    if "arxiv" in names:
+        from scout.ingest.arxiv_src import ArxivSource
+
+        sources.append(ArxivSource(settings, store))
     return sources
 
 
@@ -1729,7 +1733,7 @@ def budget() -> None:
 
 
 _X_STRATEGIES = {"lists", "searches", "bio", "graph"}
-_DISCOVERY_STRATEGIES = {"github", "hn"}
+_DISCOVERY_STRATEGIES = {"github", "hn", "arxiv"}
 
 
 @app.command("source")
