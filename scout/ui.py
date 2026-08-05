@@ -225,8 +225,41 @@ def _inject_css() -> None:
           --bg:#f4ebe0; --surface:#fbf5ec; --ink:#20180f; --ink-2:#4a4034;
           /* warm taupe secondary label; ≥4.5:1 on --bg, passes AA for text */
           --muted:#6b6052; --hair:rgba(32,24,15,0.14); --hair-strong:rgba(32,24,15,0.26);
+          --ink-hover:#3a2e1f;  /* lifted --ink, for pressed/hovered dark fills */
           --accent:#20180f; --butter:#f2dc6c; --accent-soft:rgba(226,196,90,0.28);
-          --good:#2e6b34; --track:rgba(32,24,15,0.08);
+          --track:rgba(32,24,15,0.08);
+          /* ---- Semantic status colours. ONE value per meaning, each with a
+             soft fill and a line variant, all warm to sit on the paper
+             palette. Every status surface — chips, stance badges, banners,
+             dots, job rows, chart marks — draws from these and nothing else.
+             Do not introduce a second green for "good": there were briefly
+             two greens and two reds meaning the same things, in cooler hues
+             that fought the background. */
+          --good:#2e6b34; --good-soft:rgba(46,107,52,0.14);
+          --good-line:rgba(46,107,52,0.34); --good-wash:rgba(46,107,52,0.07);
+          --bad:#7c2d20;  --bad-soft:rgba(178,58,44,0.12);
+          --bad-line:rgba(178,58,44,0.32);
+          --warn:#8a6d1f; --warn-soft:rgba(217,184,63,0.14);
+          --warn-line:rgba(217,184,63,0.45);
+          --split:#8a4d1f; --split-soft:rgba(200,110,40,0.14);
+          --split-line:rgba(200,110,40,0.34);
+          /* Deeper butter, for filled meters (score bars, run progress) —
+             --butter is the highlight, this is the ink-on-paper version that
+             holds up as a thin 4px bar. */
+          --fill:#d9b83f;
+          /* Radius scale. This was already implicit and consistent — meters
+             at 3, controls at 10, cards at 12, readouts and popovers at 14,
+             large containers at 16, pills. Naming it is what keeps a new
+             surface picking a ROLE instead of inventing a seventh number. */
+          /* Vertical rhythm. The nudges scattered through the page markup
+             clustered on 4/6/8/10 — this names that scale so a new surface
+             picks a step instead of another bespoke pixel value. */
+          --s-1:4px; --s-2:6px; --s-3:8px; --s-4:10px;
+          --r-ctl:10px; --r-card:12px; --r-panel:14px; --r-lg:16px;
+          /* Also the cap for meters: on a 4-6px bar it clamps to height/2,
+             so every track and fill is a capsule without hand-computing
+             2px / 2.5px / 3px per bar height. */
+          --r-pill:980px;
           --shadow:0 1px 2px rgba(32,24,15,0.04), 0 8px 24px rgba(32,24,15,0.05);
           --serif:"Fraunces","Iowan Old Style",Georgia,"Times New Roman",serif;
           --sans:"Figtree",-apple-system,BlinkMacSystemFont,"Helvetica Neue",
@@ -259,7 +292,7 @@ def _inject_css() -> None:
         [data-testid="stExpandSidebarButton"],
         [data-testid="stSidebarCollapseButton"] button {
           background:var(--surface) !important; border:1px solid var(--hair) !important;
-          border-radius:9px !important; color:var(--ink) !important;
+          border-radius:var(--r-ctl) !important; color:var(--ink) !important;
           box-shadow:0 1px 3px rgba(0,0,0,.07); }
         [data-testid="stExpandSidebarButton"]:hover,
         [data-testid="stSidebarCollapseButton"] button:hover {
@@ -351,12 +384,12 @@ def _inject_css() -> None:
           overflow:hidden; text-overflow:ellipsis; }
         .frow-tags { display:flex; gap:5px; margin-top:5px; }
         .frow-tag { font-size:9px; letter-spacing:.06em; text-transform:uppercase;
-          font-weight:600; padding:2px 7px; border-radius:999px; border:1px solid var(--hair);
+          font-weight:600; padding:2px 7px; border-radius:var(--r-pill); border:1px solid var(--hair);
           color:var(--ink-2); white-space:nowrap; }
         .frow-fit .frow-fitlab { display:flex; justify-content:space-between;
           font-size:9.5px; color:var(--muted); letter-spacing:.04em; }
         .frow-fit .frow-fitlab b { font-family:var(--serif); font-size:12px; color:var(--ink); }
-        .frow-bar { height:5px; background:var(--track); border-radius:3px; overflow:hidden;
+        .frow-bar { height:5px; background:var(--track); border-radius:var(--r-pill); overflow:hidden;
           margin-top:3px; }
         .frow-bar > i { display:block; height:100%; background:var(--accent); }
         .frow-bar.gold > i { background:var(--gold); }
@@ -377,10 +410,16 @@ def _inject_css() -> None:
           color:var(--muted); font-weight:600; margin-top:9px; }
         /* Stale = scored under an older tuning of the active thesis. Warned,
            not hidden: the number is still the best available, just older. */
-        .stale-flag { color:#8a6d1f; font-weight:600; }
-        .stale-banner { border:1px solid #d9b83f; background:rgba(217,184,63,.12);
-          border-radius:12px; padding:11px 14px; margin:4px 0 12px;
+        .stale-flag { color:var(--warn); font-weight:600; }
+        /* The shared callout. It was named for ONE of its seven uses
+           (thesis staleness); the rest are a stopped worker, an
+           under-powered sample, a circular backtest. Severity is a
+           modifier, so a disqualifying "do not trust these numbers" no
+           longer looks identical to an advisory. */
+        .notice { border:1px solid var(--warn-line); background:var(--warn-soft);
+          border-radius:var(--r-card); padding:11px 14px; margin:4px 0 12px;
           font-size:13px; color:var(--ink-2); }
+        .notice.bad { border-color:var(--bad-line); background:var(--bad-soft); }
         /* ---- collaboration: stances, splits, activity.
            A stance badge is one partner's initials, coloured by conviction;
            a row of them answers "who thinks what" without opening anything. */
@@ -389,50 +428,61 @@ def _inject_css() -> None:
         .stance-badge { display:inline-flex; align-items:center; justify-content:center;
           width:22px; height:22px; border-radius:50%; font-size:10.5px;
           font-weight:700; letter-spacing:.02em; border:1px solid transparent; }
-        .stance-badge.strong_yes { background:#1f6f3f; color:#fff; }
-        .stance-badge.yes { background:rgba(31,111,63,.16); color:#1f6f3f;
-          border-color:rgba(31,111,63,.35); }
+        .stance-badge.strong_yes { background:var(--good); color:var(--surface); }
+        .stance-badge.yes { background:var(--good-soft); color:var(--good);
+          border-color:var(--good-line); }
         .stance-badge.unsure { background:var(--surface); color:var(--muted);
           border-color:var(--hair); }
-        .stance-badge.pass { background:rgba(150,40,40,.12); color:#962828;
-          border-color:rgba(150,40,40,.32); }
+        .stance-badge.pass { background:var(--bad-soft); color:var(--bad);
+          border-color:var(--bad-line); }
         /* A split is the most interesting state a startup can be in here —
            it earns its own mark, not a muted one. */
         .stance-split { font-size:10.5px; font-weight:700; letter-spacing:.06em;
-          text-transform:uppercase; color:#8a4d1f; background:rgba(200,110,40,.14);
-          border:1px solid rgba(200,110,40,.34); border-radius:980px;
-          padding:2px 8px; }
+          text-transform:uppercase; color:var(--split);
+          background:var(--split-soft); border:1px solid var(--split-line);
+          border-radius:var(--r-pill); padding:2px 8px; }
         .act-row { display:flex; gap:10px; padding:9px 0; border-bottom:1px solid var(--hair);
           font-size:13px; align-items:baseline; }
         .act-who { font-weight:650; color:var(--ink); min-width:78px; }
         .act-what { color:var(--ink-2); flex:1; }
         .act-when { color:var(--muted); font-size:11.5px; white-space:nowrap; }
-        .act-unread { background:rgba(31,111,63,.07); margin:0 -10px; padding:9px 10px;
-          border-radius:8px; }
-        .cmt { border:1px solid var(--hair); border-radius:12px; padding:10px 12px;
+        .act-unread { background:var(--good-wash); margin:0 -10px; padding:9px 10px;
+          border-radius:var(--r-ctl); }
+        .cmt { border:1px solid var(--hair); border-radius:var(--r-card); padding:10px 12px;
           margin:7px 0; background:var(--bg); }
         .cmt-head { font-size:11.5px; color:var(--muted); margin-bottom:4px; }
         .cmt-body { font-size:13.5px; line-height:1.5; color:var(--ink-2);
           white-space:pre-wrap; }
         .presence-dot { display:inline-block; width:7px; height:7px; border-radius:50%;
-          background:#1f6f3f; margin-right:5px; vertical-align:middle; }
+          background:var(--good); margin-right:5px; vertical-align:middle; }
+        /* Status tones. Application code names the MEANING ("good", "bad"),
+           never a colour — so a palette change is a CSS edit, not a Python
+           one, and no surface can drift to its own private hex. */
+        /* A secondary line set off from what precedes it — nine sites had
+           been writing `style="margin-top:10px"` by hand. */
+        .subtle.lead-in { margin-top:var(--s-4); }
+        .tone { font-weight:650; }
+        .tone-good { color:var(--good); }
+        .tone-bad { color:var(--bad); }
+        .tone-warn { color:var(--warn); }
+        .tone-muted { color:var(--muted); }
         /* ---- backtest separation strip. Every scored company as a dot on
            the 0–100 axis: what AUC is a number for. The overlap between the
            rows is the honest part, and a chart shows it where a metric
            cannot. */
         .sep { width:100%; height:78px; display:block; overflow:visible; }
-        .sep-win { fill:#1f6f3f; fill-opacity:.75; }
-        .sep-lose { fill:#962828; fill-opacity:.5; }
+        .sep-win { fill:var(--good); fill-opacity:.75; }
+        .sep-lose { fill:var(--bad); fill-opacity:.5; }
         .sep-th { stroke:var(--muted); stroke-width:.35; stroke-dasharray:1.5 1.5; }
-        .sep-wrap { border:1px solid var(--hair); border-radius:14px;
+        .sep-wrap { border:1px solid var(--hair); border-radius:var(--r-panel);
           background:var(--bg); padding:12px 14px 6px; margin:6px 0 4px; }
         .sep-lab { display:flex; justify-content:space-between; font-size:11px;
           letter-spacing:.04em; text-transform:uppercase; color:var(--muted);
           font-weight:600; }
         .sep-key { font-size:12px; color:var(--ink-2); margin-top:2px; }
-        .sep-key b.win { color:#1f6f3f; }
-        .sep-key b.lose { color:#962828; }
-        .dpane-readout { margin:16px 0 4px; border:1px solid var(--hair); border-radius:14px;
+        .sep-key b.win { color:var(--good); }
+        .sep-key b.lose { color:var(--bad); }
+        .dpane-readout { margin:16px 0 4px; border:1px solid var(--hair); border-radius:var(--r-panel);
           background:var(--bg); padding:16px; }
         .dpane-top { display:flex; align-items:baseline; justify-content:space-between; }
         .dpane-big { font-family:var(--serif); font-size:38px; font-weight:600; line-height:1;
@@ -443,7 +493,7 @@ def _inject_css() -> None:
         .dpane-dim { display:grid; grid-template-columns:64px 1fr 26px; gap:10px; align-items:center; }
         .dpane-dlab { font-size:11px; letter-spacing:.06em; text-transform:uppercase;
           color:var(--muted); font-weight:600; }
-        .dpane-bar { height:6px; background:var(--track); border-radius:3px; overflow:hidden; }
+        .dpane-bar { height:6px; background:var(--track); border-radius:var(--r-pill); overflow:hidden; }
         .dpane-bar > i { display:block; height:100%; background:var(--accent); }
         .dpane-dval { font-family:var(--serif); font-size:14px; text-align:right; font-weight:600;
           color:var(--ink); }
@@ -474,9 +524,9 @@ def _inject_css() -> None:
         /* Tabs → centered pill control (Streamlit ≥1.59 react-aria markup);
            uppercase tracked labels, selected pill inverts to ink */
         .stTabs [role="tablist"] { gap:2px; background:var(--track); padding:3px;
-          border-radius:980px; width:fit-content; margin:1.4rem auto 1.6rem;
+          border-radius:var(--r-pill); width:fit-content; margin:1.4rem auto 1.6rem;
           border-bottom:none !important; }
-        .stTabs [data-testid="stTab"] { height:34px; border-radius:980px; padding:0 20px;
+        .stTabs [data-testid="stTab"] { height:34px; border-radius:var(--r-pill); padding:0 20px;
           background:transparent; border:none; display:flex; align-items:center; }
         .stTabs [data-testid="stTab"] p { font-size:0.74rem !important; font-weight:600;
           text-transform:uppercase; letter-spacing:0.08em; color:var(--ink-2); }
@@ -489,7 +539,7 @@ def _inject_css() -> None:
         /* Buttons — thin-outline pills with uppercase tracked labels ("MORE") */
         .stButton>button, .stDownloadButton>button, .stFormSubmitButton>button,
         [data-testid="stPopoverButton"] {
-          border-radius:980px; font-weight:600; font-size:0.74rem;
+          border-radius:var(--r-pill); font-weight:600; font-size:0.74rem;
           text-transform:uppercase; letter-spacing:0.08em;
           border:1px solid var(--hair-strong); background:transparent; color:var(--ink);
           padding:0.38rem 1.05rem; transition:all .12s ease; box-shadow:none; }
@@ -499,8 +549,8 @@ def _inject_css() -> None:
         [data-testid="stPopoverButton"] p { font-size:0.74rem !important; }
         .stButton>button[kind="primary"], .stFormSubmitButton>button[kind="primary"] {
           background:var(--ink); border-color:var(--ink); color:var(--bg); }
-        .stButton>button[kind="primary"]:hover { background:#3a2e1f;
-          border-color:#3a2e1f; color:var(--bg); }
+        .stButton>button[kind="primary"]:hover { background:var(--ink-hover);
+          border-color:var(--ink-hover); color:var(--bg); }
         .stButton>button:active { transform:scale(0.97); }
         .stButton>button:disabled { opacity:0.4; cursor:not-allowed; }
         .stButton>button:disabled:hover { border-color:var(--hair-strong);
@@ -518,9 +568,9 @@ def _inject_css() -> None:
         /* Segmented controls → the same pill group as the tabs. The track is
            the inner radiogroup (the outer testid node also wraps the label). */
         [data-testid="stButtonGroup"] [role="radiogroup"] { gap:2px;
-          background:var(--track); padding:3px; border-radius:980px; width:fit-content; }
+          background:var(--track); padding:3px; border-radius:var(--r-pill); width:fit-content; }
         [data-testid="stButtonGroup"] button { border:none !important;
-          border-radius:980px !important; min-height:30px;
+          border-radius:var(--r-pill) !important; min-height:30px;
           padding:0.18rem 0.9rem !important; background:transparent !important;
           box-shadow:none !important; }
         [data-testid="stButtonGroup"] button p { font-size:0.72rem !important;
@@ -534,7 +584,7 @@ def _inject_css() -> None:
 
         /* Cards & tiles — cream paper panels with hairline rules */
         [data-testid="stVerticalBlockBorderWrapper"] {
-          background:var(--surface); border:1px solid var(--hair); border-radius:16px;
+          background:var(--surface); border:1px solid var(--hair); border-radius:var(--r-lg);
           box-shadow:var(--shadow);
           transition:box-shadow .18s ease, border-color .18s ease; }
         [data-testid="stVerticalBlockBorderWrapper"]:hover {
@@ -542,7 +592,7 @@ def _inject_css() -> None:
           box-shadow:0 2px 4px rgba(32,24,15,0.05), 0 14px 36px rgba(32,24,15,0.08); }
         [data-testid="stVerticalBlockBorderWrapper"] > div > [data-testid="stVerticalBlock"] {
           padding:0.65rem 0.75rem; }
-        .tile { background:var(--surface); border:1px solid var(--hair); border-radius:16px;
+        .tile { background:var(--surface); border:1px solid var(--hair); border-radius:var(--r-lg);
           padding:16px 18px; box-shadow:var(--shadow); }
         .tile .label { color:var(--muted); font-size:0.68rem; text-transform:uppercase;
           letter-spacing:0.1em; font-weight:600; }
@@ -569,7 +619,7 @@ def _inject_css() -> None:
         /* Chips — uppercase tracked micro-labels in tonal pills
            ("INFRASTRUCTURE" / "FINTECH" on the Headline portfolio page) */
         .chiprow { display:flex; flex-wrap:wrap; gap:6px; margin-top:9px; }
-        .chip { display:inline-block; padding:3.5px 11px; border-radius:980px;
+        .chip { display:inline-block; padding:3.5px 11px; border-radius:var(--r-pill);
           font-size:0.66rem; font-weight:600; text-transform:uppercase;
           letter-spacing:0.07em; background:var(--track); color:var(--ink-2);
           white-space:nowrap; }
@@ -582,10 +632,10 @@ def _inject_css() -> None:
           letter-spacing:-0.01em; color:var(--ink); line-height:1; }
         .scorecap { color:var(--muted); font-size:0.66rem; text-transform:uppercase;
           letter-spacing:0.1em; font-weight:600; margin-top:2px; }
-        .scoretrack { width:92px; height:4px; border-radius:2px; background:var(--track);
+        .scoretrack { width:92px; height:4px; border-radius:var(--r-pill); background:var(--track);
           margin:8px 0 10px auto; }
         /* deep mustard — the butter accent, dark enough to read on the track */
-        .scorefill { height:4px; border-radius:2px; background:#d9b83f; }
+        .scorefill { height:4px; border-radius:var(--r-pill); background:var(--fill); }
         /* Score breakdown — labeled rows (Qual/Fit/Sig) instead of a cryptic
            "Q·F·S" glyph. Right-aligned to sit under the score number. */
         .scoredims { margin-top:7px; display:flex; flex-direction:column; gap:2px;
@@ -600,8 +650,8 @@ def _inject_css() -> None:
         /* Signal bars (single hue — magnitude) */
         .sigrow { display:flex; align-items:center; gap:10px; margin:5px 0; }
         .signame { flex:0 0 190px; font-size:0.82rem; color:var(--ink-2); }
-        .sigtrack { flex:1; height:5px; border-radius:2.5px; background:var(--track); }
-        .sigfill { height:5px; border-radius:2.5px; background:var(--ink); }
+        .sigtrack { flex:1; height:5px; border-radius:var(--r-pill); background:var(--track); }
+        .sigfill { height:5px; border-radius:var(--r-pill); background:var(--ink); }
         .sigpts { flex:0 0 46px; text-align:right; font-size:0.82rem; color:var(--ink);
           font-variant-numeric:tabular-nums; font-weight:550; }
         .sigdetail { flex:0 0 34%; font-size:0.76rem; color:var(--muted);
@@ -620,14 +670,14 @@ def _inject_css() -> None:
         [data-testid="stExpander"] summary:hover { color:var(--ink);
           text-decoration:underline; text-underline-offset:3px; }
 
-        .nudge { background:var(--accent-soft); border-radius:12px; padding:10px 16px;
+        .nudge { background:var(--accent-soft); border-radius:var(--r-card); padding:10px 16px;
           font-size:0.88rem; color:var(--ink-2); margin:0 0 16px; }
         .nudge b { color:var(--ink); }
 
         /* Memo document — editorial reading layout inside the memo container */
         .memo-title { font-family:var(--serif); font-size:1.5rem; font-weight:600;
           letter-spacing:-0.01em; color:var(--ink); }
-        .chip.pass { background:rgba(178,58,44,0.12); color:#7c2d20; }
+        .chip.pass { background:var(--bad-soft); color:var(--bad); }
         .chip.big { font-size:0.72rem; padding:4.5px 13px; vertical-align:3px;
           margin-left:10px; }
         .st-key-memodoc h2 { font-family:var(--serif); font-size:1.28rem;
@@ -646,18 +696,18 @@ def _inject_css() -> None:
         .st-key-memodoc td { font-size:0.88rem; color:var(--ink-2);
           padding:7px 12px 7px 0; border-bottom:1px solid var(--hair);
           vertical-align:top; }
-        .st-key-memotldr { background:var(--accent-soft); border-radius:12px;
+        .st-key-memotldr { background:var(--accent-soft); border-radius:var(--r-card);
           padding:4px 16px 6px; margin:6px 0 4px; }
         .st-key-memotldr p, .st-key-memotldr li { font-size:0.92rem;
           color:var(--ink-2); }
         .st-key-memotldr [data-testid="stMarkdownContainer"] { padding:0; }
 
         /* Live scan banner (auto-refreshing fragment) — butter-yellow wash */
-        .scanbar { background:var(--accent-soft); border-radius:12px; padding:10px 16px;
+        .scanbar { background:var(--accent-soft); border-radius:var(--r-card); padding:10px 16px;
           font-size:0.88rem; color:var(--ink-2); margin:14px 0 0;
           display:flex; align-items:center; gap:9px; }
         .scanbar b { color:var(--ink); }
-        .scanbar.failed { background:rgba(178,58,44,0.10); }
+        .scanbar.failed { background:var(--bad-soft); }
         .scandot { width:8px; height:8px; border-radius:50%; background:var(--ink);
           flex:0 0 8px; animation:scanpulse 1.6s ease-in-out infinite; }
         @keyframes scanpulse { 0%,100% { opacity:1; transform:scale(1); }
@@ -665,7 +715,7 @@ def _inject_css() -> None:
 
         /* Run progress panel — the pipeline stepper (Thesis page) */
         .runpanel { background:var(--surface); border:1px solid var(--hair);
-          border-radius:16px; padding:16px 20px 14px; box-shadow:var(--shadow);
+          border-radius:var(--r-lg); padding:16px 20px 14px; box-shadow:var(--shadow);
           margin:14px 0 4px; }
         .rp-head { display:flex; align-items:baseline; gap:12px; flex-wrap:wrap; }
         .rp-title { font-family:var(--serif); font-size:1.12rem; font-weight:600;
@@ -686,9 +736,9 @@ def _inject_css() -> None:
         .rp-name { flex:0 0 190px; font-size:0.88rem; color:var(--ink);
           font-weight:550; }
         .rp-name.pending { color:var(--muted); font-weight:400; }
-        .rp-track { flex:1; height:5px; border-radius:2.5px; background:var(--track);
+        .rp-track { flex:1; height:5px; border-radius:var(--r-pill); background:var(--track);
           overflow:hidden; position:relative; }
-        .rp-fill { height:5px; border-radius:2.5px; background:#d9b83f; }
+        .rp-fill { height:5px; border-radius:var(--r-pill); background:var(--fill); }
         .rp-fill.done { background:var(--good); opacity:0.45; }
         .rp-fill.indet { width:32%; position:absolute; left:0; top:0;
           animation:rp-slide 1.9s ease-in-out infinite; }
@@ -707,7 +757,7 @@ def _inject_css() -> None:
         /* Inputs — hairline borders, butter focus ring, one radius everywhere */
         .stTextInput [data-baseweb="input"], .stNumberInput [data-baseweb="input"],
         .stTextArea [data-baseweb="textarea"] {
-          border-radius:10px !important; border-color:var(--hair-strong) !important;
+          border-radius:var(--r-ctl) !important; border-color:var(--hair-strong) !important;
           background:var(--surface) !important; transition:border-color .12s ease,
           box-shadow .12s ease; }
         .stTextInput [data-baseweb="input"]:focus-within,
@@ -717,7 +767,7 @@ def _inject_css() -> None:
           box-shadow:0 0 0 3px var(--accent-soft); }
         .stSelectbox [data-baseweb="select"] > div,
         .stMultiSelect [data-baseweb="select"] > div {
-          border-radius:10px !important; border-color:var(--hair-strong) !important;
+          border-radius:var(--r-ctl) !important; border-color:var(--hair-strong) !important;
           background:var(--surface) !important; }
         .stSelectbox [data-baseweb="select"]:focus-within > div,
         .stMultiSelect [data-baseweb="select"]:focus-within > div {
@@ -726,12 +776,12 @@ def _inject_css() -> None:
 
         /* Data tables — framed like cards */
         [data-testid="stDataFrame"], [data-testid="stDataFrameResizable"] {
-          border-radius:12px; overflow:hidden; }
-        [data-testid="stDataFrame"] > div { border-radius:12px; }
+          border-radius:var(--r-card); overflow:hidden; }
+        [data-testid="stDataFrame"] > div { border-radius:var(--r-card); }
 
         /* Alerts & toasts — same rounding as everything else */
-        [data-testid="stAlert"] { border-radius:12px; }
-        [data-testid="stPopoverBody"] { border-radius:14px; }
+        [data-testid="stAlert"] { border-radius:var(--r-card); }
+        [data-testid="stPopoverBody"] { border-radius:var(--r-panel); }
         </style>
         """,
         unsafe_allow_html=True,
@@ -1733,7 +1783,7 @@ def _score_detail_html(lead: Lead, comps: dict) -> str:
         vlabel = f" · v{_version_number(thesis_id, version)}" if version else ""
         stale = _is_stale(lead)
         parts.append(
-            f'<div class="subtle" style="margin-top:10px">Scored against '
+            f'<div class="subtle lead-in">Scored against '
             f'<b>{_e(label)}{_e(vlabel)}</b>'
             + (
                 ' · <span class="stale-flag">thesis has changed since</span>'
@@ -1749,7 +1799,7 @@ def _score_detail_html(lead: Lead, comps: dict) -> str:
     if verdict is not None and comps["scorecard"] is not None:
         result, sections = comps["scorecard"]
         parts.append(
-            f'<div class="subtle" style="margin-top:10px">Scorecard '
+            f'<div class="subtle lead-in">Scorecard '
             f'<b>Q {result.total:.0f} · {_e(BAND_LABELS[result.band])}</b> · '
             f'{params.score_weight_quality:.0%} of the blend — '
             f'{_e(result.rubric_label)} rubric, {result.n_present_sections} of '
@@ -1803,7 +1853,7 @@ def _score_detail_html(lead: Lead, comps: dict) -> str:
         # ---- Thesis fit (F): one number, with Claude's reasoning.
         if verdict.thesis_fit is not None:
             parts.append(
-                f'<div class="subtle" style="margin-top:10px">Thesis fit '
+                f'<div class="subtle lead-in">Thesis fit '
                 f'<b>F {100 * min(max(verdict.thesis_fit, 0.0), 1.0):.0f}</b> · '
                 f'{params.score_weight_fit:.0%} of the blend — '
                 f'{_e(verdict.fit_reason or "no reasoning recorded")}</div>'
@@ -1816,7 +1866,7 @@ def _score_detail_html(lead: Lead, comps: dict) -> str:
             lens = CUSTOMER_TYPE_LABEL.get(verdict.customer_type or "", "")
             known_n = sum(1 for k, _w in weighted_dims if k in verdict.quality)
             parts.append(
-                f'<div class="subtle" style="margin-top:10px">Company quality '
+                f'<div class="subtle lead-in">Company quality '
                 f'<b>Q {q:.0f}</b> · {params.score_weight_quality:.0%} of the blend — '
                 f'legacy flat rubric, {known_n} of {len(weighted_dims)} dimensions '
                 'evidence-backed'
@@ -1852,7 +1902,7 @@ def _score_detail_html(lead: Lead, comps: dict) -> str:
             parts.append(f'<div style="margin-top:4px">{"".join(q_rows)}</div>')
         else:
             parts.append(
-                '<div class="subtle" style="margin-top:10px">No scorecard on '
+                '<div class="subtle lead-in">No scorecard on '
                 'this verdict (older cache) — <b>Reclassify latest run</b> on the '
                 'Thesis page scores it on the readiness scorecard, or set the '
                 'section scores yourself in <b>Adjust scoring</b>.</div>'
@@ -1860,7 +1910,7 @@ def _score_detail_html(lead: Lead, comps: dict) -> str:
         # ---- Thesis fit (F): one number, with Claude's reasoning.
         if verdict.thesis_fit is not None:
             parts.append(
-                f'<div class="subtle" style="margin-top:10px">Thesis fit '
+                f'<div class="subtle lead-in">Thesis fit '
                 f'<b>F {100 * min(max(verdict.thesis_fit, 0.0), 1.0):.0f}</b> · '
                 f'{params.score_weight_fit:.0%} of the blend — '
                 f'{_e(verdict.fit_reason or "no reasoning recorded")}</div>'
@@ -1873,7 +1923,7 @@ def _score_detail_html(lead: Lead, comps: dict) -> str:
                   f'of {len(thesis.weights)} tracked'
                   if hits else "no signals fired")
         parts.append(
-            f'<div class="subtle" style="margin-top:10px">X signals '
+            f'<div class="subtle lead-in">X signals '
             f'<b>S {comps["signals"]:.0f}</b> · {params.score_weight_signals:.0%} '
             f'of the blend — {s_note}. Hover a signal for what it means; '
             'points = value × weight.</div>'
@@ -1893,7 +1943,7 @@ def _score_detail_html(lead: Lead, comps: dict) -> str:
         firm = thesis.firm_name or "Firm"
         reason = f" — {verdict.value_add_reason}" if verdict.value_add_reason else ""
         parts.append(
-            f'<div class="subtle" style="margin-top:10px">{_e(firm)} lift '
+            f'<div class="subtle lead-in">{_e(firm)} lift '
             f'{verdict.value_add_fit:.0%}{_e(reason)}</div>'
         )
         lever_labels = {x.key: x.label for x in thesis.firm_value_add}
@@ -1918,7 +1968,7 @@ def _score_math_html(lead: Lead, manual_score: float | None = None) -> str:
         f'<div class="math-step">{_e(desc)} → <b>{running:.1f}</b></div>'
         for desc, running in score_breakdown(lead, thesis, manual_score=manual_score)
     )
-    return ('<div class="subtle" style="margin-top:10px">Score math — the blend '
+    return ('<div class="subtle lead-in">Score math — the blend '
             'renormalizes over the components this lead actually evidences, then '
             'trust multipliers apply:</div>'
             f'<div style="margin-top:2px">{steps}</div>')
@@ -2849,7 +2899,7 @@ def _render_startup_feed() -> None:
             )
             if visible_stale:
                 st.markdown(
-                    f'<div class="stale-banner"><b>{visible_stale} startup'
+                    f'<div class="notice"><b>{visible_stale} startup'
                     f'{"s" if visible_stale != 1 else ""}</b> scored under an '
                     f'older version of {_e(thesis.name or "this thesis")}. '
                     'Their numbers came from weights or a prompt that have '
@@ -5038,7 +5088,7 @@ def _evidence_trust_banner(report) -> None:
     if report.trustworthy:
         return
     st.markdown(
-        f'<div class="stale-banner"><b>These numbers are not usable.</b> '
+        f'<div class="notice bad"><b>These numbers are not usable.</b> '
         f'{len(report.unreachable)} company/companies could not be checked '
         '— the sources were unreachable, and an unchecked company scores '
         'zero, so this run understates the scorer. Re-run with working '
@@ -5130,7 +5180,7 @@ def _render_evidence_results(report) -> None:
 
     fairness = evidence_symmetry(report)
     if fairness.unfair:
-        st.markdown(f'<div class="stale-banner"><b>The two groups are not '
+        st.markdown(f'<div class="notice bad"><b>The two groups are not '
                     f'comparable.</b> {_e(fairness.message)}</div>',
                     unsafe_allow_html=True)
     elif report.controls:
@@ -5140,12 +5190,12 @@ def _render_evidence_results(report) -> None:
     if report.circular:
         from scout.hindsight import CIRCULARITY_WARNING
 
-        st.markdown(f'<div class="stale-banner">{_e(CIRCULARITY_WARNING)}</div>',
+        st.markdown(f'<div class="notice">{_e(CIRCULARITY_WARNING)}</div>',
                     unsafe_allow_html=True)
 
     st.write("")
     for verdict in sorted(report.outcomes, key=lambda v: -v.score):
-        tint = "#1f6f3f" if verdict.surfaced else "#962828"
+        tone = "good" if verdict.surfaced else "bad"
         lead = (f"{verdict.lead_time_months} months before the round"
                 if verdict.lead_time_months is not None else "")
         blinded = (f" · blinded {verdict.blinded_score:.0f}"
@@ -5153,7 +5203,7 @@ def _render_evidence_results(report) -> None:
         st.markdown(
             f'<div class="act-row"><div class="act-what">'
             f'<b>{_e(verdict.company)}</b> '
-            f'<span style="color:{tint};font-weight:650">'
+            f'<span class="tone tone-{tone}">'
             f'{verdict.score:.0f}{_e(blinded)}</span>'
             f'<span class="subtle"> · rank {verdict.rank or "—"} of '
             f'{metrics.n_outcomes + metrics.n_controls}</span>'
@@ -5177,7 +5227,7 @@ def _render_evidence_signals(report, evaluation) -> None:
         unsafe_allow_html=True,
     )
     if evaluation.underpowered:
-        st.markdown(f'<div class="stale-banner">{_e(evaluation.notes[0])}</div>',
+        st.markdown(f'<div class="notice">{_e(evaluation.notes[0])}</div>',
                     unsafe_allow_html=True)
         return
     st.dataframe(
@@ -5312,7 +5362,7 @@ def _render_evidence_trends(runs: list[dict], report) -> None:
     decayed = [t for t in trends if t.decayed]
     if decayed:
         st.markdown(
-            '<div class="stale-banner"><b>Losing power:</b> '
+            '<div class="notice"><b>Losing power:</b> '
             + ", ".join(_e(t.name) for t in decayed)
             + ". A signal stops working once enough people use it — these "
               "are the ones the evidence says have crossed over.</div>",
@@ -5382,9 +5432,11 @@ if nav == "Evidence":
 # ============================================================ AUTOMATION
 
 
-_JOB_STATUS_TINT = {
-    "done": "#1f6f3f", "failed": "#962828", "running": "#1f6f3f",
-    "queued": "#8a6d1f", "cancelled": "var(--muted)",
+# Job status → SEMANTIC tone, not a colour. The palette lives in CSS; this
+# only decides what each state means.
+_JOB_STATUS_TONE = {
+    "done": "good", "failed": "bad", "running": "good",
+    "queued": "warn", "cancelled": "muted",
 }
 
 _TIMEZONES = [
@@ -5498,7 +5550,7 @@ if nav == "Automation":
 
     if worker_state is None or not worker_state["alive"]:
         st.markdown(
-            '<div class="stale-banner">No worker is running, so schedules '
+            '<div class="notice">No worker is running, so schedules '
             'will not fire and queued jobs will sit. Start one with '
             '<code>scout worker --bootstrap</code>, or install the systemd '
             'unit in <code>deploy/</code>. Runs you start by hand still work '
@@ -5575,7 +5627,7 @@ if nav == "Automation":
         st.markdown('<div class="subtle">Nothing has run yet.</div>',
                     unsafe_allow_html=True)
     for job in job_rows:
-        tint = _JOB_STATUS_TINT.get(job["status"], "var(--muted)")
+        tone = _JOB_STATUS_TONE.get(job["status"], "muted")
         detail = job.get("error") or ", ".join(
             f"{k} {v}" for k, v in (job.get("result") or {}).items()
             if k != "log_path" and v not in (None, "")
@@ -5584,7 +5636,7 @@ if nav == "Automation":
         j1.markdown(
             f'<div class="act-row"><div class="act-what">'
             f'<b>{_e(jobs_mod.job_label(job["kind"], job.get("payload")))}</b> '
-            f'<span style="color:{tint};font-weight:650">{_e(job["status"])}</span>'
+            f'<span class="tone tone-{tone}">{_e(job["status"])}</span>'
             f'<br><span class="subtle">{_e(detail[:160] or "—")}</span></div>'
             f'<div class="act-when">{_e(_ago(job.get("created_at")))}</div></div>',
             unsafe_allow_html=True,
