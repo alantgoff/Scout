@@ -231,6 +231,25 @@ def verdict_disqualified(verdict: object | None, thesis: Thesis) -> str | None:
     return None
 
 
+def _lab_departure(account: Account) -> Signal:
+    """Did this person's PUBLISHED affiliation change?
+
+    The same event `departure_signal` looks for, observed at the source
+    instead of inferred from self-reported bio language — and typically
+    months earlier, because a bio changes when a founder is ready to be
+    seen while a paper's affiliation changes the moment the next one lands.
+
+    Reads an enrichment field rather than the store (Account carries no
+    store, and adapters only fetch), so a run without arXiv discovery
+    simply scores 0 here.
+    """
+    return Signal(
+        name="lab_departure",
+        value=1.0 if account.lab_move else 0.0,
+        detail=account.lab_move,
+    )
+
+
 def run_heuristics(
     account: Account, tweets: list[Tweet], thesis: Thesis
 ) -> tuple[list[Signal], bool]:
@@ -239,6 +258,7 @@ def run_heuristics(
     signals = [
         _bio_intent(account, thesis),
         _departure_signal(account, thesis),
+        _lab_departure(account),
         _launch_traction(account, tweets, thesis),
         _smart_money_follow(account),
         _smart_money_convergence(account, thesis),

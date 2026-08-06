@@ -55,6 +55,10 @@ class Account(BaseModel):
     # Enrichment fields set by the pipeline from store history, not by adapters:
     recent_followed_by: list[str] = Field(default_factory=list)  # watchers whose follow is new
     bio_changed: bool = False  # stealth/intent language newly appeared in bio
+    # "google deepmind → Sparse Labs" when this person's PUBLISHED affiliation
+    # moved. Filled by cli._enrich_accounts from paper history, never by an
+    # adapter (Account carries no store).
+    lab_move: str = ""
     github_repo: str | None = None  # evidence repo URL when discovered via GitHub
     fetched_at: datetime | None = None
 

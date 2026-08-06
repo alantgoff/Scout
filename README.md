@@ -1,7 +1,7 @@
 # Scout
 
 A thesis-driven sourcing engine for early-stage VC. Describe an investment
-thesis in plain English; Scout searches X, GitHub and Hacker News for
+thesis in plain English; Scout searches X, GitHub, Hacker News and arXiv for
 companies that match it, scores them against the thesis, and drafts the
 investment memo.
 
@@ -91,10 +91,11 @@ taste profile, and firm-wide defaults.
 
 ```
 DISCOVER            SCORE                      DECIDE
-X search queries    9 deterministic signals    Longlist / Shortlist / Pass
+X search queries    10 deterministic signals    Longlist / Shortlist / Pass
 bio search       →  + Claude classification  → Memo
 GitHub topics       + adversarial audit        Outreach
 Hacker News         + thesis fit
+arXiv papers
 investor follows
 ```
 
@@ -104,8 +105,10 @@ into one entry, and scores each on three components:
 - **Quality** — a readiness scorecard (B2B or B2C rubric), criteria scored 1–3
   from cited evidence only, rolled up 0–100
 - **Fit** — how squarely the *product* matches your thesis, 0–1
-- **Signal** — X momentum: investor follow-graph convergence, bio changes,
-  departure language, launch traction
+- **Signal** — momentum: investor follow-graph convergence, bio changes,
+  departure language, launch traction, and a change of published affiliation
+  — a researcher whose next paper carries a different lab has usually left
+  months before any bio says so
 
 These blend (currently 35 / 50 / 15 — fit outweighs quality deliberately, so a
 well-built off-thesis company can't outrank an on-thesis one), then pass
@@ -225,6 +228,15 @@ and a few you correctly skipped.
 
 - **ToS risk:** scraping X via twscrape violates X's Terms of Service. Use a
   burner account.
+- **arXiv affiliation coverage is partial.** `lab_departure` reads an
+  author's stated affiliation across papers, but arXiv makes that field
+  optional and it is often absent. A gap is treated as unknown, so the
+  signal under-fires: real departures are missed, but the ones it reports
+  are evidenced.
+- **Paper authors are matched by name**, the only identifier arXiv gives.
+  The key deliberately under-merges, so a researcher who changes how their
+  name is written splits into two records rather than two people fusing into
+  one. The signal quotes its evidence so either case is visible.
 - **The follow-graph signal is twscrape-only** — via the official API it always
   scores 0, as engagement operators (`min_faves:`) are also unsupported there
   and get stripped.

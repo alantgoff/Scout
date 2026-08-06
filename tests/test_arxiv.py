@@ -223,3 +223,39 @@ def test_a_fresh_database_has_no_paper_history(tmp_path: Path) -> None:
     assert store.author_affiliations("nobody") == []
     assert store.authors_who_moved() == []
     assert store.papers_by_author("nobody") == []
+
+
+# --- the scoring signal ---------------------------------------------------------
+
+
+def test_a_recorded_move_becomes_a_scored_signal(tmp_path: Path) -> None:
+    """Recording affiliation history is only half the job: without this the
+    arXiv data sits in the store and never reaches the ranking."""
+    from scout.config import Thesis
+    from scout.models import Account
+    from scout.signals.heuristics import run_heuristics
+
+    thesis = Thesis(thesis="AI infra")
+    store = _seeded(tmp_path)
+    move = store.authors_who_moved()[0]
+
+    plain = Account(id="1", handle="janechen", name="Jane Chen")
+    assert {s.name: s for s in run_heuristics(plain, [], thesis)[0]}[
+        "lab_departure"].value == 0.0
+
+    enriched = plain.model_copy(
+        update={"lab_move": f"{move['from']} → {move['to']}"})
+    signal = {s.name: s for s in run_heuristics(enriched, [], thesis)[0]}[
+        "lab_departure"]
+    assert signal.value == 1.0
+    # The evidence travels with the signal, so a name-collision false
+    # positive is visible rather than silent.
+    assert signal.detail == "google deepmind → Sparse Labs"
+
+
+def test_the_enrichment_key_matches_what_the_store_returns(tmp_path: Path) -> None:
+    """The join is name → normalize_author → author_key. If those two ever
+    diverge the signal silently never fires, which is why this is pinned."""
+    store = _seeded(tmp_path)
+    moved = {m["author_key"] for m in store.authors_who_moved()}
+    assert normalize_author("Jane Chen") in moved

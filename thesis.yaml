@@ -60,6 +60,7 @@ weights:
   bio_intent: 20.0
   smart_money_convergence: 20.0
   departure_signal: 20.0
+  lab_departure: 20.0
   bio_change: 10.0
   smart_money_follow: 10.0
   launch_traction: 10.0

@@ -256,6 +256,7 @@ def test_run_heuristics_empty_tweets_returns_all_signals() -> None:
     assert {s.name for s in signals} == {
         "bio_intent",
         "departure_signal",
+        "lab_departure",
         "launch_traction",
         "smart_money_follow",
         "smart_money_convergence",

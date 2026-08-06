@@ -39,6 +39,7 @@ from scout.config import thesis_path as thesis_library_path
 from scout import web
 from scout.export import print_top_table, write_csv, write_markdown
 from scout.ingest.base import DiscoverySource, SourceAdapter
+from scout.ingest.arxiv_src import normalize_author
 from scout.ingest.xapi_src import BudgetExceededError
 from scout.models import Account, Lead, Signal, SitePage, Tweet, UnlinkedLead
 from scout.score import score_breakdown, score_leads
@@ -329,12 +330,23 @@ def _enrich_accounts(
     # One batched recency query for every account, instead of a follow-edge
     # scan per account (recent_watchers_map keys are lowercased followees).
     recent_map = store.recent_watchers_map(settings.recent_follow_days)
+    # One batched query for published-affiliation changes, same shape as the
+    # follow-edge map above — arXiv history is per-author, and scanning it
+    # per account would be O(accounts x papers).
+    moved_map = {m["author_key"]: m for m in store.authors_who_moved()}
     for account in accounts:
         previous_bio = store.record_bio(account.handle, account.bio)
         account.bio_changed = intent_appeared(previous_bio, account.bio, thesis)
         account.recent_followed_by = recent_map.get(
             account.handle.lstrip("@").lower(), []
         )
+        # Matching a lead to a paper author is by name — the only identifier
+        # arXiv gives. `normalize_author` under-merges on purpose, so this
+        # misses more than it invents.
+        if account.name:
+            move = moved_map.get(normalize_author(account.name))
+            if move:
+                account.lab_move = f"{move['from']} → {move['to']}"
 
 
 def _discovery_sources(

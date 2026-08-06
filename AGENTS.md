@@ -263,7 +263,7 @@ scout/
                     is the correct outcome rather than a guess.
     linkedin_src.py Stub (NotImplementedError) — LinkedIn automation is a dead end.
   signals/
-    heuristics.py   8 deterministic signals + run_heuristics + intent_appeared.
+    heuristics.py   10 deterministic signals + run_heuristics + intent_appeared.
     llm.py          Claude classification, GROUNDED: site text in the dossier,
                     EVIDENCE_RULES appended to every prompt (even custom ones),
                     unknown-escape, batches of CLASSIFY_BATCH_SIZE (5). Plus the
