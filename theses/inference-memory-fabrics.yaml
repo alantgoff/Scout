@@ -75,6 +75,20 @@ target_bios:
 - ex-DeepMind
 - ex-Google
 - ex-Meta
+- Intel Labs
+- ex-Intel
+- AMD
+- ex-AMD
+- Micron
+- SK Hynix
+- Samsung Semiconductor
+- Marvell
+- Astera Labs
+- Broadcom
+- Cerebras
+- Groq
+- SambaNova
+- Lightmatter
 sectors:
 - ai infra
 - inference infrastructure
@@ -121,25 +135,25 @@ weights:
   source_corroboration: 5.0
   launch_traction: 5.0
 quality_weights:
-  team: 20
-  tech_product: 20
-  market: 15
-  defensibility: 15
-  traction: 20
-  investors: 10
+  team: 20.0
+  tech_product: 20.0
+  market: 15.0
+  defensibility: 15.0
+  traction: 20.0
+  investors: 10.0
 scorecard_weights:
   b2b:
-    founders_captable: 18
-    market: 23
-    technology: 23
-    product: 18
-    traction_bm: 18
+    founders_captable: 18.0
+    market: 23.0
+    technology: 23.0
+    product: 18.0
+    traction_bm: 18.0
   b2c:
-    founders_captable: 18
-    market: 23
-    product_experience: 23
-    growth_engagement: 18
-    monetization_bm: 18
+    founders_captable: 18.0
+    market: 23.0
+    product_experience: 23.0
+    growth_engagement: 18.0
+    monetization_bm: 18.0
 launch_phrases:
 - open sourcing
 - open-sourced
