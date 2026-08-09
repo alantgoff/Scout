@@ -108,6 +108,23 @@ def _load_thesis_or_exit(path: Path) -> Thesis:
         raise typer.Exit(1) from None
 
 
+def _resolve_seeds(store: Store, path: Path, thesis_id: str = "") -> Seeds:
+    """Sourcing config for the resolved thesis, falling back to seeds.yaml.
+
+    Kept next to the thesis resolver because they answer one question: a
+    thesis says what to look for, its seeds say where. Resolving them
+    separately is how a run ends up sourcing the previous thesis's queries.
+    """
+    from scout import theses as theses_mod
+
+    try:
+        return theses_mod.resolve_seeds(
+            store, thesis_id=thesis_id or None, seeds_path=path)
+    except (yaml.YAMLError, ValidationError) as exc:
+        console.print(f"[red]Could not parse the seeds:[/] {exc}")
+        raise typer.Exit(1) from None
+
+
 def _resolve_thesis_or_exit(
     store: Store, path: Path, thesis_id: str = ""
 ) -> Thesis:
@@ -825,9 +842,9 @@ def run(
         raise typer.Exit()
 
     settings = Settings()
-    seeds = _load_seeds_or_exit(seeds_path)
     store = _open_store(settings)
     thesis = _resolve_thesis_or_exit(store, thesis_path, thesis_id)
+    seeds = _resolve_seeds(store, seeds_path, thesis_id)
     effective_max = max_accounts if max_accounts is not None else settings.max_accounts
     effective_ttl = ttl_days if ttl_days is not None else settings.ttl_days
 

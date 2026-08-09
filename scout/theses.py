@@ -26,8 +26,10 @@ from __future__ import annotations
 from pathlib import Path
 
 from scout.config import (
+    Seeds,
     Thesis,
     ensure_thesis_id,
+    load_seeds,
     load_thesis,
     save_thesis,
     thesis_path,
@@ -81,12 +83,43 @@ def resolve(
     return load_thesis(path)
 
 
+def resolve_seeds(
+    store: Store,
+    *,
+    actor: str | None = None,
+    thesis_id: str | None = None,
+    seeds_path: Path = Path("seeds.yaml"),
+) -> Seeds:
+    """The sourcing config for whichever thesis this caller resolved to.
+
+    Seeds follow the thesis by the same precedence `resolve` uses, because
+    the two are one decision: a thesis says what to look for, seeds say
+    where to look. Keeping seeds global meant switching thesis left the
+    previous one's query bank, GitHub topics and arXiv categories in force —
+    so a deep-systems thesis sweeping cs.DC/cs.AR silently inherited an ML
+    thesis's cs.LG sweep and missed the population it was written for.
+
+    Falls back to seeds.yaml, so an install that never stored per-thesis
+    seeds behaves exactly as it did before.
+    """
+    wanted = resolve_id(store, actor=actor, thesis_id=thesis_id)
+    if wanted:
+        stored = store.get_thesis_seeds(wanted)
+        if stored:
+            try:
+                return Seeds.model_validate(stored)
+            except Exception:  # noqa: BLE001 — a bad row must not brick sourcing
+                pass
+    return load_seeds(seeds_path)
+
+
 def persist(
     store: Store,
     thesis: Thesis,
     *,
     path: Path = DEFAULT_PATH,
     write_active_file: bool = True,
+    seeds: Seeds | None = None,
 ) -> str:
     """Save a thesis to the database AND the YAML library. Returns its id.
 
@@ -99,6 +132,9 @@ def persist(
     thesis_id = thesis.id or ensure_thesis_id(thesis)
     thesis.id = thesis_id
     store.save_thesis_config(thesis_id, thesis.model_dump(mode="json"))
+    # Sourcing config travels with the thesis when supplied.
+    if seeds is not None:
+        store.save_thesis_seeds(thesis_id, seeds.model_dump(mode="json"))
     if write_active_file:
         save_thesis(thesis, path)
     else:

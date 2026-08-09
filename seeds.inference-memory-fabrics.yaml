@@ -1,0 +1,115 @@
+# Sourcing config for the Inference Memory Fabrics thesis.
+#
+# The important decision here is the arXiv category set. The defaults
+# (cs.LG / cs.AI / cs.CL / cs.MA) are ML-research categories, and this thesis
+# is not about models — it is about memory physics, interconnects, numerics
+# and kernels. The people it wants publish in cs.DC, cs.AR and cs.PF, and
+# would be almost entirely invisible under the default sweep.
+
+lists: []
+
+# --- X query bank -------------------------------------------------------------
+# Mechanism-level, because "AI inference" as a query returns the API-wrapper
+# market this thesis explicitly rejects.
+
+searches_departure:
+  - '"leaving NVIDIA" (inference OR kernels OR CUDA)'
+  - '"left NVIDIA" building'
+  - '(ex-NVIDIA OR "prev NVIDIA") (inference OR CUDA OR kernel)'
+  - '("leaving OpenAI" OR "leaving Anthropic") (infrastructure OR inference OR systems)'
+  - '"leaving DeepMind" (systems OR infrastructure)'
+  - '(vLLM OR SGLang OR TensorRT) "starting something"'
+  - '"Hazy Research" (founding OR "starting a company")'
+  - 'LMSYS (founding OR "new company")'
+
+searches_stealth_intent:
+  - '"in stealth" (inference OR "KV cache" OR CUDA OR quantization)'
+  - '"building something new" (GPU OR inference OR memory OR kernels)'
+  - '"stealth" ("memory bandwidth" OR "prefill" OR "decode")'
+  - '"day 1" (inference OR "ML systems")'
+  - '(founder OR "co-founder") ("KV cache" OR "paged attention" OR CXL)'
+
+searches_hiring:
+  - '"founding engineer" (CUDA OR kernels OR inference)'
+  - '"hiring" "systems engineer" (inference OR "KV cache")'
+  - '"first engineer" (GPU OR "ML systems" OR compiler)'
+  - '"looking for a co-founder" (CUDA OR inference OR HPC)'
+
+searches_launch:
+  - '(open-sourcing OR "open sourced") ("KV cache" OR "inference engine")'
+  - '"faster inference" (benchmark OR throughput) -API'
+  - '("prefill" AND "decode") (disaggregat OR separate)'
+  - 'CXL (memory pooling OR fabric) launch'
+  - '(MXFP4 OR "4-bit") (accuracy OR reasoning OR quantization)'
+  - '"multi-LoRA" (serving OR throughput OR batching)'
+
+# --- twscrape people search ---------------------------------------------------
+bio_searches:
+  - CUDA kernel inference
+  - KV cache
+  - inference infrastructure founder
+  - ML systems founder
+  - GPU memory bandwidth
+  - quantization researcher
+  - compiler engineer LLM
+  - distributed inference
+  - HPC founder
+  - ex-NVIDIA founder
+
+# --- GitHub ------------------------------------------------------------------
+# The artifact IS the evidence for this thesis, so these are weighted toward
+# kernels and serving internals rather than applications.
+github_topics:
+  - cuda
+  - cuda-kernels
+  - triton
+  - inference-engine
+  - llm-inference
+  - llm-serving
+  - kv-cache
+  - paged-attention
+  - flash-attention
+  - quantization
+  - model-compression
+  - lora
+  - peft
+  - gpu-computing
+  - high-performance-computing
+  - cxl
+  - rdma
+  - memory-management
+  - mlsys
+
+# --- arXiv --------------------------------------------------------------------
+# THE thesis-specific call. cs.DC/cs.AR/cs.PF are where the disaggregated
+# serving, CXL fabric and memory-hierarchy work actually lands; math.NA and
+# cs.MS carry the quantization-numerics work (stochastic rounding, Hadamard
+# transforms). Keeping only the default ML categories would miss most of the
+# population this thesis describes.
+arxiv_categories:
+  - cs.DC   # distributed/parallel/cluster — disaggregated prefill+decode
+  - cs.AR   # hardware architecture — CXL, memory fabrics, accelerators
+  - cs.PF   # performance — the bottleneck framing of the whole thesis
+  - cs.LG   # still needed: serving and quantization papers land here too
+  - cs.MS   # mathematical software — kernel and numerics implementations
+  - math.NA # numerical analysis — rounding, stability, transforms
+  - cs.OS   # operating systems — the "virtual memory management" founder profile
+
+# --- watchlist ----------------------------------------------------------------
+# Follow-graph convergence: investors and operators whose NEW follows tend to
+# precede an infra round. Handles are existence-checked on apply; anything
+# fabricated is dropped rather than silently scored.
+watchlist:
+  - tri_dao
+  - woosuk_k
+  - zhuohan123
+  - lmsysorg
+  - vllm_project
+  - soumithchintala
+  - JeffDean
+  - ID_AA_Carmack
+  - clattner_llvm
+  - natfriedman
+  - danielgross
+  - sarahdingwang
+  - amasad

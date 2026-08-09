@@ -169,3 +169,64 @@ def test_config_records_who_changed_it(workspace) -> None:
     row = store.get_thesis(  "climate")
     assert row["config_updated_by"] == "alan@firm.com"
     assert row["config_updated_at"]
+
+
+# --- seeds follow the thesis ----------------------------------------------------
+
+
+def test_switching_thesis_switches_the_sourcing_config(workspace) -> None:
+    """The gap this closes: seeds were global while theses were per-member,
+    so switching thesis kept the previous one's query bank, GitHub topics
+    and arXiv categories. A deep-systems thesis sweeping cs.DC/cs.AR would
+    silently inherit an ML thesis's cs.LG sweep and miss the population it
+    was written for — sourcing for the wrong thesis, with nothing to see."""
+    from scout.config import Seeds
+
+    store, path = workspace
+    theses_mod.persist(
+        store, make_thesis("ai-infra", "AI infrastructure"),
+        seeds=Seeds(arxiv_categories=["cs.LG"], github_topics=["pytorch"]),
+        path=path, write_active_file=False)
+    theses_mod.persist(
+        store, make_thesis("systems", "Memory fabrics"),
+        seeds=Seeds(arxiv_categories=["cs.DC", "cs.AR"], github_topics=["cuda"]),
+        path=path, write_active_file=False)
+
+    theses_mod.switch_for_user(store, "sara@firm.com", "systems")
+    theses_mod.set_workspace_default(store, "ai-infra")
+
+    # Sara's sourcing follows her thesis…
+    sara = theses_mod.resolve_seeds(store, actor="sara@firm.com")
+    assert sara.arxiv_categories == ["cs.DC", "cs.AR"]
+    assert sara.github_topics == ["cuda"]
+    # …and unattended work still uses the firm's.
+    firm = theses_mod.resolve_seeds(store)
+    assert firm.arxiv_categories == ["cs.LG"]
+
+
+def test_seeds_fall_back_to_the_file_when_none_are_stored(workspace, tmp_path) -> None:
+    """An install that never stored per-thesis seeds behaves as it did."""
+    from scout.config import Seeds, save_seeds
+
+    store, path = workspace
+    seeds_file = tmp_path / "seeds.yaml"
+    save_seeds(Seeds(github_topics=["from-the-file"]), seeds_file)
+    theses_mod.persist(store, make_thesis("ai-infra", "AI infra"),
+                       path=path, write_active_file=False)  # no seeds passed
+    resolved = theses_mod.resolve_seeds(store, thesis_id="ai-infra",
+                                        seeds_path=seeds_file)
+    assert resolved.github_topics == ["from-the-file"]
+
+
+def test_corrupt_stored_seeds_degrade_to_the_file(workspace, tmp_path) -> None:
+    from scout.config import Seeds, save_seeds
+
+    store, path = workspace
+    seeds_file = tmp_path / "seeds.yaml"
+    save_seeds(Seeds(github_topics=["fallback"]), seeds_file)
+    store.db["theses"].upsert(
+        {"id": "broken", "seeds_json": '{"github_topics": "not a list"}'},
+        pk="id", alter=True)
+    resolved = theses_mod.resolve_seeds(store, thesis_id="broken",
+                                        seeds_path=seeds_file)
+    assert resolved.github_topics == ["fallback"]

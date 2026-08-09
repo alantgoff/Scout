@@ -29,13 +29,25 @@ _NON_PERSONAL_HOSTS = ("twitter.com", "x.com", "linktr.ee", "t.co")
 # the module defaults below are only the pydantic defaults' documentation.
 
 
+# Separators a multi-word term may be written with. Technical vocabulary is
+# hyphenated and slashed at least as often as it is spaced — "KV-cache",
+# "prefill/decode", "multi-agent" — and escaping the space literally meant a
+# thesis keyword of "kv cache" silently missed the commonest spelling of the
+# thing it was looking for. Every multi-word keyword in every thesis was
+# affected; found by running a real inference-infrastructure thesis through
+# the scorer and watching an obviously on-thesis founder score 25.
+_SEPARATORS = r"[\s\-_/]+"
+
+
 def _term_pattern(term: str) -> str:
     """Word-boundary-aware pattern source: "day 1" must not match "day 10",
-    but multi-word phrases still match. \\b only applies where the term edge
-    is a word character (so terms like "prev @" stay matchable)."""
+    but multi-word phrases still match, in any of the ways people write
+    them. \\b only applies where the term edge is a word character (so terms
+    like "prev @" stay matchable)."""
     prefix = r"\b" if term[:1].isalnum() else ""
     suffix = r"\b" if term[-1:].isalnum() else ""
-    return prefix + re.escape(term) + suffix
+    body = _SEPARATORS.join(re.escape(part) for part in term.split())
+    return prefix + body + suffix
 
 
 @lru_cache(maxsize=512)

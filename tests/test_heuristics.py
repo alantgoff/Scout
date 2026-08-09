@@ -333,3 +333,55 @@ def test_intent_appeared_detects_new_stealth_language() -> None:
     assert not intent_appeared(None, "stealth", THESIS)
     # keyword disappeared → not a change either
     assert not intent_appeared("stealth", "ml engineer", THESIS)
+
+
+# --- multi-word keyword separators -------------------------------------------
+
+
+@pytest.mark.parametrize("bio", [
+    "Building KV cache tiering",
+    "Building KV-cache tiering",     # the commonest written form
+    "Building kv_cache tiering",
+])
+def test_multi_word_keywords_match_however_they_are_written(bio: str) -> None:
+    """Technical vocabulary is hyphenated and slashed at least as often as
+    it is spaced. Escaping the space literally meant a thesis keyword of
+    "kv cache" silently missed "KV-cache" — every multi-word keyword in
+    every thesis was affected, and the failure was invisible: the signal
+    simply did not fire.
+    """
+    thesis = make_thesis()
+    thesis.keywords = ["kv cache"]
+    signals, _ = run_heuristics(make_account(bio=bio), [], thesis)
+    assert get_signal(signals, "bio_intent").value == 1.0
+
+
+def test_slash_separated_phrases_match() -> None:
+    thesis = make_thesis()
+    thesis.keywords = ["prefill decode"]
+    account = make_account(bio="disaggregated prefill/decode across GPU clusters")
+    signals, _ = run_heuristics(account, [], thesis)
+    assert get_signal(signals, "bio_intent").value == 1.0
+
+
+def test_separator_flexibility_does_not_break_the_boundary_guard() -> None:
+    """The reason word boundaries exist in the first place: "day 1" must
+    still not match "day 10"."""
+    thesis = make_thesis()
+    thesis.keywords = ["day 1"]
+    assert get_signal(
+        run_heuristics(make_account(bio="on day 10 we shipped"), [], thesis)[0],
+        "bio_intent").value == 0.0
+    assert get_signal(
+        run_heuristics(make_account(bio="day 1 of building"), [], thesis)[0],
+        "bio_intent").value == 1.0
+
+
+def test_disqualifiers_get_the_same_flexibility() -> None:
+    """Disqualifiers run through the same matcher, so "no code" must catch
+    the way people actually write it."""
+    thesis = make_thesis()
+    thesis.disqualifiers = ["no code"]
+    _, disqualified = run_heuristics(
+        make_account(bio="No-code AI builder for sales teams"), [], thesis)
+    assert disqualified is True

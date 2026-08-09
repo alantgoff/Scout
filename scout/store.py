@@ -127,6 +127,11 @@ class Store:
                 "current_version": str, "created_at": str, "archived_at": str,
                 "is_active": int, "config_json": str,
                 "config_updated_at": str, "config_updated_by": str,
+                # Sourcing config travels WITH the thesis. Global seeds meant
+                # switching thesis kept the previous one's query bank, GitHub
+                # topics and arXiv categories — sourcing for the wrong thesis,
+                # silently.
+                "seeds_json": str,
             },
             pk="id",
             if_not_exists=True,
@@ -683,6 +688,38 @@ class Store:
                 pk="id",
                 alter=True,
             )
+
+    def save_thesis_seeds(self, thesis_id: str, seeds: dict) -> None:
+        """Store a thesis's SOURCING config (query bank, topics, arXiv
+        categories, watchlist) next to its scoring config.
+
+        These belong together: a thesis says what to look for and the seeds
+        say where to look, and separating them meant switching thesis left
+        the old one's queries running. A deep-systems thesis sweeping
+        cs.DC/cs.AR would otherwise inherit an ML thesis's cs.LG sweep and
+        quietly miss the population it was written for.
+        """
+        with self.write_tx():
+            self.db["theses"].upsert(
+                {
+                    "id": thesis_id,
+                    "seeds_json": json.dumps(seeds, sort_keys=True, default=str),
+                    "config_updated_at": datetime.now(timezone.utc).isoformat(),
+                    "config_updated_by": self.actor or "",
+                },
+                pk="id",
+                alter=True,
+            )
+
+    def get_thesis_seeds(self, thesis_id: str) -> dict | None:
+        """Stored sourcing config, or None to fall back to seeds.yaml."""
+        row = self.get_thesis(thesis_id)
+        if not row or not row.get("seeds_json"):
+            return None
+        try:
+            return json.loads(row["seeds_json"])
+        except (TypeError, ValueError):
+            return None
 
     def get_thesis_config(self, thesis_id: str) -> dict | None:
         """The stored configuration, or None if only metadata is on file
