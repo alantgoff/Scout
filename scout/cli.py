@@ -2568,6 +2568,57 @@ def thesis_new(
     )
 
 
+@thesis_app.command("install")
+def thesis_install(
+    thesis_file: Annotated[
+        Path, typer.Argument(help="Thesis YAML to install.")
+    ],
+    seeds_file: Annotated[
+        Path,
+        typer.Option("--seeds", help="Sourcing config to install WITH it "
+                                     "(query bank, topics, arXiv categories)."),
+    ] = Path(""),
+    activate: Annotated[
+        bool, typer.Option("--activate/--no-activate",
+                           help="Make it the firm default for unattended runs."),
+    ] = True,
+) -> None:
+    """Install a thesis file (and its seeds) into the workspace.
+
+    The seeds half is the point. Sourcing config travels WITH a thesis, so a
+    thesis whose seeds are never installed silently sources using whatever
+    seeds.yaml holds — a systems thesis sweeping cs.DC/cs.AR would inherit an
+    ML thesis's cs.LG sweep and miss the population it was written for.
+    """
+    from scout import theses as theses_mod
+
+    thesis = _load_thesis_or_exit(thesis_file)
+    seeds = None
+    if str(seeds_file):
+        if not seeds_file.exists():
+            console.print(f"[red]No seeds file at[/] {seeds_file}")
+            raise typer.Exit(1)
+        seeds = _load_seeds_or_exit(seeds_file)
+
+    store = _thesis_store()
+    thesis_id = theses_mod.persist(store, thesis, seeds=seeds,
+                                   write_active_file=False)
+    store.upsert_thesis(
+        thesis_id, name=thesis.name or thesis_id, statement=thesis.thesis,
+        version=thesis_version(thesis, seeds or Seeds()),
+        make_active=activate,
+    )
+    console.print(
+        f"Installed [bold]{thesis.name or thesis_id}[/bold] ({thesis_id})"
+        + (f" with {len(seeds.arxiv_categories)} arXiv categories, "
+           f"{len(seeds.github_topics)} GitHub topics" if seeds else
+           " [yellow]without seeds — it will use seeds.yaml[/yellow]")
+    )
+    if activate:
+        console.print("It is now the firm default for unattended runs.")
+    console.print(f"Run it with: [bold]scout run --thesis-id {thesis_id}[/bold]")
+
+
 @thesis_app.command("use")
 def thesis_use(
     thesis_id: Annotated[str, typer.Argument(help="Thesis id to activate.")],
