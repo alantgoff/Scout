@@ -10,6 +10,7 @@ from datetime import datetime, timedelta, timezone
 from enum import Enum
 from pathlib import Path
 from typing import Annotated
+from urllib.parse import urlparse
 
 import typer
 import yaml
@@ -37,11 +38,21 @@ from scout.config import (
 # option); alias the library-path helper so the two can never shadow.
 from scout.config import thesis_path as thesis_library_path
 from scout import web
+from scout.companies import display_name
 from scout.export import print_top_table, write_csv, write_markdown
 from scout.ingest.base import DiscoverySource, SourceAdapter
 from scout.ingest.arxiv_src import normalize_author
 from scout.ingest.xapi_src import BudgetExceededError
-from scout.models import Account, Lead, Signal, SitePage, Tweet, UnlinkedLead
+from scout.models import (
+    FUNDING_STAGE_LABELS,
+    Account,
+    Lead,
+    LLMVerdict,
+    Signal,
+    SitePage,
+    Tweet,
+    UnlinkedLead,
+)
 from scout.score import score_breakdown, score_leads
 from scout.signals.heuristics import (
     intent_appeared,
@@ -49,6 +60,7 @@ from scout.signals.heuristics import (
     verdict_disqualified,
 )
 from scout.signals.llm import classify, verify_leads
+from scout.status import STATUS_LABELS
 from scout.store import Store
 
 app = typer.Typer(
@@ -1038,6 +1050,246 @@ def reclassify(
         raise typer.Exit(1) from None
     finally:
         store.scan_finish("done" if ok else "failed")
+
+
+# ------------------------------------------------------------------- add
+
+
+def _parse_add_target(target: str) -> tuple[str, str | None, str | None]:
+    """(handle, website, profile_url) for a hand-added company.
+
+    Three shapes, because "add this company" arrives as whatever was in
+    someone's clipboard:
+
+      @pollenrobotics                → an X handle, site unknown
+      https://x.com/pollenrobotics   → the same, pasted from the browser
+      https://pollen-robotics.com/   → a company with no X handle to hand.
+                                       Keyed by its domain slug, with
+                                       profile_url set to the site so nothing
+                                       downstream links to an x.com/<slug>
+                                       profile that was never real.
+    """
+    raw = target.strip()
+    if not raw:
+        raise ValueError("nothing to add — pass a handle or a website")
+    bare = raw.lstrip("@")
+    parts = urlparse(raw if "//" in raw else "https://" + raw)
+    host = (parts.hostname or "").lower().removeprefix("www.")
+    if host in ("x.com", "twitter.com", "mobile.twitter.com"):
+        handle = parts.path.strip("/").split("/")[0]
+        if not handle:
+            raise ValueError(f"no handle in {target!r}")
+        return handle.lstrip("@"), None, None
+    if "." not in bare:  # a bare handle, no dot to mistake for a domain
+        return bare, None, None
+    website = web.normalize_site_url(raw)
+    if website is None:
+        raise ValueError(f"{target!r} is neither an X handle nor a usable website")
+    domain = (urlparse(website).hostname or "").removeprefix("www.")
+    slug = slugify(domain.rsplit(".", 1)[0])
+    if not slug:
+        raise ValueError(f"could not derive a name from {target!r}")
+    return slug, website, website
+
+
+@app.command("add")
+def add(
+    target: Annotated[
+        str,
+        typer.Argument(
+            help="An X handle (@pollenrobotics), an x.com profile URL, or the "
+                 "company's website (https://pollen-robotics.com/)."
+        ),
+    ],
+    url: Annotated[
+        str | None,
+        typer.Option("--url", help="Company website, when TARGET is an X handle."),
+    ] = None,
+    name: Annotated[
+        str | None, typer.Option("--name", help="Company name, if the site won't say it.")
+    ] = None,
+    bio: Annotated[
+        str,
+        typer.Option("--bio", help="Bio/description text to run the heuristics "
+                     "against. Only what you can point at — it is stored as "
+                     "evidence, not as a summary."),
+    ] = "",
+    note: Annotated[
+        str, typer.Option("--note", help="Why you added it. Stored on the pipeline row.")
+    ] = "",
+    status: Annotated[
+        str,
+        typer.Option("--status", help="Deal-flow status to track it under: "
+                     + ", ".join(STATUS_LABELS) + "."),
+    ] = "longlisted",
+    thesis_path: Annotated[
+        Path, typer.Option("--thesis", help="Path to thesis.yaml.")
+    ] = Path("thesis.yaml"),
+    do_classify: Annotated[
+        bool,
+        typer.Option("--classify/--no-classify", help="Read the company's website "
+                     "and classify it with Claude (default), or record only what "
+                     "you typed."),
+    ] = True,
+) -> None:
+    """Add ONE company by hand and put it in the pipeline.
+
+    Sourcing finds companies; this is for the ones that reach you some other
+    way — a founder's email, a portfolio intro, a link someone sent. It runs
+    the same path a discovered lead does (website fetch → heuristics → Claude
+    → scoring), so a hand-added company is scored on the same evidence and
+    against the same thesis as everything else, and is never a row of
+    unscorable free text sitting in the middle of the database.
+
+    Two things it deliberately does NOT do. It does not drop the company on
+    the disqualifiers — you asked for it by name, so it says what fired and
+    keeps it. And with --no-classify it records a verdict grounded "manual",
+    which the scoring treats as unverified: what a person typed is not
+    evidence, and the score says so.
+    """
+    settings = Settings()
+    thesis = _load_thesis_or_exit(thesis_path)
+    if status not in STATUS_LABELS:
+        console.print(
+            f"[red]Unknown status {status!r}.[/red] One of: "
+            f"{', '.join(STATUS_LABELS)}."
+        )
+        raise typer.Exit(1)
+    try:
+        handle, derived_site, profile_url = _parse_add_target(target)
+    except ValueError as exc:
+        console.print(f"[red]{exc}[/red]")
+        raise typer.Exit(1) from None
+    website = derived_site
+    if url:
+        normalized = web.normalize_site_url(url)
+        if normalized is None:
+            console.print(f"[yellow]--url {url!r} isn't a usable website — ignoring it.[/yellow]")
+        else:
+            website = normalized
+
+    store = _open_store(settings)
+    seeds = _load_seeds_or_default()
+    console.print(f"Thesis: [bold]{_thesis_banner(thesis, seeds, store)}[/bold]")
+
+    # Merge onto the existing row rather than replacing it: a company sourcing
+    # already found keeps its followers, watchers and discovery provenance.
+    # `source`/`sources` are NOT touched for a known account — a person typing
+    # a name is not an independent discovery strategy, and letting it count as
+    # one would hand the account free source_corroboration credit.
+    existing = store.get_account(handle)
+    if existing is not None:
+        console.print(f"[dim]@{existing.handle} is already in the database — updating it.[/dim]")
+    account = Account(
+        id=existing.id if existing else f"manual:{handle.lower()}",
+        handle=existing.handle if existing else handle,
+        name=name or (existing.name if existing else "") or handle,
+        bio=bio or (existing.bio if existing else ""),
+        website=website or (existing.website if existing else None),
+        profile_url=profile_url or (existing.profile_url if existing else None),
+        followers=existing.followers if existing else 0,
+        following=existing.following if existing else 0,
+        pinned_tweet_id=existing.pinned_tweet_id if existing else None,
+        followed_by=list(existing.followed_by) if existing else [],
+        github_repo=existing.github_repo if existing else None,
+        source=existing.source if existing else "manual",
+        sources=list(existing.sources) if existing else ["manual"],
+        fetched_at=datetime.now(timezone.utc),
+    )
+    store.upsert_account(account)
+
+    accounts = [account]
+    _enrich_accounts(accounts, store, thesis, settings)
+    account = accounts[0]
+    tweets = store.get_tweets(account.id, settings.tweets_per_account)
+    signals, disqualified = run_heuristics(account, tweets, thesis)
+    if disqualified:
+        console.print(
+            "[yellow]The bio matches a thesis disqualifier — a sourcing run "
+            "would have dropped this. Keeping it: you named it.[/yellow]"
+        )
+    lead = Lead(account=account, signals=signals, disqualified=disqualified)
+
+    sites: dict[str, SitePage] = {}
+    if do_classify:
+        sites = _fetch_candidate_sites([(account, tweets)], settings, store)
+        page = sites.get(account.handle.lower())
+        if page is not None and not page.usable:
+            console.print(
+                f"[yellow]Could not read {account.website} ({page.status}) — "
+                "classifying on the bio alone.[/yellow]"
+            )
+        console.print("Classifying with Claude...")
+        verdicts = classify([(account, tweets)], thesis, settings, store=store, sites=sites)
+        lead.llm = verdicts.get(account.handle.lower())
+        if lead.llm is not None:
+            term = verdict_disqualified(lead.llm, thesis)
+            if term:
+                console.print(
+                    f"[yellow]The classified product hits a product "
+                    f"disqualifier ({term}) — a run would have dropped this. "
+                    "Keeping it: you named it.[/yellow]"
+                )
+    if lead.llm is None:
+        # No classifier ran (--no-classify, or no API key). An earlier verdict
+        # for this handle is real evidence and outranks anything typed here —
+        # re-adding a company must never downgrade a classified one to a stub.
+        prior = store.latest_lead(account.handle)
+        if prior is not None and prior.llm is not None:
+            lead.llm = prior.llm
+            console.print(
+                "[dim]Kept the existing classification (nothing re-read).[/dim]"
+            )
+    if lead.llm is None:
+        # Nothing has ever been read about this company. Record what the
+        # person asserted, marked as such: account_type makes it a STARTUP so
+        # it groups and shows like one, grounding "manual" keeps it outside
+        # GROUNDED_SOURCES so scoring applies the unverified multiplier, and
+        # confidence stays 0 because nothing here was read.
+        lead.llm = LLMVerdict(
+            handle=account.handle,
+            account_type="startup",
+            company_name=name or account.name or account.handle,
+            company_url=account.website,
+            one_line_summary=note,
+            grounding="manual",
+            confidence=0.0,
+        )
+        console.print(
+            "[dim]Recorded unclassified — grounding \"manual\", confidence 0. "
+            "Run `scout reclassify` once a key is set to score it on evidence.[/dim]"
+        )
+
+    scored = score_leads([lead], thesis)
+    lead = scored[0]
+    run_id = datetime.now(timezone.utc).strftime("manual-%Y%m%d-%H%M%S-%f")
+    store.save_leads(run_id, [lead])
+    _record_run(store, run_id, "manual", thesis, seeds)
+    store.set_pipeline(
+        account.handle,
+        status=status,
+        notes=note or None,
+        sourced_thesis_id=ensure_thesis_id(thesis),
+    )
+
+    verdict = lead.llm
+    table = Table(box=box.SIMPLE)
+    table.add_column("field")
+    table.add_column("value", overflow="fold")
+    table.add_row("startup", display_name(lead))
+    table.add_row("profile", account.url)
+    table.add_row("website", account.website or "-")
+    table.add_row("score", f"{lead.score:.1f}")
+    table.add_row("thesis fit", f"{verdict.thesis_fit:.2f}" if verdict.thesis_fit is not None else "-")
+    table.add_row("round", FUNDING_STAGE_LABELS.get(verdict.funding_stage or "unknown", "Unknown"))
+    table.add_row("grounding", verdict.grounding or "-")
+    table.add_row("summary", verdict.product_summary or verdict.one_line_summary or "-")
+    table.add_row("status", STATUS_LABELS[status])
+    console.print(table)
+    console.print(
+        f"Added [bold]{display_name(lead)}[/bold] as "
+        f"[bold]{STATUS_LABELS[status]}[/bold] (run {run_id})."
+    )
 
 
 # --------------------------------------------------------------------- inspect

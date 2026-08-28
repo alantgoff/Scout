@@ -43,6 +43,12 @@ class Account(BaseModel):
     name: str = ""
     bio: str = ""
     website: str | None = None
+    # The account's real public page when it ISN'T x.com/<handle>. Manual
+    # adds of companies with no X presence are keyed by a slug we invented
+    # from their domain, and an x.com link built from that slug is a 404
+    # served as evidence. `url` below is rendered as the profile link in the
+    # UI, the CSV and the memo, so it has to point somewhere that exists.
+    profile_url: str | None = None
     followers: int = 0
     following: int = 0
     pinned_tweet_id: str | None = None
@@ -64,7 +70,7 @@ class Account(BaseModel):
 
     @property
     def url(self) -> str:
-        return f"https://x.com/{self.handle}"
+        return self.profile_url or f"https://x.com/{self.handle}"
 
 
 class SitePage(BaseModel):

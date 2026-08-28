@@ -566,6 +566,23 @@ class Store:
             pk=("run_id", "handle"),
         )
 
+    def latest_lead(self, handle: str) -> Lead | None:
+        """The most recently saved Lead for one handle, across all runs.
+
+        The ledger answers this for every handle at once; a single manual add
+        only needs the one row, and paying to parse every stored lead's JSON
+        to find it is the wrong trade.
+        """
+        if not self.db["leads"].exists():
+            return None
+        rows = list(
+            self.db["leads"].rows_where(
+                "handle = ? COLLATE NOCASE", [handle.lstrip("@")],
+                order_by="created_at desc", limit=1,
+            )
+        )
+        return Lead.model_validate_json(rows[0]["lead_json"]) if rows else None
+
     def load_latest_leads(self) -> list[Lead]:
         if not self.db["leads"].exists():
             return []

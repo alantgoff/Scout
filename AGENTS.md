@@ -119,13 +119,15 @@ about the hidden-`.pth` issue).
 ```
 scout/
   cli.py            Typer app — ALL orchestration. Commands: run, source,
-                    inspect, verify, reclassify, probe, demo, export, budget,
-                    strategy, thesis, publish, ui + the v9 additions: migrate,
-                    worker, jobs, schedule, digest, memo, hindsight. Pipeline
-                    helpers: _run_pipeline, _enrich_accounts, _run_discovery,
-                    _merge_accounts (fills Account.sources), _fetch_tweets
-                    (parallel for free adapters), _resolve_thesis_or_exit
-                    (explicit --thesis-id → workspace default → file).
+                    add, inspect, verify, reclassify, probe, demo, export,
+                    budget, strategy, thesis, publish, ui + the v9 additions:
+                    migrate, worker, jobs, schedule, digest, memo, hindsight.
+                    Pipeline helpers: _run_pipeline, _enrich_accounts,
+                    _run_discovery, _merge_accounts (fills Account.sources),
+                    _fetch_tweets (parallel for free adapters),
+                    _resolve_thesis_or_exit (explicit --thesis-id → workspace
+                    default → file), _parse_add_target (handle / x.com URL /
+                    company website → the key a manual add is stored under).
   config.py         Pydantic Settings (.env) + Thesis/Seeds/SignalParams (yaml)
                     + save_thesis/save_seeds (shared by CLI + UI).
                     STAGE_* maps: stage → search categories / discovery sources.
