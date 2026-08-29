@@ -43,6 +43,11 @@ CSV_COLUMNS = [
     "funding_stage",
     "funding_amount",
     "funding_investors",
+    "company_status",
+    "company_status_note",
+    "hq",
+    "founded_year",
+    "founders",
     "sector",
     "subsector",
     "business_model",
@@ -160,6 +165,13 @@ def write_csv(leads: list[Lead], out_dir: Path, thesis: Thesis | None = None) ->
                     "funding_investors": (
                         ";".join(llm.funding_investors) if llm else ""
                     ),
+                    "company_status": (llm.company_status or "") if llm else "",
+                    "company_status_note": llm.company_status_note if llm else "",
+                    "hq": (llm.hq or "") if llm else "",
+                    "founded_year": (
+                        str(llm.founded_year) if llm and llm.founded_year else ""
+                    ),
+                    "founders": ";".join(llm.founders) if llm else "",
                     "sector": (llm.sector or "") if llm else "",
                     "subsector": (llm.subsector or "") if llm else "",
                     "business_model": (llm.business_model or "") if llm else "",

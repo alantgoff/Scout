@@ -37,13 +37,16 @@ from scout.config import (
 # `thesis_path` is a local variable name throughout this module (the --thesis
 # option); alias the library-path helper so the two can never shadow.
 from scout.config import thesis_path as thesis_library_path
-from scout import web
+import anthropic
+
+from scout import agents, web
 from scout.companies import display_name
 from scout.export import print_top_table, write_csv, write_markdown
 from scout.ingest.base import DiscoverySource, SourceAdapter
 from scout.ingest.arxiv_src import normalize_author
 from scout.ingest.xapi_src import BudgetExceededError
 from scout.models import (
+    COMPANY_STATUS_LABELS,
     FUNDING_STAGE_LABELS,
     Account,
     Lead,
@@ -1125,27 +1128,45 @@ def add(
     thesis_path: Annotated[
         Path, typer.Option("--thesis", help="Path to thesis.yaml.")
     ] = Path("thesis.yaml"),
+    do_research: Annotated[
+        bool,
+        typer.Option("--research/--no-research", help="Crawl the site and research "
+                     "the company live (name, X handle, founders, HQ, funding, and "
+                     "whether it still exists) before classifying."),
+    ] = True,
     do_classify: Annotated[
         bool,
         typer.Option("--classify/--no-classify", help="Read the company's website "
                      "and classify it with Claude (default), or record only what "
                      "you typed."),
     ] = True,
+    force: Annotated[
+        bool,
+        typer.Option("--force", help="Add it even when the research finds no "
+                     "company at this domain."),
+    ] = False,
 ) -> None:
-    """Add ONE company by hand and put it in the pipeline.
+    """Add ONE company by domain and let the system fill in the rest.
 
     Sourcing finds companies; this is for the ones that reach you some other
-    way — a founder's email, a portfolio intro, a link someone sent. It runs
-    the same path a discovered lead does (website fetch → heuristics → Claude
-    → scoring), so a hand-added company is scored on the same evidence and
-    against the same thesis as everything else, and is never a row of
-    unscorable free text sitting in the middle of the database.
+    way — a founder's email, a portfolio intro, a link someone sent. Give it a
+    domain and it crawls the site, researches the company live (name, X handle,
+    GitHub org, founders, HQ, founding year, funding, and whether the company
+    is still independent), then runs the SAME classifier and scorer every
+    discovered lead goes through. A hand-added company ends up comparable to a
+    sourced one instead of a row of unscorable free text.
 
-    Two things it deliberately does NOT do. It does not drop the company on
-    the disqualifiers — you asked for it by name, so it says what fired and
-    keeps it. And with --no-classify it records a verdict grounded "manual",
-    which the scoring treats as unverified: what a person typed is not
-    evidence, and the score says so.
+    The research answers one question a website cannot: whether the company
+    still exists as itself. An acquired or wound-down company keeps its site,
+    its X account and its press coverage, and reads as a thriving independent
+    startup to every other input this system has.
+
+    Three things it deliberately does NOT do. It does not drop the company on
+    the disqualifiers — you asked for it by name, so it names what fired and
+    keeps it. It does not let research overwrite a judgment: the classifier
+    still owns thesis fit and the scorecard. And with --no-research
+    --no-classify it records only what you typed, grounded "manual", which the
+    scoring treats as unverified.
     """
     settings = Settings()
     thesis = _load_thesis_or_exit(thesis_path)
@@ -1172,6 +1193,63 @@ def add(
     seeds = _load_seeds_or_default()
     console.print(f"Thesis: [bold]{_thesis_banner(thesis, seeds, store)}[/bold]")
 
+    # --- crawl + research: everything the person did not have to type --------
+    # One warning, not three: without a key nothing here can read anything, so
+    # skip the crawl too rather than spending fetches on text no one will see.
+    if not settings.anthropic_api_key and (do_research or do_classify):
+        console.print(
+            "[yellow]ANTHROPIC_API_KEY not set — no research, no "
+            "classification. Recording what you typed.[/yellow]"
+        )
+        do_research = do_classify = False
+
+    pages: list[SitePage] = []
+    if website and (do_research or do_classify):
+        console.print(f"Crawling [bold]{website}[/bold]...")
+        pages = asyncio.run(web.fetch_site_bundle(website, settings, store=store))
+        usable = [x for x in pages if x.usable]
+        console.print(
+            f"Read [bold]{len(usable)}[/bold] of {len(pages)} pages."
+            if usable else
+            f"[yellow]Nothing readable at {website} "
+            f"({pages[0].status if pages else 'unreachable'}).[/yellow]"
+        )
+
+    profile = agents.CompanyProfile()
+    research_meta: dict = {"researched": False, "searches": 0, "fetches": 0}
+    if do_research and website:
+        console.print("Researching the company...")
+        try:
+            profile, research_meta = agents.research_company(
+                website, settings,
+                site_text=web.bundle_text(pages, settings.web_text_max_chars),
+                on_event=lambda kind, detail: console.print(
+                    f"  [dim]{kind}: {detail[:90]}[/dim]"),
+            )
+        except (RuntimeError, anthropic.APIError) as exc:
+            console.print(f"[yellow]Research failed ({exc}) — continuing without it.[/yellow]")
+    elif do_research and not website:
+        console.print(
+            "[dim]No website to research — pass --url to enable it. Add by "
+            "domain (`scout add pollen-robotics.com`) to skip the handle.[/dim]"
+        )
+
+    if research_meta.get("researched") and not profile.is_company and not force:
+        console.print(
+            f"[red]No company found at {website}.[/red] "
+            f"{profile.not_company_reason or 'The research established nothing.'}\n"
+            "[dim]Add it anyway with --force, or --no-research to skip the check.[/dim]"
+        )
+        raise typer.Exit(1)
+
+    # A researched X handle re-keys the entry, so a later sourcing run merges
+    # onto this row instead of creating a second one for the same company.
+    # Only when the handle we have is a slug WE invented from the domain — an
+    # explicitly typed handle is the person's answer and stands.
+    if derived_site and profile.x_handle:
+        console.print(f"[dim]Found @{profile.x_handle} — keying the entry to it.[/dim]")
+        handle, profile_url = profile.x_handle, None
+
     # Merge onto the existing row rather than replacing it: a company sourcing
     # already found keeps its followers, watchers and discovery provenance.
     # `source`/`sources` are NOT touched for a known account — a person typing
@@ -1180,18 +1258,26 @@ def add(
     existing = store.get_account(handle)
     if existing is not None:
         console.print(f"[dim]@{existing.handle} is already in the database — updating it.[/dim]")
+    researched_site = web.normalize_site_url(profile.website)
+    github_repo = (
+        f"https://github.com/{profile.github_org.strip('/').rsplit('/', 1)[-1]}"
+        if profile.github_org else None
+    )
     account = Account(
         id=existing.id if existing else f"manual:{handle.lower()}",
         handle=existing.handle if existing else handle,
-        name=name or (existing.name if existing else "") or handle,
-        bio=bio or (existing.bio if existing else ""),
-        website=website or (existing.website if existing else None),
+        name=name or profile.company_name or (existing.name if existing else "") or handle,
+        # The bio drives the heuristics. Prefer a real X bio; fall back to the
+        # researched one-liner, which is at least a sourced description of the
+        # company rather than nothing.
+        bio=bio or (existing.bio if existing else "") or profile.one_line_summary,
+        website=website or researched_site or (existing.website if existing else None),
         profile_url=profile_url or (existing.profile_url if existing else None),
         followers=existing.followers if existing else 0,
         following=existing.following if existing else 0,
         pinned_tweet_id=existing.pinned_tweet_id if existing else None,
         followed_by=list(existing.followed_by) if existing else [],
-        github_repo=existing.github_repo if existing else None,
+        github_repo=(existing.github_repo if existing else None) or github_repo,
         source=existing.source if existing else "manual",
         sources=list(existing.sources) if existing else ["manual"],
         fetched_at=datetime.now(timezone.utc),
@@ -1212,7 +1298,13 @@ def add(
 
     sites: dict[str, SitePage] = {}
     if do_classify:
-        sites = _fetch_candidate_sites([(account, tweets)], settings, store)
+        # Reuse the crawl above when it happened; fall back to the root fetch
+        # so --no-research still grounds the classifier in the site.
+        root = next((x for x in pages if x.usable), None)
+        if root is not None:
+            sites = {account.handle.lower(): root}
+        elif not pages:  # no crawl happened — don't re-fetch a site we just failed on
+            sites = _fetch_candidate_sites([(account, tweets)], settings, store)
         page = sites.get(account.handle.lower())
         if page is not None and not page.usable:
             console.print(
@@ -1260,6 +1352,12 @@ def add(
             "Run `scout reclassify` once a key is set to score it on evidence.[/dim]"
         )
 
+    # The research layers onto the verdict LAST: it owns the facts the
+    # classifier cannot reach (founders, HQ, whether the company still exists)
+    # and fills gaps, but never overwrites a judgment. See agents.apply_research.
+    if research_meta.get("researched"):
+        lead.llm = agents.apply_research(lead.llm, profile)
+
     scored = score_leads([lead], thesis)
     lead = scored[0]
     run_id = datetime.now(timezone.utc).strftime("manual-%Y%m%d-%H%M%S-%f")
@@ -1281,11 +1379,31 @@ def add(
     table.add_row("website", account.website or "-")
     table.add_row("score", f"{lead.score:.1f}")
     table.add_row("thesis fit", f"{verdict.thesis_fit:.2f}" if verdict.thesis_fit is not None else "-")
-    table.add_row("round", FUNDING_STAGE_LABELS.get(verdict.funding_stage or "unknown", "Unknown"))
+    round_line = FUNDING_STAGE_LABELS.get(verdict.funding_stage or "unknown", "Unknown")
+    if verdict.funding_amount:
+        round_line += f" · {verdict.funding_amount}"
+    if verdict.funding_investors:
+        round_line += f" · {', '.join(verdict.funding_investors[:4])}"
+    table.add_row("round", round_line)
+    table.add_row("sector", " · ".join(x for x in (verdict.sector, verdict.subsector) if x) or "-")
+    table.add_row("HQ", verdict.hq or "-")
+    table.add_row("founded", str(verdict.founded_year) if verdict.founded_year else "-")
+    table.add_row("founders", "\n".join(verdict.founders) if verdict.founders else "-")
     table.add_row("grounding", verdict.grounding or "-")
     table.add_row("summary", verdict.product_summary or verdict.one_line_summary or "-")
     table.add_row("status", STATUS_LABELS[status])
+    if verdict.research_sources:
+        table.add_row("sources", "\n".join(verdict.research_sources[:5]))
     console.print(table)
+    # The one finding that changes what this company IS. Loud, not a table row:
+    # everything downstream — the score, the memo, the outreach draft — assumes
+    # a company you can still invest in.
+    if verdict.company_status in ("acquired", "merged", "shut_down"):
+        console.print(
+            f"[bold yellow]⚠ {COMPANY_STATUS_LABELS[verdict.company_status]}[/bold yellow] — "
+            f"{verdict.company_status_note or 'no detail'} "
+            f"[dim](source: {verdict.company_status_evidence or 'unstated'})[/dim]"
+        )
     console.print(
         f"Added [bold]{display_name(lead)}[/bold] as "
         f"[bold]{STATUS_LABELS[status]}[/bold] (run {run_id})."

@@ -117,6 +117,7 @@ from scout import jobs as jobs_mod
 from scout import notify
 from scout import theses as theses_mod
 from scout.models import (
+    COMPANY_STATUS_LABELS,
     FUNDING_STAGE_LABELS,
     FUNDING_STAGE_ORDER,
     Lead,
@@ -186,7 +187,10 @@ QUALITY_DIM_LABEL = {
 # Scorecard interpretation bands (rubric.band_for over the 0-100 total).
 BAND_LABELS = rubric_mod.BAND_LABELS
 
-GROUNDED_SOURCES = {"website", "pinned_tweet", "tweets", "github"}
+# "research" is the company-research agent's grounding (agents.research_company):
+# cited pages it fetched live. Strongest evidence available for a company with
+# no X presence for the classifier to read.
+GROUNDED_SOURCES = {"website", "pinned_tweet", "tweets", "github", "research"}
 
 
 def _grounding_chip(verdict: LLMVerdict) -> tuple[str, str] | None:
@@ -2117,6 +2121,15 @@ def _lead_card(
     comps = score_components(lead, thesis)
 
     chips: list[tuple[str, str]] = []
+    # FIRST, ahead of everything: a company that is no longer its own company.
+    # An acquired or wound-down company keeps its site, its X account and its
+    # press, so every other chip on this card can look healthy while the deal
+    # does not exist. Face-position is deliberate — this must not be one of
+    # the chips that overflows into Details.
+    if verdict and verdict.company_status in ("acquired", "merged", "shut_down"):
+        label = COMPANY_STATUS_LABELS[verdict.company_status]
+        note = verdict.company_status_note.strip()
+        chips.append((f"⚠ {label}" + (f" — {note}" if note else ""), "status"))
     if verdict and verdict.thesis_fit is not None:
         chips.append((f"Fit {verdict.thesis_fit:.0%}", "accent"))
     if verdict is not None and (g_chip := _grounding_chip(verdict)) is not None:
@@ -2156,6 +2169,11 @@ def _lead_card(
     # Keep the card face calm; tags, provenance, and any overflow live in Details.
     face_chips = chips[:7]
     detail_chips: list[tuple[str, str]] = [(t, "") for t in (verdict.tags if verdict else [])]
+    if verdict and verdict.hq:
+        detail_chips.append((verdict.hq, ""))
+    if verdict and verdict.founded_year:
+        detail_chips.append((f"founded {verdict.founded_year}", ""))
+    detail_chips += [(f, "") for f in (verdict.founders if verdict else [])[:4]]
     if len({s for s in account.sources if s}) > 1:
         detail_chips.append((f"sources: {', '.join(sorted({s for s in account.sources if s}))}", ""))
     detail_chips += chips[7:]

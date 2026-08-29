@@ -1,7 +1,5 @@
 """Claude-powered workflow agents for the VC loop.
 
-Two agents:
-
 - **Strategy agent** (`generate_strategy`): natural-language thesis in, a
   complete sourcing configuration out — keywords, departure markers, the whole
   X query bank, bio searches, GitHub topics, watchlist suggestions, and stage
@@ -22,6 +20,15 @@ Two agents:
   research with cited Sources; streamed with pause_turn continuation and
   an on_event progress callback). Stored in the pipeline table; editable
   and PDF-exportable in the UI.
+
+- **Company-research agent** (`research_company`): one DOMAIN in, the facts
+  about the company behind it out — name, X handle, GitHub org, founders, HQ,
+  founding year, funding, and whether it is still independent — established
+  with live web_search/web_fetch and cited. Facts only: thesis fit and the
+  readiness scorecard stay with the classifier, so a hand-added company is
+  judged by the same code as a discovered one. `apply_research` layers the
+  result onto a verdict (research fills gaps, never overwrites a judgment)
+  and re-validates through LLMVerdict so its evidence rules still bite.
 
 - **Weight-tuning agent** (`suggest_weights`): triage statistics in
   (scout.insights), a reviewed-before-apply weight proposal out — the
@@ -51,8 +58,13 @@ from tenacity import (
 )
 
 from scout import rubric as rubric_mod
-from scout.config import STAGES, Seeds, Settings, Thesis
-from scout.models import Lead
+from scout.config import CUSTOMER_TYPES, STAGES, Seeds, Settings, Thesis
+from scout.models import (
+    COMPANY_STATUS_LABELS,
+    FUNDING_STAGE_LABELS,
+    Lead,
+    LLMVerdict,
+)
 from scout.score import scorecard_score
 
 PARSE_ATTEMPTS = 3
@@ -580,7 +592,7 @@ def _stream_request(
         return stream.get_final_message()
 
 
-def _run_memo_stream(
+def _run_research_stream(
     client: anthropic.Anthropic,
     settings: Settings,
     system: str,
@@ -588,8 +600,13 @@ def _run_memo_stream(
     use_tools: bool,
     on_event,
     meta: dict,
+    *,
+    max_tokens: int,
+    max_searches: int = MEMO_MAX_SEARCHES,
+    max_fetches: int = MEMO_MAX_FETCHES,
+    max_continuations: int = MEMO_MAX_CONTINUATIONS,
 ):
-    """The generation loop, hardened:
+    """The web-research generation loop, hardened:
 
     - each request retries transient failures (rate limit / 5xx / dropped
       connection) with exponential backoff, rolling the narration counters
@@ -597,25 +614,26 @@ def _run_memo_stream(
     - pause_turn continuations re-declare the research tools with only the
       REMAINING search/fetch budget (max_uses is per-request — without this
       every continuation would reopen the full allowance)
-    - the loop is capped at MEMO_MAX_CONTINUATIONS; the caller flags a
+    - the loop is capped at `max_continuations`; the caller flags a
       still-paused final response as incomplete rather than looping forever
-    Returns the final Message."""
+    Returns the final Message.
+
+    Shared by the memo agent (long prose) and the company-research agent
+    (short JSON) — the continuation and budget bookkeeping is the hard part
+    and is identical for both; only the token ceiling and the budgets differ.
+    """
     messages: list[dict] = [{"role": "user", "content": context}]
     response = None
-    for _turn in range(max(MEMO_MAX_CONTINUATIONS, 1)):
+    for _turn in range(max(max_continuations, 1)):
         kwargs: dict = dict(
-            # 8000 (was 6000) for the 12-section contract at 1100-1700 words
-            # plus tables and Sources. Overrunning sets meta["truncated"] and
-            # the UI warns, so this fails loudly — but a memo cut off mid-Risks
-            # is worthless, and the headroom costs nothing when unused.
-            model=settings.claude_model, max_tokens=8000,
+            model=settings.claude_model, max_tokens=max_tokens,
             system=system, messages=messages,
         )
         if use_tools:
             kwargs["tools"] = _web_tools(
                 settings.claude_model,
-                MEMO_MAX_SEARCHES - meta["searches"],
-                MEMO_MAX_FETCHES - meta["fetches"],
+                max_searches - meta["searches"],
+                max_fetches - meta["fetches"],
             )
         for attempt in range(MEMO_STREAM_RETRIES):
             counters = (meta["searches"], meta["fetches"])
@@ -639,6 +657,27 @@ def _run_memo_stream(
                     {"role": "assistant", "content": response.content}]
         _emit(on_event, "continue", "research continues…")
     return response
+
+
+def _run_memo_stream(
+    client: anthropic.Anthropic,
+    settings: Settings,
+    system: str,
+    context: str,
+    use_tools: bool,
+    on_event,
+    meta: dict,
+):
+    """The memo generation loop — _run_research_stream at memo scale.
+
+    max_tokens 8000 (was 6000) for the 12-section contract at 1100-1700 words
+    plus tables and Sources. Overrunning sets meta["truncated"] and the UI
+    warns, so this fails loudly — but a memo cut off mid-Risks is worthless,
+    and the headroom costs nothing when unused."""
+    return _run_research_stream(
+        client, settings, system, context, use_tools, on_event, meta,
+        max_tokens=8000,
+    )
 
 
 def investment_memo(
@@ -1292,3 +1331,349 @@ def research_brief(
         return brief, True
     except anthropic.APIError:
         return _brief_template(lead), False
+
+
+# ------------------------------------------------ company research (by domain)
+
+# Budgets for `research_company`. Smaller than the memo's: this agent answers a
+# fixed list of facts about ONE company, not an open-ended analysis, and every
+# question it asks is cheap to target ("<company> funding", "<company> founders").
+RESEARCH_TIMEOUT_S = 300.0
+RESEARCH_MAX_SEARCHES = 8
+RESEARCH_MAX_FETCHES = 8
+RESEARCH_MAX_CONTINUATIONS = 6
+RESEARCH_MAX_SOURCES = 12
+
+_RESEARCH_SYSTEM = """You are a venture analyst establishing the FACTS about one company \
+from its web domain. You are not judging it and not writing prose — you are filling in a \
+record another system will score. Someone typed a domain; everything else is yours to find.
+
+You have web_search and web_fetch. The user message may include text already crawled from \
+the site; it is a starting point, never the whole answer.
+
+RESEARCH ORDER — spend the budget in this order and stop when it runs out:
+1. The company itself: what it builds, who it sells to, where it is based, when it was founded.
+2. CURRENT STATUS — has it been acquired, merged, or shut down? Search for this explicitly; \
+do not assume a company is independent because its site is live. This is the single most \
+important question here: an acquired or dead company keeps its website, its X account and its \
+press coverage, and looks exactly like a thriving one to everything downstream of you.
+3. The founders, by name, with their prior affiliation.
+4. Funding — rounds, amounts, named investors.
+5. Its X/Twitter handle and GitHub org, if it has them.
+
+EVIDENCE RULES (non-negotiable):
+- Every field is either something you READ or null. Never fill a field from prior knowledge \
+of the company; if you did not see it in the crawled text or in a source you fetched this \
+turn, it is null. You will recognise some of these companies — that is exactly when this rule \
+matters.
+- x_handle and github_org: ONLY if you saw the actual handle. Never derive one from the \
+company name, and never guess that a company "probably" has one. A wrong handle silently \
+merges this company's record into a stranger's.
+- funding_stage is "unknown" unless an announcement says otherwise, and then \
+funding_evidence must name where you read it. Never infer a round from headcount, polish or \
+press volume.
+- company_status defaults to "independent". Use "acquired", "merged" or "shut_down" only with \
+company_status_evidence naming the source; without it the status is discarded.
+- is_company: false when this domain is not a company at all — a parked domain, a personal \
+blog, a agency/consultancy site, a conference, a dead link, or a page you could not establish \
+anything from. Say why in not_company_reason. Do not invent a company to fill the record.
+- Dates and places as stated. "Bordeaux, France", not "France (probably)".
+
+Budget: at most {max_searches} searches and {max_fetches} fetches. If it runs out, leave the \
+remaining fields null — never close the gap from memory.
+
+Respond with ONLY a JSON object, no prose and no markdown fences:
+{{"is_company": bool, "not_company_reason": str|null, "company_name": str|null, \
+"website": str|null, "x_handle": str|null, "github_org": str|null, \
+"one_line_summary": str, "product_summary": str|null, \
+"sector": str|null, "subsector": str|null, "business_model": str|null, \
+"customer_type": "b2b"|"b2c"|"b2b2c"|"mixed"|null, \
+"stage": "idea"|"stealth"|"launched"|"scaling"|null, \
+"hq": str|null, "founded_year": int|null, "founders": [str], \
+"funding_stage": "bootstrapped"|"pre_seed"|"seed"|"series_a"|"series_b"|"series_c_plus"|"unknown", \
+"funding_amount": str|null, "funding_investors": [str], "funding_evidence": str|null, \
+"company_status": "independent"|"acquired"|"merged"|"shut_down"|"unknown", \
+"company_status_note": str, "company_status_evidence": str|null, \
+"tags": [str], "sources": [str]}}
+
+founders: "Name — role, prior affiliation" per entry, only for people you can name.
+tags: 2-5 lowercase descriptors a VC would filter on.
+sources: the URLs you actually used."""
+
+
+class CompanyProfile(BaseModel):
+    """What `research_company` established about one domain.
+
+    Facts only. Thesis fit, the readiness scorecard and every other judgment
+    stay with the classifier (scout.signals.llm), which owns them for every
+    other startup in the database — a hand-added company must be judged by the
+    same code as a discovered one, or the two are not comparable.
+    """
+
+    is_company: bool = True
+    not_company_reason: str = ""
+    company_name: str | None = None
+    website: str | None = None
+    x_handle: str | None = None
+    github_org: str | None = None
+    one_line_summary: str = ""
+    product_summary: str | None = None
+    sector: str | None = None
+    subsector: str | None = None
+    business_model: str | None = None
+    customer_type: str | None = None
+    stage: str | None = None
+    hq: str | None = None
+    founded_year: int | None = None
+    founders: list[str] = Field(default_factory=list)
+    funding_stage: str = "unknown"
+    funding_amount: str | None = None
+    funding_investors: list[str] = Field(default_factory=list)
+    funding_evidence: str | None = None
+    company_status: str = "independent"
+    company_status_note: str = ""
+    company_status_evidence: str | None = None
+    tags: list[str] = Field(default_factory=list)
+    sources: list[str] = Field(default_factory=list)
+
+
+def _clean_handle(value) -> str | None:
+    """A bare X handle from whatever the model returned, or None.
+
+    Accepts "@pollenrobotics", "x.com/pollenrobotics", a full profile URL.
+    Rejects anything that isn't a plausible handle, because a wrong handle is
+    the one error here that silently merges two companies' records.
+    """
+    if not isinstance(value, str) or not value.strip():
+        return None
+    text = value.strip()
+    if "/" in text:
+        parts = [p for p in text.split("?")[0].rstrip("/").split("/") if p]
+        if not parts:
+            return None
+        text = parts[-1]
+    text = text.lstrip("@")
+    return text if re.fullmatch(r"[A-Za-z0-9_]{1,15}", text) else None
+
+
+def parse_company_profile(text: str) -> CompanyProfile:
+    """Parse + normalize the research agent's JSON. Pure — unit-testable.
+
+    Tolerant about shape (a lone string where a list belongs, a year as
+    "2016"), strict about vocabulary: off-list enums fall back to the safe
+    default rather than propagating a value the models would reject later.
+    """
+    data = json.loads(_strip_code_fences(text))
+    if not isinstance(data, dict):
+        raise ValueError("expected a JSON object")
+
+    def as_list(value) -> list[str]:
+        if isinstance(value, str):
+            value = [value]
+        if not isinstance(value, list):
+            return []
+        return [" ".join(str(v).split()) for v in value if str(v).strip()]
+
+    def as_text(value) -> str | None:
+        if not isinstance(value, str) or not value.strip():
+            return None
+        return " ".join(value.split())
+
+    year = data.get("founded_year")
+    try:
+        year = int(year) if year is not None else None
+    except (TypeError, ValueError):
+        year = None
+    if year is not None and not (1800 <= year <= 2100):
+        year = None
+
+    funding_stage = str(data.get("funding_stage") or "unknown").strip().lower()
+    if funding_stage not in FUNDING_STAGE_LABELS:
+        funding_stage = "unknown"
+    status = str(data.get("company_status") or "independent").strip().lower()
+    if status not in COMPANY_STATUS_LABELS:
+        status = "unknown"
+    customer_type = as_text(data.get("customer_type"))
+    if customer_type is not None and customer_type.lower() not in CUSTOMER_TYPES:
+        customer_type = None
+    stage = as_text(data.get("stage"))
+    if stage is not None and stage.lower() not in STAGES:
+        stage = None
+
+    return CompanyProfile(
+        is_company=bool(data.get("is_company", True)),
+        not_company_reason=as_text(data.get("not_company_reason")) or "",
+        company_name=as_text(data.get("company_name")),
+        website=as_text(data.get("website")),
+        x_handle=_clean_handle(data.get("x_handle")),
+        github_org=as_text(data.get("github_org")),
+        one_line_summary=as_text(data.get("one_line_summary")) or "",
+        product_summary=as_text(data.get("product_summary")),
+        sector=as_text(data.get("sector")),
+        subsector=as_text(data.get("subsector")),
+        business_model=as_text(data.get("business_model")),
+        customer_type=customer_type.lower() if customer_type else None,
+        stage=stage.lower() if stage else None,
+        hq=as_text(data.get("hq")),
+        founded_year=year,
+        founders=as_list(data.get("founders"))[:8],
+        funding_stage=funding_stage,
+        funding_amount=as_text(data.get("funding_amount")),
+        funding_investors=as_list(data.get("funding_investors"))[:10],
+        funding_evidence=as_text(data.get("funding_evidence")),
+        company_status=status,
+        company_status_note=as_text(data.get("company_status_note")) or "",
+        company_status_evidence=as_text(data.get("company_status_evidence")),
+        tags=[t.lower() for t in as_list(data.get("tags"))][:5],
+        sources=as_list(data.get("sources"))[:RESEARCH_MAX_SOURCES],
+    )
+
+
+
+def apply_research(verdict: LLMVerdict, profile: CompanyProfile) -> LLMVerdict:
+    """Layer a CompanyProfile onto a classifier verdict. Pure — unit-testable.
+
+    Who wins is decided by who could actually have known:
+
+    - The classifier owns every JUDGMENT (thesis_fit, the readiness scorecard,
+      value-add, why_interesting). Research does not touch them, so a
+      hand-added company is judged by the same code as a discovered one.
+    - Research owns the facts the classifier has no way to reach: HQ, founding
+      year, founders by name, and whether the company is still its own company.
+      It only ever sees a bio, some tweets and cached site text; none of those
+      mention an acquisition.
+    - For the facts BOTH can reach (product, sector, round), research fills
+      gaps and never overwrites: a classifier that established the product
+      from evidence it read is not improved by a second opinion, but one that
+      returned null is.
+
+    Funding is the exception to "never overwrite": a researched round that
+    cites its announcement beats a classifier "unknown", because "unknown" is
+    what the classifier is instructed to say when the dossier is silent — and
+    the dossier is silent about almost every round.
+    """
+    out = verdict.model_copy(deep=True)
+
+    # Facts only research can establish.
+    out.hq = profile.hq or out.hq
+    out.founded_year = profile.founded_year or out.founded_year
+    if profile.founders:
+        out.founders = list(profile.founders)
+    if profile.company_status and profile.company_status != "independent":
+        out.company_status = profile.company_status
+        out.company_status_note = profile.company_status_note
+        out.company_status_evidence = profile.company_status_evidence
+    elif out.company_status is None:
+        out.company_status = profile.company_status or None
+    if profile.sources:
+        out.research_sources = list(profile.sources)
+
+    # Gap-filling: research answers only what the classifier left null.
+    out.company_name = out.company_name or profile.company_name
+    out.company_url = out.company_url or profile.website
+    out.product_summary = out.product_summary or profile.product_summary
+    out.sector = out.sector or profile.sector
+    out.subsector = out.subsector or profile.subsector
+    out.business_model = out.business_model or profile.business_model
+    out.customer_type = out.customer_type or profile.customer_type
+    out.stage = out.stage or profile.stage
+    out.one_line_summary = out.one_line_summary or profile.one_line_summary
+    if not out.tags:
+        out.tags = list(profile.tags)
+
+    # Funding: a cited round beats an uncited "unknown", never a cited one.
+    if (profile.funding_stage not in ("", "unknown")
+            and (profile.funding_evidence or "").strip()
+            and out.funding_stage in (None, "unknown")):
+        out.funding_stage = profile.funding_stage
+        out.funding_amount = profile.funding_amount
+        out.funding_investors = list(profile.funding_investors)
+        out.funding_evidence = profile.funding_evidence
+
+    # Grounding: cited live research IS product evidence — the strongest kind
+    # available for a company with no X presence for the classifier to read.
+    # Only claim it when the research actually cited something.
+    if profile.sources and profile.product_summary and out.grounding in (
+        None, "none", "bio", "manual",
+    ):
+        out.grounding = "research"
+
+    # Re-validate through the model rather than returning the mutated copy.
+    # LLMVerdict's guarantees — a round needs an announcement, a status change
+    # needs a source — live in model validators, and pydantic does not re-run
+    # those on attribute assignment. Without this the overlay is a way in for
+    # exactly the claims those validators exist to reject.
+    return LLMVerdict.model_validate(out.model_dump())
+
+
+def research_company(
+    domain: str,
+    settings: Settings,
+    *,
+    site_text: str = "",
+    on_event=None,
+) -> tuple[CompanyProfile, dict]:
+    """Establish the facts about one company from its domain.
+
+    `site_text` is the crawled site bundle (web.bundle_text) when the caller
+    has one — a head start, not a substitute: the agent still searches for the
+    things a website never says about itself, above all whether the company is
+    still independent.
+
+    Returns (profile, meta) where meta is {"searches", "fetches", "sources",
+    "researched"}. `researched` is False when no Anthropic key is configured —
+    the caller gets an empty profile and must not present it as findings.
+    Raises RuntimeError only when the model's output cannot be parsed.
+    """
+    meta: dict = {"searches": 0, "fetches": 0, "sources": [], "researched": False}
+    if not settings.anthropic_api_key:
+        return CompanyProfile(), meta
+
+    system = _RESEARCH_SYSTEM.format(
+        max_searches=RESEARCH_MAX_SEARCHES, max_fetches=RESEARCH_MAX_FETCHES
+    )
+    context = f"Domain: {domain}\n"
+    if site_text.strip():
+        context += (
+            "\nText already crawled from this domain (a starting point — it "
+            "cannot tell you the company's current status or its funding):\n"
+            f"{site_text}\n"
+        )
+    else:
+        context += (
+            "\nNothing could be crawled from this domain — it may be JS-only, "
+            "blocking bots, parked, or dead. Establish from search whether "
+            "there is a company here at all.\n"
+        )
+
+    client = _client(settings, RESEARCH_TIMEOUT_S)
+    prompt = context
+    last_error: Exception | None = None
+    for _attempt in range(PARSE_ATTEMPTS):
+        response = _run_research_stream(
+            client, settings, system, prompt, True, on_event, meta,
+            max_tokens=4000,
+            max_searches=RESEARCH_MAX_SEARCHES,
+            max_fetches=RESEARCH_MAX_FETCHES,
+            max_continuations=RESEARCH_MAX_CONTINUATIONS,
+        )
+        text = "".join(
+            block.text for block in response.content
+            if getattr(block, "type", None) == "text"
+        )
+        try:
+            profile = parse_company_profile(text)
+        except (json.JSONDecodeError, ValueError) as exc:
+            last_error = exc
+            prompt = context + _CORRECTIVE_NOTE
+            continue
+        # Prefer the URLs the server tools actually returned over the model's
+        # own list: _harvest_sources reads the tool result blocks, which the
+        # model cannot embellish.
+        harvested = _harvest_sources(response.content)
+        meta["sources"] = (harvested or profile.sources)[:RESEARCH_MAX_SOURCES]
+        if harvested:
+            profile.sources = meta["sources"]
+        meta["researched"] = True
+        return profile, meta
+    raise RuntimeError(f"company research returned unparseable output: {last_error}")

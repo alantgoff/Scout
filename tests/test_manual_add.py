@@ -199,3 +199,134 @@ def test_latest_lead_is_the_newest_row_and_case_insensitive(tmp_path: Path) -> N
     lead = store.latest_lead("@PollenRobotics")
     assert lead is not None and lead.score == 72.0
     assert store.latest_lead("nobody") is None
+
+
+# --- adding by domain: the system fills in the rest ---------------------------
+
+
+def _stub_research(monkeypatch, profile, *, researched: bool = True):
+    """Replace the live research + crawl + classify calls. The command's own
+    wiring is what these tests are about, not the agents behind it."""
+    from scout import agents, cli, web
+
+    async def no_crawl(*_a, **_kw):
+        return []
+
+    monkeypatch.setattr(web, "fetch_site_bundle", no_crawl)
+    monkeypatch.setattr(
+        agents, "research_company",
+        lambda *a, **kw: (profile, {"researched": researched,
+                                    "searches": 2, "fetches": 1, "sources": []}),
+    )
+    monkeypatch.setattr(cli, "classify", lambda *a, **kw: {})
+
+
+def researched_add(tmp_path: Path, *args: str):
+    return runner.invoke(
+        app, ["add", *args, "--thesis", "thesis.yaml"],
+        env={"DB_PATH": str(tmp_path / "scout.db"), "ANTHROPIC_API_KEY": "k"},
+    )
+
+
+def test_a_domain_add_is_re_keyed_to_the_x_handle_research_found(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """The whole point of finding the handle. Keyed by the domain slug, the
+    next sourcing run that discovers @pollenrobotics creates a SECOND record
+    for the same company and the database quietly double-counts it."""
+    from scout.agents import CompanyProfile
+
+    _stub_research(monkeypatch, CompanyProfile(
+        company_name="Pollen Robotics", x_handle="pollenrobotics",
+        github_org="pollen-robotics", one_line_summary="open-source robots",
+        website="https://pollen-robotics.com/",
+    ))
+    result = researched_add(tmp_path, "pollen-robotics.com")
+    assert result.exit_code == 0, result.output
+
+    store = Store(tmp_path / "scout.db")
+    assert store.get_account("pollen-robotics") is None  # the slug was not kept
+    account = store.get_account("pollenrobotics")
+    assert account is not None
+    assert account.name == "Pollen Robotics"
+    assert account.url == "https://x.com/pollenrobotics"
+    assert account.github_repo == "https://github.com/pollen-robotics"
+    # No X bio to read, so the researched one-liner backs the heuristics.
+    assert account.bio == "open-source robots"
+
+
+def test_a_typed_handle_is_the_persons_answer_and_is_not_re_keyed(
+    tmp_path: Path, monkeypatch
+) -> None:
+    from scout.agents import CompanyProfile
+
+    _stub_research(monkeypatch, CompanyProfile(
+        company_name="Pollen Robotics", x_handle="someoneelse",
+    ))
+    result = researched_add(tmp_path, "@pollenrobotics", "--url", "pollen-robotics.com")
+    assert result.exit_code == 0, result.output
+
+    store = Store(tmp_path / "scout.db")
+    assert store.get_account("pollenrobotics") is not None
+    assert store.get_account("someoneelse") is None
+
+
+def test_a_domain_with_no_company_behind_it_is_refused(
+    tmp_path: Path, monkeypatch
+) -> None:
+    from scout.agents import CompanyProfile
+
+    _stub_research(monkeypatch, CompanyProfile(
+        is_company=False, not_company_reason="parked domain",
+    ))
+    result = researched_add(tmp_path, "parked.example")
+    assert result.exit_code == 1
+    assert "parked domain" in result.output
+    assert Store(tmp_path / "scout.db").get_account("parked") is None
+
+    forced = researched_add(tmp_path, "parked.example", "--force")
+    assert forced.exit_code == 0, forced.output
+    assert Store(tmp_path / "scout.db").get_account("parked") is not None
+
+
+def test_research_findings_reach_the_stored_verdict(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """End to end: what the agent established has to survive the classifier
+    fallback, the overlay, scoring and the save — or the add is cosmetic."""
+    from scout.agents import CompanyProfile
+
+    _stub_research(monkeypatch, CompanyProfile(
+        company_name="Pollen Robotics", x_handle="pollenrobotics",
+        product_summary="website: open-source humanoid robots",
+        hq="Bordeaux, France", founded_year=2016,
+        founders=["Matthieu Lapeyre — co-founder, ex-INRIA Flowers"],
+        company_status="acquired", company_status_note="Hugging Face, April 2025",
+        company_status_evidence="techcrunch.com 2025-04-14",
+        sources=["https://techcrunch.com/2025/04/14/x"],
+    ))
+    result = researched_add(tmp_path, "pollen-robotics.com")
+    assert result.exit_code == 0, result.output
+    # The one finding that changes what the company IS gets said out loud.
+    assert "Acquired" in result.output and "Hugging Face" in result.output
+
+    lead = Store(tmp_path / "scout.db").latest_lead("pollenrobotics")
+    assert lead is not None and lead.llm is not None
+    assert lead.llm.hq == "Bordeaux, France"
+    assert lead.llm.founded_year == 2016
+    assert lead.llm.founders == ["Matthieu Lapeyre — co-founder, ex-INRIA Flowers"]
+    assert lead.llm.company_status == "acquired"
+    assert lead.llm.research_sources == ["https://techcrunch.com/2025/04/14/x"]
+    assert lead.llm.grounding == "research"
+
+
+def test_no_research_flag_skips_it_entirely(tmp_path: Path, monkeypatch) -> None:
+    from scout import agents
+
+    def boom(*_a, **_kw):
+        raise AssertionError("research ran despite --no-research")
+
+    monkeypatch.setattr(agents, "research_company", boom)
+    result = researched_add(tmp_path, "pollen-robotics.com",
+                            "--no-research", "--no-classify")
+    assert result.exit_code == 0, result.output

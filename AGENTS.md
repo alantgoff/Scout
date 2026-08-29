@@ -128,6 +128,9 @@ scout/
                     _resolve_thesis_or_exit (explicit --thesis-id → workspace
                     default → file), _parse_add_target (handle / x.com URL /
                     company website → the key a manual add is stored under).
+                    `add` is the by-domain path: crawl → agents.research_company
+                    → the normal classify/score pipeline → agents.apply_research
+                    overlays the researched facts onto the verdict.
   config.py         Pydantic Settings (.env) + Thesis/Seeds/SignalParams (yaml)
                     + save_thesis/save_seeds (shared by CLI + UI).
                     STAGE_* maps: stage → search categories / discovery sources.

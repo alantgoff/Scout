@@ -138,6 +138,17 @@ class Signal(BaseModel):
 
 AccountType = Literal["founder", "startup", "other"]
 
+# Is the company still its own company? Only "independent" is assumed; every
+# other value is a claim about an event and has to cite where it was read.
+CompanyStatus = Literal["independent", "acquired", "merged", "shut_down", "unknown"]
+COMPANY_STATUS_LABELS: dict[str, str] = {
+    "independent": "Independent",
+    "acquired": "Acquired",
+    "merged": "Merged",
+    "shut_down": "Shut down",
+    "unknown": "Unknown",
+}
+
 
 class LLMVerdict(BaseModel):
     """Claude's classification of one account.
@@ -211,6 +222,24 @@ class LLMVerdict(BaseModel):
     # Section-level manual overrides (section key → 0..100) — written only
     # by score.apply_override at load time, never by the classifier.
     scorecard_manual: dict[str, float] = Field(default_factory=dict)
+    # v9 — company facts established by LIVE research (agents.research_company),
+    # which the batch classifier cannot reach: it only ever sees a bio, some
+    # tweets and cached site text. All optional, so every cached verdict still
+    # validates.
+    #
+    # `company_status` is the field that earns its keep. A company that was
+    # acquired, merged or wound down still has a live website, a busy X account
+    # and glowing press — every input the classifier reads — and reads as a
+    # thriving independent startup right up until someone tries to invest in
+    # it. Like funding_stage, a non-default status is only ever set from a
+    # source, and is reset when it can't name one.
+    hq: str | None = None  # "Bordeaux, France"
+    founded_year: int | None = None
+    founders: list[str] = Field(default_factory=list)  # "Ada Lin — ex-DeepMind, co-founder"
+    company_status: CompanyStatus | None = None
+    company_status_note: str = ""  # "acquired by Hugging Face, April 2025"
+    company_status_evidence: str | None = None  # where that was read
+    research_sources: list[str] = Field(default_factory=list)  # URLs actually used
 
     @field_validator("funding_stage", mode="before")
     @classmethod
@@ -257,6 +286,44 @@ class LLMVerdict(BaseModel):
                 self.funding_stage = "unknown"
                 self.funding_amount = None
                 self.funding_investors = []
+        return self
+
+    @field_validator("company_status", mode="before")
+    @classmethod
+    def _norm_company_status(cls, value):  # noqa: ANN001 — pydantic hook
+        """Normalize instead of rejecting, for the same reason as
+        funding_stage: one off-vocabulary word must not throw inside
+        _parse_verdicts and burn the batch."""
+        if not isinstance(value, str):
+            return None
+        cleaned = value.strip().lower().replace(" ", "_").replace("-", "_")
+        aliases = {
+            "active": "independent", "operating": "independent",
+            "private": "independent", "standalone": "independent",
+            "acquihired": "acquired", "acqui_hired": "acquired",
+            "bought": "acquired", "subsidiary": "acquired",
+            "dead": "shut_down", "defunct": "shut_down", "closed": "shut_down",
+            "wound_down": "shut_down", "ceased": "shut_down", "": "unknown",
+        }
+        cleaned = aliases.get(cleaned, cleaned)
+        return cleaned if cleaned in COMPANY_STATUS_LABELS else "unknown"
+
+    @model_validator(mode="after")
+    def _status_change_requires_evidence(self):
+        """A company that is no longer its own company must say where that
+        was read; without a source it falls back to "independent".
+
+        Same trade as _round_requires_evidence, pointed the other way. There
+        the risk is a fabricated round making a company look past your entry
+        point; here it is a fabricated acquisition killing a live company in
+        your pipeline on a half-remembered headline. Both are decided by
+        whether the model can name a source, because that is the only part of
+        a claim that is cheap to check.
+        """
+        if self.company_status in ("acquired", "merged", "shut_down"):
+            if not (self.company_status_evidence or "").strip():
+                self.company_status = "independent"
+                self.company_status_note = ""
         return self
 
     @field_validator("customer_type", mode="before")

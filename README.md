@@ -167,13 +167,16 @@ reclassify   Re-score without discovery — no X spend, cache-first
   --all                    every startup in the ledger
   --stale-only             only those scored under an older thesis version
 
-add <handle|url>   Add ONE company by hand — for the ones that reach you by
-             email or intro rather than through sourcing. Same path a
-             discovered lead takes (website → heuristics → Claude → score),
-             so it is comparable to everything else in the database.
-  --url · --name · --bio · --note
+add <domain>   Add ONE company by domain; the system fills in the rest.
+             Crawls the site, then researches the company live — name, X
+             handle, GitHub org, founders, HQ, founding year, funding, and
+             whether it is still independent — and runs the SAME classifier
+             and scorer every discovered lead goes through.
   --status longlisted      where to track it (default: longlisted)
+  --url · --name · --bio · --note
+  --no-research            skip the live research
   --no-classify            record only what you typed, grounded "manual"
+  --force                  add it even if no company is found at the domain
 
 thesis       list · show <id> · new <name> · use <id> · clone <id> <name> · archive <id>
 source       Discovery preview — raw accounts per strategy, no scoring or cost
