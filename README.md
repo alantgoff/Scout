@@ -30,7 +30,7 @@ in Finder instead.
 
 ---
 
-## The nine pages
+## The ten pages
 
 **Thesis** — the control room. Write your thesis in plain language and the
 strategy agent generates the whole sourcing configuration: X query bank, bio
@@ -70,6 +70,15 @@ AI-drafted outreach sits below each one.
 memo edit, newest first, filterable by member and kind, with an unread count in
 the nav. With partners in different timezones this is the first thing you open:
 what happened while you were asleep.
+
+**Graph** — the database sideways. A live force-directed map of everything
+the pipeline knows about who connects to whom: companies, their backers,
+founders and the labs they left, acquirers, and the smart money watching —
+every edge derived from cited evidence, never from vibes. Click a node to
+trace its connections with their evidence; focus on one company to see its
+two-hop neighborhood; hub tables underneath answer the standing questions
+(which backer keeps showing up, which lab the founders come from, what else
+an acquirer bought). The same graph answers in the terminal via `scout graph`.
 
 **Evidence** — whether any of this actually works. A backtest scores companies
 using only evidence that was public on a past date, then checks where the ones

@@ -1476,7 +1476,7 @@ def _status_of(lead: Lead) -> str:
 # slim row. Session-state-driven nav (unlike st.tabs) so any button can route to
 # a page via nav_target + rerun. The full thesis lives on the Thesis page.
 PAGES = ["Thesis", "Startups", "Longlist", "Shortlist", "Memos", "Activity",
-         "Evidence", "Automation", "Settings"]
+         "Graph", "Evidence", "Automation", "Settings"]
 # Slack deep links (?s=<handle>&p=<page>) land here: translate them into the
 # existing nav_target/selection mechanism once, then clear the params so a
 # later rerun doesn't keep forcing the same page.
@@ -5469,6 +5469,96 @@ def _render_evidence_trends(runs: list[dict], report) -> None:
         hide_index=True, use_container_width=True,
     )
 
+
+
+if nav == "Graph":
+    from scout import graph_view
+    from scout.graph import REL_LABELS, hubs, node_key
+
+    st.markdown(
+        '<div class="section-title">Graph</div>'
+        '<div class="section-sub">The database sideways: who connects to whom. '
+        'Every edge is derived from evidence the pipeline collected — cited '
+        'rounds, researched founders and their labs, sourced acquisitions, '
+        'watchlist follows. Click a node to trace its connections with their '
+        'evidence.</div>',
+        unsafe_allow_html=True,
+    )
+    if not GRAPH_EDGES:
+        st.info("No edges yet — run a sourcing pass, `scout add` a company, or "
+                "`scout graph --rebuild` from the CLI to derive them.")
+    else:
+        g1, g2, g3 = st.columns([2.2, 1.8, 1.4])
+        # Focus options: every company node in the graph, best-known first.
+        company_labels: dict[str, str] = {}
+        for _gedge in GRAPH_EDGES:
+            for end in ("src", "dst"):
+                if _gedge[f"{end}_type"] == "company":
+                    company_labels.setdefault(_gedge[f"{end}_key"],
+                                              _gedge[f"{end}_label"])
+        focus = g1.selectbox(
+            "Focus", ["Whole database"] + sorted(company_labels,
+                                                 key=lambda k: company_labels[k].lower()),
+            format_func=lambda k: ("Whole database" if k == "Whole database"
+                                   else company_labels[k]),
+            key="graph_focus",
+            help="One company and everything within two hops of it.",
+        )
+        rels = g2.multiselect(
+            "Relationships", list(REL_LABELS),
+            default=[r for r in REL_LABELS if r != "follows"],
+            format_func=lambda r: REL_LABELS.get(r, r), key="graph_rels",
+            help="Watchlist follows are the commonest edge — add them back "
+                 "when you want the smart-money layer.",
+        )
+        cross_only = g3.toggle(
+            "Cross-links only", value=True, key="graph_cross",
+            help="Hide investors/people/labs that touch a single company — "
+                 "they restate that card's own chips.",
+        )
+        focus_key = None if focus == "Whole database" else focus
+        nodes, links = graph_view.graph_data(
+            GRAPH_EDGES, rels=set(rels) or None,
+            cross_links_only=cross_only, focus_key=focus_key,
+        )
+        if not nodes:
+            st.info("Nothing matches these filters — try turning "
+                    "“Cross-links only” off or adding relationship types.")
+        else:
+            st.components.v1.html(
+                graph_view.graph_page_html(nodes, links, height=620,
+                                           focus_key=focus_key),
+                height=632,
+            )
+            st.markdown(
+                f'<div class="subtle">{len(nodes)} nodes · {len(links)} edges '
+                "shown. The same graph answers from the terminal: "
+                "<code>scout graph &lt;name&gt;</code>.</div>",
+                unsafe_allow_html=True,
+            )
+
+        # The sideways questions, answered as tables under the map.
+        sections = [
+            ("Top backers", "invested_in", "src",
+             "portfolio companies in this database"),
+            ("Founder alumni of", "alum_of", "dst", "founders here"),
+            ("Acquirers", "acquired_by", "dst", "companies bought"),
+            ("Most active watchers", "follows", "src", "companies followed"),
+        ]
+        cols = st.columns(len(sections))
+        for col, (title, rel, end, unit) in zip(cols, sections):
+            ranked = [x for x in hubs(GRAPH_EDGES, rel, end=end, limit=6)
+                      if x[1] > 0]
+            with col:
+                st.markdown(f"**{title}**", help=f"count = {unit}")
+                if not ranked:
+                    st.markdown('<div class="subtle">none yet</div>',
+                                unsafe_allow_html=True)
+                for label, n in ranked:
+                    st.markdown(
+                        f'<div class="subtle">{_e(label)} — <b>{n}</b></div>',
+                        unsafe_allow_html=True,
+                    )
 
 
 if nav == "Evidence":

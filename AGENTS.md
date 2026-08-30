@@ -216,6 +216,14 @@ scout/
                     corrected verdict retracts the edges it implied) and
                     queries via graph_edges/graph_hubs/graph_related. CLI:
                     `scout graph`; UI: the Connections block on each card.
+  graph_view.py     The Graph page's canvas, pure: edge rows in, a self-
+                    contained HTML document out (custom force layout, no JS
+                    deps, offline-safe) rendered in a components iframe.
+                    Node palette validated for CVD separation/contrast on
+                    the paper surface; shape is the secondary encoding.
+                    Labels/evidence are UNTRUSTED web text: they enter only
+                    as JSON with `</` escaped and render via canvas
+                    fillText/textContent, never as HTML.
   notify.py         Slack: mention/assignment pings (inline) and digests
                     (worker). Pure builders (digest_data → digest_blocks) so
                     message shape tests without network; post_slack swallows

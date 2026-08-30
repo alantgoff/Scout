@@ -230,6 +230,24 @@ def edges_for_lead(lead: Lead) -> list[Edge]:
     return edges
 
 
+def hubs(
+    edges: list[dict], rel: str, end: str = "src", limit: int = 10
+) -> list[tuple[str, int]]:
+    """(label, degree) for the most-connected nodes of one relationship,
+    from edge ROWS (store.all_graph_edges) — the pure counterpart of
+    store.graph_hubs, for callers that already hold the edges in memory."""
+    a, b = ("src", "dst") if end == "src" else ("dst", "src")
+    seen: dict[str, set[str]] = {}
+    labels: dict[str, str] = {}
+    for e in edges:
+        if e["rel"] != rel:
+            continue
+        seen.setdefault(e[f"{a}_key"], set()).add(e[f"{b}_key"])
+        labels.setdefault(e[f"{a}_key"], e[f"{a}_label"])
+    ranked = sorted(seen.items(), key=lambda kv: (-len(kv[1]), kv[0]))
+    return [(labels[k], len(v)) for k, v in ranked[:limit]]
+
+
 def dedupe(edges: list[Edge]) -> list[Edge]:
     """First edge per (src, rel, dst) wins — callers order by lead recency,
     so the freshest evidence string is the one kept."""

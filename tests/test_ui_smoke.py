@@ -872,3 +872,40 @@ def test_evidence_skips_the_run_picker_when_there_is_only_one(tmp_path, monkeypa
     at2.run()
     assert not at2.exception, at2.exception[0].message if at2.exception else ""
     assert [s for s in at2.selectbox if s.key == "ev_pick"]
+
+
+def test_graph_page_renders_map_and_hubs(tmp_path, monkeypatch) -> None:
+    """The Graph page: canvas component + hub tables from real edges. The
+    edges table is derived, so the seed store rebuilds it the way every save
+    site does."""
+    db = tmp_path / "smoke.db"
+    monkeypatch.setenv("DB_PATH", str(db))
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "")
+    store = seed_store(db)
+    # Give the seeded startups a shared backer so cross-links exist.
+    for handle, investors in (("smoke_founder", ["Sequoia", "Bpifrance"]),
+                              ("nora_builds", ["Sequoia"])):
+        lead = store.latest_lead(handle)
+        lead.llm.funding_investors = investors
+        lead.llm.funding_evidence = "press"
+        store.save_leads(f"graph-{handle}", [lead])
+    store.rebuild_graph(store.load_lead_ledger())
+
+    at = AppTest.from_file(str(UI_PATH), default_timeout=30)
+    at.session_state["nav"] = "Graph"
+    at.run()
+    assert not at.exception, at.exception[0].message if at.exception else ""
+    text = _page_text(at)
+    assert "The database sideways" in text
+    assert "Top backers" in text
+    assert "Sequoia" in text and "2" in text  # the shared backer ranks first
+    # The canvas component rendered with data (nodes/edges caption).
+    assert "nodes ·" in text
+
+
+def test_graph_page_empty_state(tmp_path, monkeypatch) -> None:
+    at = _app(tmp_path, monkeypatch)  # seeded leads, but no edges derived
+    at.session_state["nav"] = "Graph"
+    at.run()
+    assert not at.exception, at.exception[0].message if at.exception else ""
+    assert "No edges yet" in " ".join(getattr(el, "value", "") for el in at.info)
