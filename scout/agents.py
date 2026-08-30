@@ -30,6 +30,12 @@
   result onto a verdict (research fills gaps, never overwrites a judgment)
   and re-validates through LLMVerdict so its evidence rules still bite.
 
+- **Spend metering**: research_company and investment_memo ledger their
+  token/search usage into store.llm_usage via _record_agent_spend (costed by
+  config.llm_cost_usd) when a store is passed — the input the daily budget
+  gate (DAILY_SPEND_CAP_USD) reads. Recording happens on failure paths too:
+  a call that errored still spent.
+
 - **Weight-tuning agent** (`suggest_weights`): triage statistics in
   (scout.insights), a reviewed-before-apply weight proposal out — the
   feedback loop from shortlist/pass decisions back into scoring.
@@ -58,7 +64,14 @@ from tenacity import (
 )
 
 from scout import rubric as rubric_mod
-from scout.config import CUSTOMER_TYPES, STAGES, Seeds, Settings, Thesis
+from scout.config import (
+    CUSTOMER_TYPES,
+    STAGES,
+    Seeds,
+    Settings,
+    Thesis,
+    llm_cost_usd,
+)
 from scout.models import (
     COMPANY_STATUS_LABELS,
     FUNDING_STAGE_LABELS,
@@ -649,6 +662,18 @@ def _run_research_stream(
                 _emit(on_event, "retry",
                       f"transient API error ({type(exc).__name__}) — retrying")
                 time.sleep(MEMO_STREAM_BACKOFF_S * (2 ** attempt))
+        usage = getattr(response, "usage", None)
+        if usage is not None:
+            meta["input_tokens"] = (meta.get("input_tokens", 0)
+                                    + (usage.input_tokens or 0))
+            meta["output_tokens"] = (meta.get("output_tokens", 0)
+                                     + (usage.output_tokens or 0))
+            meta["cache_read_tokens"] = (
+                meta.get("cache_read_tokens", 0)
+                + (getattr(usage, "cache_read_input_tokens", 0) or 0))
+            meta["cache_write_tokens"] = (
+                meta.get("cache_write_tokens", 0)
+                + (getattr(usage, "cache_creation_input_tokens", 0) or 0))
         if response.stop_reason != "pause_turn":
             break
         # Paused mid-turn: re-send with the accumulated assistant content —
@@ -693,6 +718,7 @@ def investment_memo(
     focus: str = "",
     attrs: dict | None = None,
     on_event=None,
+    store=None,
 ) -> tuple[str, bool, dict]:
     """Return (markdown_memo, is_ai, meta) — the full multi-section memo.
 
@@ -726,6 +752,7 @@ def investment_memo(
         if not memo or "## " not in memo:
             # Empty, refused, or preamble-only output — never present this
             # as a memo (the UI keeps any existing memo when is_ai=False).
+            _record_agent_spend(store, settings, "memo", meta)
             return _memo_template(lead, thesis), False, meta
         meta["sources"] = (_harvest_sources(response.content)
                            or _sources_from_text(memo))[:MEMO_MAX_SOURCES]
@@ -747,9 +774,29 @@ def investment_memo(
             memo += "\n\n## Sources\n" + "\n".join(
                 f"{i}. {url}" for i, url in enumerate(meta["sources"], start=1)
             )
+        _record_agent_spend(store, settings, "memo", meta)
         return memo, True, meta
     except anthropic.APIError:
+        _record_agent_spend(store, settings, "memo", meta)
         return _memo_template(lead, thesis), False, meta
+
+
+def _record_agent_spend(store, settings: Settings, agent: str, meta: dict) -> None:
+    """Ledger one research/memo invocation from its meta counters. Searches
+    bill at the flat web_search rate; fetches are token-only. No store or an
+    empty meta (fallback path, no key) → no row."""
+    if store is None:
+        return
+    tokens = {key: meta.get(key, 0) for key in
+              ("input_tokens", "output_tokens",
+               "cache_read_tokens", "cache_write_tokens")}
+    searches = meta.get("searches", 0)
+    if not any(tokens.values()) and not searches:
+        return
+    cost = llm_cost_usd(settings.claude_model, searches=searches, **tokens)
+    meta["cost_usd"] = round(cost, 4)
+    store.record_llm_usage(agent, settings.claude_model,
+                           searches=searches, cost_usd=cost, **tokens)
 
 
 def _client(settings: Settings, timeout: float) -> anthropic.Anthropic:
@@ -1612,6 +1659,7 @@ def research_company(
     *,
     site_text: str = "",
     on_event=None,
+    store=None,
 ) -> tuple[CompanyProfile, dict]:
     """Establish the facts about one company from its domain.
 
@@ -1667,6 +1715,7 @@ def research_company(
             last_error = exc
             prompt = context + _CORRECTIVE_NOTE
             continue
+        _record_agent_spend(store, settings, "research", meta)
         # Prefer the URLs the server tools actually returned over the model's
         # own list: _harvest_sources reads the tool result blocks, which the
         # model cannot embellish.
@@ -1676,4 +1725,7 @@ def research_company(
             profile.sources = meta["sources"]
         meta["researched"] = True
         return profile, meta
+    # Unparseable output still spent tokens — ledger them before raising, or
+    # the budget gate flies blind on exactly the days something is wrong.
+    _record_agent_spend(store, settings, "research", meta)
     raise RuntimeError(f"company research returned unparseable output: {last_error}")

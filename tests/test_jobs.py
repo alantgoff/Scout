@@ -16,6 +16,7 @@ from scout import jobs as jobs_mod
 from scout import notify, worker
 from scout.jobs import (
     KIND_DIGEST,
+    KIND_REFRESH,
     KIND_RUN,
     MAX_ATTEMPTS,
     ScheduleSpec,
@@ -303,10 +304,14 @@ def test_schedule_does_not_stack_behind_a_slow_run(tmp_path: Path) -> None:
 def test_bootstrap_is_idempotent(tmp_path: Path) -> None:
     store = make_store(tmp_path)
     created = worker.bootstrap_schedules(store)
-    assert len(created) == 2  # a sourcing run and a digest
+    assert len(created) == 3  # sourcing run, tracked refresh, digest
     assert worker.bootstrap_schedules(store) == []
     kinds = {s["kind"] for s in store.schedules()}
-    assert kinds == {KIND_RUN, KIND_DIGEST}
+    assert kinds == {KIND_RUN, KIND_REFRESH, KIND_DIGEST}
+    # "Scan every day" means every day: no weekday mask on any default —
+    # the daily spend envelope bounds cost, not skipped weekends.
+    for schedule in store.schedules():
+        assert not schedule["spec"].weekdays
 
 
 # --- the worker loop ------------------------------------------------------------

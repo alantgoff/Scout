@@ -26,14 +26,16 @@ KIND_RUN = "run_pipeline"
 KIND_MEMO = "generate_memo"
 KIND_DIGEST = "digest"
 KIND_VERIFY = "verify"
+KIND_REFRESH = "refresh_tracked"
 
-JOB_KINDS = {KIND_RUN, KIND_MEMO, KIND_DIGEST, KIND_VERIFY}
+JOB_KINDS = {KIND_RUN, KIND_MEMO, KIND_DIGEST, KIND_VERIFY, KIND_REFRESH}
 
 JOB_LABELS = {
     KIND_RUN: "Sourcing run",
     KIND_MEMO: "Memo",
     KIND_DIGEST: "Digest",
     KIND_VERIFY: "Verification",
+    KIND_REFRESH: "Tracked refresh",
 }
 
 # Terminal states never re-enter the queue.

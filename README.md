@@ -83,6 +83,13 @@ carries its own limitations — including the ones that undercut it.
 **Automation** — schedules, the job queue, and whether the worker is alive.
 Momentum signals decay in days, so the run that matters is the one nobody had
 to remember. Sourcing runs, digests and memos can all be scheduled or queued.
+`scout worker --bootstrap` sets up the daily rhythm: a sourcing run at 06:00,
+a tracked-company refresh at 06:45 (re-researches the longlisted+ companies
+whose facts are oldest — raises, acquisitions, shutdowns land in the feed),
+and the digest at 07:30. The whole day is bounded by one spend envelope
+(`DAILY_SPEND_CAP_USD`, default $1): heuristics, caches and free scraping
+always run; paid Claude/X calls stop when the envelope is spent and resume
+tomorrow.
 
 **Settings** — API keys, the X spend ledger, Slack notifications, your own
 taste profile, and firm-wide defaults.
@@ -167,6 +174,14 @@ reclassify   Re-score without discovery — no X spend, cache-first
   --all                    every startup in the ledger
   --stale-only             only those scored under an older thesis version
 
+refresh      Re-research the tracked companies whose facts are oldest —
+             the daily watch on longlisted+ companies for raises,
+             acquisitions and shutdowns. Rotating and budget-gated: a fixed
+             daily allowance (SCAN_REFRESH_PER_DAY) sweeps the whole
+             tracked list on a cycle, and the pass stops mid-list when
+             today's spend envelope (DAILY_SPEND_CAP_USD) runs out.
+  --limit N · --handle <one company now>
+
 add <domain>   Add ONE company by domain; the system fills in the rest.
              Crawls the site, then researches the company live — name, X
              handle, GitHub org, founders, HQ, founding year, funding, and
@@ -182,7 +197,7 @@ thesis       list · show <id> · new <name> · use <id> · clone <id> <name> ·
 source       Discovery preview — raw accounts per strategy, no scoring or cost
 inspect <handle>   Score one account, print the per-signal breakdown
 verify       Hydrate the shortlist with fresh paid X data and re-score
-budget       X API spend against the cap
+budget       Today's spend envelope + Claude and X API ledgers
 demo         $0 offline end-to-end test
 ui           Launch the workspace
 
@@ -191,7 +206,8 @@ migrate      Adopt a single-user database into the multi-member schema
                            import past triage as votes. Idempotent.
 
 worker       Run the background worker: schedules fire, queued jobs execute
-  --bootstrap              create the default weekday-run + morning-digest
+  --bootstrap              create the default daily schedules: sourcing run
+                           (06:00), tracked refresh (06:45), digest (07:30)
   --once                   drain the queue and exit (for cron)
 jobs         Queue state · --enqueue <kind> · --cancel <id>
 schedule     --list · --add <kind> --at 06:00 --weekdays --tz Europe/London

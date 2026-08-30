@@ -175,6 +175,29 @@ def digest_data(store: Store, since: datetime, window: str = "daily") -> dict:
     movers = movers[:5]
 
     events = store.events(since=since, limit=400)
+
+    # Company-status alerts from the tracked refresh: an acquisition, merger
+    # or shutdown of a company the firm is watching outranks everything else
+    # in this digest — it can invalidate a memo mid-diligence.
+    from scout.models import COMPANY_STATUS_LABELS
+
+    alerts: list[dict] = []
+    for event in events:
+        if event.verb != "company_status_changed" or not event.handle:
+            continue
+        lead = next((e.lead for e in ledger
+                     if e.lead.account.handle.lower() == event.handle), None)
+        payload = event.payload or {}
+        alerts.append({
+            "handle": event.handle,
+            "name": display_name(lead) if lead else f"@{event.handle}",
+            "status": COMPANY_STATUS_LABELS.get(
+                payload.get("new", ""), payload.get("new", "changed")),
+            "note": payload.get("note", ""),
+            "link": deep_link(store, event.handle, "Startups"),
+        })
+    alerts = alerts[:5]
+
     # Machine chatter is not activity — a partner cares what PEOPLE did.
     human_events = [e for e in events
                     if not e.actor.startswith(("agent:", "system:", "schedule:"))]
@@ -232,6 +255,8 @@ def digest_data(store: Store, since: datetime, window: str = "daily") -> dict:
     data = {
         "window": window,
         "since": since,
+        "alerts": alerts,
+        "spend_today_usd": round(store.spend_today_usd(), 2),
         "top_new": top_new,
         "movers": movers,
         "contested": contested,
@@ -243,7 +268,7 @@ def digest_data(store: Store, since: datetime, window: str = "daily") -> dict:
         "base_url": (store.get_setting("app_base_url") or "").rstrip("/"),
     }
     data["has_content"] = bool(
-        top_new or movers or contested or awaiting or human_events
+        alerts or top_new or movers or contested or awaiting or human_events
     )
     return data
 
@@ -252,6 +277,8 @@ def digest_fallback_text(data: dict) -> str:
     """The notification-line summary Slack shows before blocks render."""
     label = "This week" if data["window"] == "weekly" else "Today"
     bits = []
+    if data.get("alerts"):
+        bits.append(f"{len(data['alerts'])} status alert(s)")
     if data["top_new"]:
         bits.append(f"{len(data['top_new'])} new to review")
     if data["contested"]:
@@ -281,6 +308,14 @@ def digest_blocks(data: dict) -> list[dict]:
     blocks: list[dict] = [
         {"type": "header", "text": {"type": "plain_text", "text": heading}}
     ]
+
+    if data.get("alerts"):
+        lines = "\n".join(
+            f"• {_link(a['name'], a['link'])} — *{a['status']}*"
+            + (f" — {a['note']}" if a["note"] else "")
+            for a in data["alerts"]
+        )
+        blocks.append(_section(f"*⚠ Company status changed*\n{lines}"))
 
     if data["awaiting_review"]:
         lines = "\n".join(f"• {_link(m['name'], m['link'])}"
@@ -320,6 +355,8 @@ def digest_blocks(data: dict) -> list[dict]:
         })
 
     footer = f"{data['n_shortlisted']} in the funnel"
+    if data.get("spend_today_usd") is not None:
+        footer += f" · today's spend ${data['spend_today_usd']:.2f}"
     if data["base_url"]:
         footer += f" · <{data['base_url']}|open Scout>"
     blocks.append({"type": "context",

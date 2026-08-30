@@ -123,6 +123,7 @@ def generate_memo(
     memo, is_ai, meta = investment_memo(
         lead, thesis, settings,
         on_event=on_event,
+        store=store,  # ledger the tokens/searches against the daily envelope
         **memo_kwargs(lead, settings, store, depth=depth, focus=focus,
                       notes=row.get("notes") or "", attrs=attrs),
     )

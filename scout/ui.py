@@ -3195,7 +3195,8 @@ def _generate_memo(handle: str) -> None:
     }
     kwargs = dict(site_text=site_text, site_note=site_note, tweets=tweets,
                   notes=row.get("notes") or "", depth=depth, focus=focus,
-                  attrs=memo_attrs or None)
+                  attrs=memo_attrs or None,
+                  store=store)  # ledger tokens/searches against the daily envelope
 
     existing_brief = (row.get("brief") or "").strip()
     try:

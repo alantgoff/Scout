@@ -560,7 +560,7 @@ def test_bootstrap_button_creates_the_recommended_schedules(tmp_path, monkeypatc
     next(b for b in at.button if "recommended schedules" in b.label).click().run()
     assert not at.exception, at.exception[0].message if at.exception else ""
     kinds = {s["kind"] for s in Store(db).schedules()}
-    assert kinds == {"run_pipeline", "digest"}
+    assert kinds == {"run_pipeline", "refresh_tracked", "digest"}
     assert all(s["enabled"] for s in Store(db).schedules())
 
 

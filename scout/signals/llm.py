@@ -28,7 +28,7 @@ from tenacity import (
 from urllib.parse import urlparse
 
 from scout import rubric
-from scout.config import Settings, Thesis, ensure_thesis_id
+from scout.config import Settings, Thesis, ensure_thesis_id, llm_cost_usd
 from scout.models import Account, Lead, LLMVerdict, SitePage, Tweet
 from scout.store import Store
 
@@ -294,7 +294,12 @@ def _call_claude(
     system_prompt: str,
     user_prompt: str,
     max_tokens: int = 4096,
+    usage: dict | None = None,
 ) -> str:
+    """One classification/audit call. `usage` (optional) is a mutable
+    accumulator the caller sums spend into — token counts land there per
+    call so retries and corrective re-asks are counted, not just the call
+    that finally parsed."""
     response = client.messages.create(
         model=model,
         max_tokens=max_tokens,
@@ -304,6 +309,14 @@ def _call_claude(
                  "cache_control": {"type": "ephemeral"}}],
         messages=[{"role": "user", "content": user_prompt}],
     )
+    if usage is not None:
+        u = response.usage
+        usage["input_tokens"] = usage.get("input_tokens", 0) + (u.input_tokens or 0)
+        usage["output_tokens"] = usage.get("output_tokens", 0) + (u.output_tokens or 0)
+        usage["cache_read_tokens"] = (usage.get("cache_read_tokens", 0)
+                                      + (getattr(u, "cache_read_input_tokens", 0) or 0))
+        usage["cache_write_tokens"] = (usage.get("cache_write_tokens", 0)
+                                       + (getattr(u, "cache_creation_input_tokens", 0) or 0))
     return next(b.text for b in response.content if b.type == "text")
 
 
@@ -335,6 +348,7 @@ def _classify_batch(
     batch: list[tuple[Account, list[Tweet]]],
     sites: dict[str, SitePage] | None = None,
     site_text_chars: int = 6000,
+    usage: dict | None = None,
 ) -> list[LLMVerdict]:
     base_prompt = _user_prompt(batch, sites, site_text_chars)
     prompt = base_prompt
@@ -344,7 +358,8 @@ def _classify_batch(
     max_tokens = min(16384, max(2048, 2500 * len(batch)))
     last_error: Exception | None = None
     for _ in range(PARSE_ATTEMPTS):
-        text = _call_claude(client, model, system_prompt, prompt, max_tokens)
+        text = _call_claude(client, model, system_prompt, prompt, max_tokens,
+                            usage=usage)
         try:
             return _parse_verdicts(text)
         except (json.JSONDecodeError, ValidationError, ValueError) as exc:
@@ -380,6 +395,29 @@ def _is_fatal_api_error(exc: Exception) -> bool:
     return "credit balance" in _api_error_detail(exc).lower()
 
 
+def _record_usage(
+    store: Store | None,
+    settings: Settings,
+    agent: str,
+    usage_dicts: list[dict],
+) -> None:
+    """Sum per-batch usage accumulators into one ledger row. No store or no
+    tokens → no row (heuristics-only and all-cached runs cost nothing)."""
+    if store is None:
+        return
+    totals = {
+        key: sum(u.get(key, 0) for u in usage_dicts)
+        for key in ("input_tokens", "output_tokens",
+                    "cache_read_tokens", "cache_write_tokens")
+    }
+    if not any(totals.values()):
+        return
+    cost = llm_cost_usd(settings.claude_model, **totals)
+    store.record_llm_usage(agent, settings.claude_model, cost_usd=cost, **totals)
+    console.print(f"[dim]Claude spend this {agent} pass: ~${cost:.3f} "
+                  f"(today: ${store.spend_today_usd():.2f}).[/dim]")
+
+
 def _classify_batch_safe(
     client: anthropic.Anthropic,
     model: str,
@@ -387,12 +425,13 @@ def _classify_batch_safe(
     batch: list[tuple[Account, list[Tweet]]],
     sites: dict[str, SitePage] | None = None,
     site_text_chars: int = 6000,
+    usage: dict | None = None,
 ) -> list[LLMVerdict]:
     """One batch, all API failure modes reduced to 'skip with a warning' —
     a single bad batch must never sink the run (or its sibling batches)."""
     try:
         return _classify_batch(client, model, system_prompt, batch, sites,
-                               site_text_chars)
+                               site_text_chars, usage=usage)
     except anthropic.RateLimitError:
         console.print(
             "[yellow]Claude rate limit persisted after retries — "
@@ -475,23 +514,43 @@ def classify(
     if not fresh:
         return results
 
+    # The daily envelope. Checked at entry, not per batch: one classification
+    # wave is already bounded (llm_max_candidates × ~cents), so the envelope
+    # overruns by at most one wave — while a per-batch check would leave a
+    # half-classified candidate set, which scores misleadingly. Cache hits
+    # above are free and always served.
+    if store is not None and settings.daily_spend_cap_usd > 0:
+        left = store.daily_budget_left_usd(settings.daily_spend_cap_usd)
+        if left <= 0:
+            console.print(
+                f"[yellow]Daily spend cap reached "
+                f"(${settings.daily_spend_cap_usd:.2f}/day, DAILY_SPEND_CAP_USD) — "
+                f"skipping classification of {len(fresh)} accounts. "
+                "Cached verdicts still apply; the rest classify tomorrow.[/yellow]"
+            )
+            return results
+
     client = anthropic.Anthropic(api_key=settings.anthropic_api_key)
     batch_size = max(1, settings.classify_batch_size)
     batches = [fresh[i : i + batch_size] for i in range(0, len(fresh), batch_size)]
     workers = max(1, min(settings.llm_concurrency, len(batches)))
     batch_results: list[list[LLMVerdict]] = []
+    # One usage dict per batch, summed on THIS thread after the pool drains —
+    # the accumulator is per-batch-private, so no cross-thread mutation.
+    usage_dicts: list[dict] = []
     if workers > 1:
         # submit + as_completed (not pool.map) so progress can fire from THIS
         # thread as each batch lands — the store below is not thread-safe.
         with ThreadPoolExecutor(max_workers=workers) as pool:
-            futures = {
-                pool.submit(
+            futures = {}
+            for b in batches:
+                usage: dict = {}
+                usage_dicts.append(usage)
+                futures[pool.submit(
                     _classify_batch_safe,
                     client, settings.claude_model, system_prompt, b,
-                    sites, settings.web_text_max_chars,
-                ): len(b)
-                for b in batches
-            }
+                    sites, settings.web_text_max_chars, usage,
+                )] = len(b)
             for future in as_completed(futures):
                 batch_results.append(future.result())
                 n_done += futures[future]
@@ -499,13 +558,16 @@ def classify(
                     progress(n_done, n_total)
     else:
         for b in batches:
+            usage = {}
+            usage_dicts.append(usage)
             batch_results.append(
                 _classify_batch_safe(client, settings.claude_model, system_prompt,
-                                     b, sites, settings.web_text_max_chars)
+                                     b, sites, settings.web_text_max_chars, usage)
             )
             n_done += len(b)
             if progress is not None:
                 progress(n_done, n_total)
+    _record_usage(store, settings, "classify", usage_dicts)
 
     for verdicts in batch_results:
         for verdict in verdicts:
@@ -628,6 +690,7 @@ def _verify_one(
     tweets: list[Tweet],
     site: SitePage | None,
     site_text_chars: int,
+    usage: dict | None = None,
 ) -> VerificationResult | None:
     base = _verify_user(lead, tweets, site, site_text_chars)
     prompt = base
@@ -635,7 +698,8 @@ def _verify_one(
     for _ in range(PARSE_ATTEMPTS):
         # 3000: a wholesale scorecard correction (all criteria + citations)
         # would not fit in the old 1500.
-        text = _call_claude(client, model, system, prompt, max_tokens=3000)
+        text = _call_claude(client, model, system, prompt, max_tokens=3000,
+                            usage=usage)
         try:
             return parse_verification(text)
         except (json.JSONDecodeError, ValidationError, ValueError) as exc:
@@ -669,6 +733,13 @@ def verify_leads(
     targets = [x for x in leads if x.llm is not None]
     if not targets or not settings.anthropic_api_key:
         return
+    if (store is not None and settings.daily_spend_cap_usd > 0
+            and store.daily_budget_left_usd(settings.daily_spend_cap_usd) <= 0):
+        console.print(
+            "[yellow]Daily spend cap reached — skipping the adversarial "
+            "audit. Verdicts stand on the classifier alone today.[/yellow]"
+        )
+        return
     sites = sites or {}
     client = anthropic.Anthropic(api_key=settings.anthropic_api_key)
     system = _verify_system(thesis)
@@ -682,7 +753,7 @@ def verify_leads(
     # queued audit would hit it too, so stop asking.
     aborted = threading.Event()
 
-    def audit(lead: Lead) -> tuple[Lead, VerificationResult | None]:
+    def audit(lead: Lead, usage: dict) -> tuple[Lead, VerificationResult | None]:
         if aborted.is_set():
             return lead, None
         key = lead.account.handle.lower()
@@ -690,7 +761,7 @@ def verify_leads(
             return lead, _verify_one(
                 client, settings.claude_model, system, lead,
                 tweets_by_handle.get(key, []), sites.get(key),
-                settings.web_text_max_chars,
+                settings.web_text_max_chars, usage=usage,
             )
         except (anthropic.APIError, anthropic.APIConnectionError) as exc:
             detail = _api_error_detail(exc)
@@ -710,9 +781,16 @@ def verify_leads(
 
     n_done = 0
     workers = max(1, min(settings.llm_concurrency, len(targets)))
+    # One private usage dict per audit, summed on the caller's thread after
+    # the pool drains — same pattern as classify().
+    audit_usage: list[dict] = []
     # as_completed on the caller's thread — the store is not thread-safe.
     with ThreadPoolExecutor(max_workers=workers) as pool:
-        futures = [pool.submit(audit, lead) for lead in targets]
+        futures = []
+        for lead in targets:
+            usage: dict = {}
+            audit_usage.append(usage)
+            futures.append(pool.submit(audit, lead, usage))
         for future in as_completed(futures):
             lead, result = future.result()
             n_done += 1
@@ -731,3 +809,4 @@ def verify_leads(
                     )
             if progress is not None:
                 progress(n_done, len(targets))
+    _record_usage(store, settings, "verify", audit_usage)

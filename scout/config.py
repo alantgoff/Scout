@@ -62,6 +62,54 @@ CURATED_USE_CASES = [
 ]
 CURATED_PRIORITIES = ["High", "Medium", "Low"]
 
+# Anthropic pricing, $ per million tokens (input, output) — the numbers the
+# LLM spend ledger converts usage into. Matched by model-id prefix so dated
+# snapshots ("claude-haiku-4-5-20251001") price like their family. Cache
+# reads bill at ~0.1x the input rate, cache writes at ~1.25x; web_search is
+# $10 per 1,000 searches. These are ledger estimates for the budget gate,
+# not an invoice — when Anthropic reprices, edit here.
+MODEL_PRICING_USD_PER_MTOK: dict[str, tuple[float, float]] = {
+    "claude-fable-5": (10.0, 50.0),
+    "claude-opus-5": (5.0, 25.0),
+    "claude-opus-4": (5.0, 25.0),  # 4.6 / 4.7 / 4.8
+    "claude-sonnet-5": (2.0, 10.0),
+    "claude-sonnet-4-6": (3.0, 15.0),
+    "claude-haiku-4-5": (1.0, 5.0),
+}
+# Unknown model → assume Opus-tier. Overcounting an unknown model throttles
+# the scan early; undercounting blows the envelope — only one is safe.
+DEFAULT_PRICING_USD_PER_MTOK: tuple[float, float] = (5.0, 25.0)
+WEB_SEARCH_COST_USD = 0.01
+CACHE_READ_MULTIPLIER = 0.1
+CACHE_WRITE_MULTIPLIER = 1.25
+
+
+def llm_cost_usd(
+    model: str,
+    input_tokens: int,
+    output_tokens: int,
+    cache_read_tokens: int = 0,
+    cache_write_tokens: int = 0,
+    searches: int = 0,
+) -> float:
+    """Estimated cost of one Claude call (or an accumulated batch of them).
+
+    `input_tokens` is the UNCACHED input (usage.input_tokens is already net
+    of the cache fields — do not subtract them again)."""
+    rate_in, rate_out = DEFAULT_PRICING_USD_PER_MTOK
+    for prefix, rates in MODEL_PRICING_USD_PER_MTOK.items():
+        if model.startswith(prefix):
+            rate_in, rate_out = rates
+            break
+    tokens_cost = (
+        input_tokens * rate_in
+        + cache_read_tokens * rate_in * CACHE_READ_MULTIPLIER
+        + cache_write_tokens * rate_in * CACHE_WRITE_MULTIPLIER
+        + output_tokens * rate_out
+    ) / 1_000_000
+    return tokens_cost + searches * WEB_SEARCH_COST_USD
+
+
 # LEGACY (v7) flat quality-rubric dimensions — superseded by the scorecard
 # rubrics in scout.rubric. Kept so pre-scorecard cached verdicts (which carry
 # these keys in LLMVerdict.quality) still render and score via the legacy
@@ -354,6 +402,20 @@ class Settings(BaseSettings):
     # Claude classification (omit key to run heuristics-only)
     anthropic_api_key: str | None = None
     claude_model: str = "claude-sonnet-4-6"
+
+    # Daily spend envelope — the total the system may spend in one UTC day
+    # across BOTH ledgers (Claude tokens + X API), enforced at the spend
+    # sites (classify, verify, research, memo). 0 disables the cap. This is
+    # what makes an unattended daily scan safe: the cheap work (heuristics,
+    # caches, free scraping) always runs; paid calls stop when the envelope
+    # is spent and resume tomorrow.
+    daily_spend_cap_usd: float = 1.0
+    # Tracked-company refresh (`scout refresh`): how many longlisted+
+    # companies get a live re-research per day, and how recently-refreshed a
+    # company must be to be skipped. 3/day at 7-day spacing keeps ~21
+    # companies continuously watched inside a ~$1 envelope.
+    scan_refresh_per_day: int = 3
+    refresh_min_age_days: int = 7
 
     # GitHub discovery (optional; unauthenticated works at lower rate limits)
     github_token: str | None = None

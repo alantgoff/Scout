@@ -1217,11 +1217,19 @@ def add(
 
     profile = agents.CompanyProfile()
     research_meta: dict = {"researched": False, "searches": 0, "fetches": 0}
+    if (do_research and website
+            and store.daily_budget_left_usd(settings.daily_spend_cap_usd) <= 0):
+        console.print(
+            f"[yellow]Daily spend cap reached (${settings.daily_spend_cap_usd:.2f}"
+            "/day, DAILY_SPEND_CAP_USD) — skipping the live research. "
+            "Classification still runs on the crawled site.[/yellow]"
+        )
+        do_research = False
     if do_research and website:
         console.print("Researching the company...")
         try:
             profile, research_meta = agents.research_company(
-                website, settings,
+                website, settings, store=store,
                 site_text=web.bundle_text(pages, settings.web_text_max_chars),
                 on_event=lambda kind, detail: console.print(
                     f"  [dim]{kind}: {detail[:90]}[/dim]"),
@@ -1408,6 +1416,143 @@ def add(
         f"Added [bold]{display_name(lead)}[/bold] as "
         f"[bold]{STATUS_LABELS[status]}[/bold] (run {run_id})."
     )
+
+
+# ----------------------------------------------------------------- refresh
+
+
+@app.command()
+def refresh(
+    limit: Annotated[
+        int | None,
+        typer.Option("--limit", help="Companies to re-research this pass "
+                     "(default: SCAN_REFRESH_PER_DAY)."),
+    ] = None,
+    handle_arg: Annotated[
+        str | None,
+        typer.Option("--handle", help="Refresh ONE specific company now, "
+                     "ignoring the rotation and the age floor."),
+    ] = None,
+    thesis_path: Annotated[
+        Path, typer.Option("--thesis", help="Path to thesis.yaml.")
+    ] = Path("thesis.yaml"),
+) -> None:
+    """Re-research the tracked companies whose facts are oldest.
+
+    Discovery watches for NEW companies; this watches the ones already in
+    the pipeline (longlisted or further) for the things that change out
+    from under a database: a raise, an acquisition, a shutdown. Each pass
+    takes the few companies whose last research is oldest, runs the same
+    live research `scout add` uses, layers the findings onto the stored
+    verdict (facts fill in; judgments stay the classifier's), re-scores,
+    and stamps the rotation — so a fixed daily allowance sweeps the whole
+    tracked list on a cycle instead of the spend growing with it.
+
+    Budget-gated per company against DAILY_SPEND_CAP_USD: the pass stops
+    mid-list when today's envelope runs out and the skipped companies stay
+    at the front of tomorrow's queue. A status change (acquired / merged /
+    shut down) lands in the activity feed and the next digest.
+    """
+    settings = Settings()
+    thesis = _load_thesis_or_exit(thesis_path)
+    store = _open_store(settings, actor="agent:refresh")
+    seeds = _load_seeds_or_default()
+    if not settings.anthropic_api_key:
+        console.print("[yellow]ANTHROPIC_API_KEY not set — refresh needs the "
+                      "research agent. Nothing to do.[/yellow]")
+        return
+
+    if handle_arg:
+        handles = [handle_arg.lstrip("@").lower()]
+    else:
+        handles = store.refresh_queue(
+            min_age_days=settings.refresh_min_age_days,
+            limit=limit if limit is not None else settings.scan_refresh_per_day,
+        )
+    if not handles:
+        console.print("[green]Nothing due[/green] — every tracked company was "
+                      f"researched within {settings.refresh_min_age_days} days.")
+        return
+    console.print(f"Thesis: [bold]{_thesis_banner(thesis, seeds, store)}[/bold]")
+    console.print(f"Refreshing [bold]{len(handles)}[/bold] tracked compan"
+                  f"{'y' if len(handles) == 1 else 'ies'}: "
+                  + ", ".join(f"@{h}" for h in handles))
+
+    refreshed: list[Lead] = []
+    alerts: list[tuple[str, str, str]] = []  # (name, status, note)
+    for handle in handles:
+        left = store.daily_budget_left_usd(settings.daily_spend_cap_usd)
+        if left <= 0:
+            console.print(
+                f"[yellow]Daily spend cap reached "
+                f"(${settings.daily_spend_cap_usd:.2f}/day) — stopping. "
+                f"{len(handles) - len(refreshed)} compan"
+                f"{'y' if len(handles) - len(refreshed) == 1 else 'ies'} "
+                "stay at the front of tomorrow's queue.[/yellow]"
+            )
+            break
+        lead = store.latest_lead(handle)
+        if lead is None or lead.llm is None:
+            # In the pipeline but never classified (pre-verdict imports) —
+            # research can't overlay onto nothing; stamp it so the queue
+            # doesn't serve the same unresearchable row every day.
+            console.print(f"[dim]@{handle}: no stored verdict — skipping.[/dim]")
+            store.mark_refreshed(handle)
+            continue
+        domain = web.normalize_site_url(
+            lead.llm.company_url or lead.account.website
+        )
+        if domain is None:
+            console.print(f"[dim]@{handle}: no website on file — skipping.[/dim]")
+            store.mark_refreshed(handle)
+            continue
+
+        console.print(f"Researching [bold]{display_name(lead)}[/bold] ({domain})...")
+        try:
+            profile, meta = agents.research_company(
+                domain, settings, store=store,
+                on_event=lambda kind, detail: console.print(
+                    f"  [dim]{kind}: {detail[:90]}[/dim]"),
+            )
+        except (RuntimeError, anthropic.APIError) as exc:
+            console.print(f"[yellow]@{handle}: research failed ({exc}) — "
+                          "kept as-is; retried next cycle.[/yellow]")
+            store.mark_refreshed(handle)
+            continue
+        if not meta.get("researched"):
+            store.mark_refreshed(handle)
+            continue
+
+        old_status = lead.llm.company_status or "independent"
+        lead.llm = agents.apply_research(lead.llm, profile)
+        new_status = lead.llm.company_status or "independent"
+        if new_status != old_status and new_status != "unknown":
+            store.flag_company_status(
+                handle, old_status, new_status, lead.llm.company_status_note
+            )
+            alerts.append((display_name(lead),
+                           COMPANY_STATUS_LABELS.get(new_status, new_status),
+                           lead.llm.company_status_note))
+        refreshed.append(lead)
+        store.mark_refreshed(handle)
+        console.print(f"  [dim]~${meta.get('cost_usd', 0):.3f} · "
+                      f"today ${store.spend_today_usd():.2f}"
+                      + (f" of ${settings.daily_spend_cap_usd:.2f}"
+                         if settings.daily_spend_cap_usd > 0 else "")
+                      + "[/dim]")
+
+    if refreshed:
+        refreshed = score_leads(refreshed, thesis)
+        run_id = datetime.now(timezone.utc).strftime("refresh-%Y%m%d-%H%M%S-%f")
+        store.save_leads(run_id, refreshed)
+        _record_run(store, run_id, "refresh", thesis, seeds)
+        console.print(f"Refreshed [bold]{len(refreshed)}[/bold] "
+                      f"(run {run_id}).")
+    for name, label, note in alerts:
+        console.print(f"[bold yellow]⚠ {name}: {label}[/bold yellow]"
+                      + (f" — {note}" if note else ""))
+    if not refreshed and not alerts:
+        console.print("[dim]No verdicts updated this pass.[/dim]")
 
 
 # --------------------------------------------------------------------- inspect
@@ -2111,15 +2256,33 @@ def migrate(
 
 @app.command()
 def budget() -> None:
-    """Show cumulative X API spend against the hard cap."""
+    """Both spend ledgers: today's envelope, Claude to date, X API vs its cap."""
     settings = Settings()
     store = _open_store(settings)
+
+    # The daily envelope — the number that makes an unattended daily scan safe.
+    today = store.spend_today_usd()
+    day_cap = settings.daily_spend_cap_usd
+    if day_cap > 0:
+        console.print(
+            f"Today's envelope: [bold]${today:.2f}[/bold] of ${day_cap:.2f} "
+            "(DAILY_SPEND_CAP_USD, Claude + X API; resets at midnight UTC)"
+        )
+        console.print(ProgressBar(total=day_cap, completed=min(today, day_cap),
+                                  width=40))
+    else:
+        console.print(f"Today's spend: [bold]${today:.2f}[/bold] "
+                      "(daily cap disabled — DAILY_SPEND_CAP_USD=0)")
+
+    llm_total = store.llm_spend_usd()
+    console.print(f"\nClaude spend to date: [bold]${llm_total:.2f}[/bold] "
+                  f"({settings.claude_model})")
+
     spent = store.xapi_spend_usd()
     cap = settings.xapi_spend_cap_usd
     remaining = max(cap - spent, 0.0)
     reads_left = int(remaining / settings.xapi_cost_per_post_read)
-
-    console.print(f"X API budget: [bold]${spent:.2f}[/bold] spent of ${cap:.2f} cap")
+    console.print(f"\nX API budget: [bold]${spent:.2f}[/bold] spent of ${cap:.2f} cap")
     console.print(ProgressBar(total=cap, completed=min(spent, cap), width=40))
     console.print(
         f"\n~[bold]{reads_left:,}[/bold] tweet reads remaining "

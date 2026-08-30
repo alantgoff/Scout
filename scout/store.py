@@ -1589,6 +1589,61 @@ class Store:
                     self._append_event("notes_edited", handle=handle, actor=who)
         return True
 
+    def mark_refreshed(self, handle: str) -> None:
+        """Stamp a tracked company as just re-researched (refresh rotation)."""
+        handle = handle.lstrip("@").lower()
+        now = datetime.now(timezone.utc).isoformat()
+        with self.write_tx():
+            row = {"handle": handle}
+            if self.db["pipeline"].exists():
+                existing = list(
+                    self.db["pipeline"].rows_where("handle = ?", [handle], limit=1)
+                )
+                if existing:
+                    row = dict(existing[0])
+            row["researched_at"] = now
+            self.db["pipeline"].upsert(row, pk="handle", alter=True)
+
+    def refresh_queue(self, min_age_days: int, limit: int) -> list[str]:
+        """Tracked companies due a live re-research, oldest-refresh first.
+
+        "Tracked" = any positive triage status (longlisted or further): the
+        companies the firm decided to watch. Never-refreshed companies come
+        first; anything refreshed within `min_age_days` is not due. The
+        rotation means a fixed per-day allowance still covers the whole
+        tracked set — at 3/day and 7-day spacing, ~21 companies stay
+        continuously watched, and the window stretches (rather than the
+        spend growing) as the list grows.
+        """
+        from scout.status import POSITIVE_STATUSES
+
+        if not self.db["pipeline"].exists() or limit <= 0:
+            return []
+        cutoff = (
+            datetime.now(timezone.utc) - timedelta(days=min_age_days)
+        ).isoformat()
+        rows = [dict(r) for r in self.db["pipeline"].rows]
+        due = [
+            r for r in rows
+            if (r.get("status") or "new") in POSITIVE_STATUSES
+            and (r.get("researched_at") or "") <= cutoff
+        ]
+        due.sort(key=lambda r: r.get("researched_at") or "")
+        return [r["handle"] for r in due[:limit]]
+
+    def flag_company_status(
+        self, handle: str, old: str | None, new: str, note: str = ""
+    ) -> None:
+        """Append the company-status change to the activity spine — the
+        refresh's one finding that must reach humans (digest + Activity
+        page) rather than sit quietly in a verdict field."""
+        self._append_event(
+            "company_status_changed",
+            handle=handle.lstrip("@").lower(),
+            actor=self.actor or "agent:refresh",
+            payload={"old": old or "independent", "new": new, "note": note},
+        )
+
     @staticmethod
     def _decode_pipeline(row: dict) -> dict:
         row["brief_meta"] = json.loads(row.get("brief_meta_json") or "{}")
@@ -3144,3 +3199,80 @@ class Store:
             "select coalesce(sum(est_cost_usd), 0) from xapi_usage"
         ).fetchone()
         return float(row[0])
+
+    def record_llm_usage(
+        self,
+        agent: str,
+        model: str,
+        *,
+        input_tokens: int = 0,
+        output_tokens: int = 0,
+        cache_read_tokens: int = 0,
+        cache_write_tokens: int = 0,
+        searches: int = 0,
+        cost_usd: float = 0.0,
+    ) -> None:
+        """One row per agent invocation (a whole classify run, one research
+        call) — the Claude counterpart of the xapi ledger. Until this table
+        existed the X API had a hard cap and Claude had nothing, which made
+        "scan every day" a bet that nothing would ever loop: the daily budget
+        gate reads this ledger."""
+        self.db["llm_usage"].insert(
+            {
+                "agent": agent,
+                "model": model,
+                "input_tokens": int(input_tokens),
+                "output_tokens": int(output_tokens),
+                "cache_read_tokens": int(cache_read_tokens),
+                "cache_write_tokens": int(cache_write_tokens),
+                "searches": int(searches),
+                "cost_usd": float(cost_usd),
+                "at": datetime.now(timezone.utc).isoformat(),
+            }
+        )
+
+    def llm_spend_usd(self, since: datetime | None = None) -> float:
+        """Estimated Claude spend, all-time or since a moment."""
+        if not self.db["llm_usage"].exists():
+            return 0.0
+        if since is None:
+            row = self.db.execute(
+                "select coalesce(sum(cost_usd), 0) from llm_usage"
+            ).fetchone()
+        else:
+            row = self.db.execute(
+                "select coalesce(sum(cost_usd), 0) from llm_usage where at >= ?",
+                [since.isoformat()],
+            ).fetchone()
+        return float(row[0])
+
+    def spend_today_usd(self) -> float:
+        """Everything spent so far this UTC day, across BOTH ledgers.
+
+        UTC midnight (not a rolling 24h) so "the scan gets $1 a day" means
+        what it says: the envelope refills at the same moment the daily
+        schedule fires, instead of yesterday's scan starving today's.
+        """
+        midnight = datetime.now(timezone.utc).replace(
+            hour=0, minute=0, second=0, microsecond=0
+        )
+        total = self.llm_spend_usd(since=midnight)
+        if self.db["xapi_usage"].exists():
+            row = self.db.execute(
+                "select coalesce(sum(est_cost_usd), 0) from xapi_usage where at >= ?",
+                [midnight.isoformat()],
+            ).fetchone()
+            total += float(row[0])
+        return total
+
+    def daily_budget_left_usd(self, cap_usd: float) -> float:
+        """What today's envelope still allows; infinity when the cap is off.
+
+        The gate contract at every spend site: check BEFORE the call, spend,
+        record. A call in flight when the envelope empties completes — the
+        cap bounds the day at cap + one call, which for calls costing cents
+        is the right trade against checking mid-stream.
+        """
+        if cap_usd <= 0:
+            return float("inf")
+        return cap_usd - self.spend_today_usd()

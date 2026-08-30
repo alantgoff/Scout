@@ -203,7 +203,9 @@ scout/
                     purpose (the X budget guard, the SQLite writer and the
                     scraper rate limits each get exactly one contender).
                     Long jobs run as SUBPROCESSES so a scraper segfault kills
-                    a child, not the scheduler.
+                    a child, not the scheduler. bootstrap_schedules seeds the
+                    daily rhythm: run 06:00 → tracked refresh 06:45 → digest
+                    07:30, every day, bounded by DAILY_SPEND_CAP_USD.
   notify.py         Slack: mention/assignment pings (inline) and digests
                     (worker). Pure builders (digest_data → digest_blocks) so
                     message shape tests without network; post_slack swallows

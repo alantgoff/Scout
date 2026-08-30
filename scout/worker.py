@@ -182,6 +182,21 @@ def handle_digest(store: Store, settings: Settings, job: dict) -> dict:
             "new_leads": len(data["top_new"]), "events": data["n_events"]}
 
 
+def handle_refresh(store: Store, settings: Settings, job: dict) -> dict:
+    """Re-research the tracked companies whose facts are oldest — the daily
+    watch on longlisted+ companies for raises, acquisitions, shutdowns.
+    Budget-gated inside the CLI against DAILY_SPEND_CAP_USD."""
+    payload = job.get("payload") or {}
+    args = ["refresh"]
+    if payload.get("limit"):
+        args += ["--limit", str(payload["limit"])]
+    code, log_path, tail = _run_cli(args, settings, "refresh",
+                                    job.get("requested_by", "system:scout"))
+    if code != 0:
+        raise RuntimeError(f"tracked refresh exited {code}\n{tail}")
+    return {"log_path": str(log_path)}
+
+
 def handle_verify(store: Store, settings: Settings, job: dict) -> dict:
     code, log_path, tail = _run_cli(["verify"], settings, "verify",
                                     job.get("requested_by", "system:scout"))
@@ -195,6 +210,7 @@ HANDLERS = {
     jobs_mod.KIND_MEMO: handle_memo,
     jobs_mod.KIND_DIGEST: handle_digest,
     jobs_mod.KIND_VERIFY: handle_verify,
+    jobs_mod.KIND_REFRESH: handle_refresh,
 }
 
 
@@ -304,17 +320,26 @@ def bootstrap_schedules(store: Store, actor: str = "system:scout") -> list[int]:
     existing = {s["kind"] for s in store.schedules()}
     created: list[int] = []
     if jobs_mod.KIND_RUN not in existing:
+        # Every day, not weekdays: momentum signals decay over a weekend
+        # too, and the daily spend envelope (DAILY_SPEND_CAP_USD) is what
+        # bounds cost — not skipping days.
         created.append(store.upsert_schedule(
-            "Weekday sourcing run", jobs_mod.KIND_RUN,
-            jobs_mod.ScheduleSpec(daily_at="06:00", weekdays=[0, 1, 2, 3, 4],
-                                  tz="UTC"),
+            "Daily sourcing run", jobs_mod.KIND_RUN,
+            jobs_mod.ScheduleSpec(daily_at="06:00", tz="UTC"),
             {"source": "twscrape"}, actor=actor,
+        ))
+    if jobs_mod.KIND_REFRESH not in existing:
+        # After the run (cheap, cache-warm), before the digest (so a found
+        # acquisition is in the morning summary, not tomorrow's).
+        created.append(store.upsert_schedule(
+            "Tracked-company refresh", jobs_mod.KIND_REFRESH,
+            jobs_mod.ScheduleSpec(daily_at="06:45", tz="UTC"),
+            {}, actor=actor,
         ))
     if jobs_mod.KIND_DIGEST not in existing:
         created.append(store.upsert_schedule(
             "Morning digest", jobs_mod.KIND_DIGEST,
-            jobs_mod.ScheduleSpec(daily_at="07:30", weekdays=[0, 1, 2, 3, 4],
-                                  tz="UTC"),
+            jobs_mod.ScheduleSpec(daily_at="07:30", tz="UTC"),
             {"window": "daily"}, actor=actor,
         ))
     return created
