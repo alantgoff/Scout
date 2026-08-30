@@ -197,6 +197,11 @@ thesis       list · show <id> · new <name> · use <id> · clone <id> <name> ·
 source       Discovery preview — raw accounts per strategy, no scoring or cost
 inspect <handle>   Score one account, print the per-signal breakdown
 verify       Hydrate the shortlist with fresh paid X data and re-score
+graph        The knowledge graph: cross-links derived from evidence the
+             pipeline already collected. Summary view (top investors by
+             portfolio-in-database, labs by founder alumni, acquirers,
+             watchers) or `scout graph <name>` for one node's connections
+             and the companies it shares a backer with.
 budget       Today's spend envelope + Claude and X API ledgers
 demo         $0 offline end-to-end test
 ui           Launch the workspace

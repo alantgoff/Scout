@@ -804,6 +804,7 @@ def _run_pipeline(
     run_id = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S-%f")
     store.save_leads(run_id, leads)
     _record_run(store, run_id, source.value, thesis, seeds)
+    _rebuild_graph(store)
     csv_path = write_csv(leads, settings.out_dir, thesis)
     md_path = write_markdown(leads, thesis, settings.out_dir)
 
@@ -1039,6 +1040,7 @@ def reclassify(
         run_id = datetime.now(timezone.utc).strftime("reclass-%Y%m%d-%H%M%S-%f")
         store.save_leads(run_id, leads)
         _record_run(store, run_id, "reclassify", thesis, _load_seeds_or_default())
+        _rebuild_graph(store)
         csv_path = write_csv(leads, settings.out_dir, thesis)
         md_path = write_markdown(leads, thesis, settings.out_dir)
         print_top_table(leads)
@@ -1371,6 +1373,7 @@ def add(
     run_id = datetime.now(timezone.utc).strftime("manual-%Y%m%d-%H%M%S-%f")
     store.save_leads(run_id, [lead])
     _record_run(store, run_id, "manual", thesis, seeds)
+    _rebuild_graph(store)
     store.set_pipeline(
         account.handle,
         status=status,
@@ -1546,6 +1549,7 @@ def refresh(
         run_id = datetime.now(timezone.utc).strftime("refresh-%Y%m%d-%H%M%S-%f")
         store.save_leads(run_id, refreshed)
         _record_run(store, run_id, "refresh", thesis, seeds)
+        _rebuild_graph(store)
         console.print(f"Refreshed [bold]{len(refreshed)}[/bold] "
                       f"(run {run_id}).")
     for name, label, note in alerts:
@@ -1553,6 +1557,106 @@ def refresh(
                       + (f" — {note}" if note else ""))
     if not refreshed and not alerts:
         console.print("[dim]No verdicts updated this pass.[/dim]")
+
+
+# ------------------------------------------------------------------- graph
+
+
+def _rebuild_graph(store: Store) -> None:
+    """Refresh the derived edge table after a save. Best-effort: the graph
+    is a VIEW of the ledger, so a failure here must never sink the run that
+    produced the data — the next save rebuilds it anyway."""
+    try:
+        n = store.rebuild_graph(store.load_lead_ledger(include_demo=False))
+        console.print(f"[dim]Knowledge graph: {n} edges.[/dim]")
+    except Exception as exc:  # noqa: BLE001
+        console.print(f"[yellow]Graph rebuild failed ({exc}) — "
+                      "run `scout graph --rebuild` to retry.[/yellow]")
+
+
+@app.command("graph")
+def graph_cmd(
+    name: Annotated[
+        str | None,
+        typer.Argument(help="A company, investor, lab, or person to look up. "
+                            "Omit for the database-wide summary."),
+    ] = None,
+    rebuild: Annotated[
+        bool, typer.Option("--rebuild", help="Re-derive all edges from the "
+                           "ledger first."),
+    ] = False,
+) -> None:
+    """The knowledge graph: who connects to whom across the whole database.
+
+    Every edge is derived from evidence the pipeline already collected —
+    investors from cited rounds, founders and their labs from research and
+    bios, acquirers from sourced status changes, smart-money follows from
+    the watchlist. The graph adds no new facts; it turns per-company facts
+    sideways, into the questions a fund asks across companies: which backer
+    keeps showing up, which lab the founders come from, what else an
+    acquirer bought, which companies share an investor.
+    """
+    settings = Settings()
+    store = _open_store(settings)
+    if rebuild or not store.all_graph_edges():
+        _rebuild_graph(store)
+
+    if name:
+        from scout.graph import REL_LABELS, node_key
+
+        key = node_key(name)
+        edges = store.graph_edges(key)
+        if not edges:
+            console.print(f"[yellow]No edges for {name!r}.[/yellow] "
+                          "It may not be in the database, or nothing links to it yet.")
+            raise typer.Exit(1)
+        label = next((e["src_label"] for e in edges if e["src_key"] == key),
+                     next((e["dst_label"] for e in edges if e["dst_key"] == key), name))
+        table = Table(title=f"Connections — {label}", box=box.SIMPLE)
+        table.add_column("relationship")
+        table.add_column("node", overflow="fold")
+        table.add_column("evidence", overflow="fold", style="dim")
+        for edge in edges:
+            outbound = edge["src_key"] == key
+            other = edge["dst_label"] if outbound else edge["src_label"]
+            rel = REL_LABELS.get(edge["rel"], edge["rel"])
+            arrow = f"→ {rel}" if outbound else f"← {rel}"
+            table.add_row(arrow, other, edge.get("evidence") or "")
+        console.print(table)
+        related = store.graph_related(key)
+        if related:
+            console.print("[bold]Also connected through shared backers/watchers:[/bold]")
+            for row in related[:10]:
+                console.print(f"  {row['company_label']} [dim](via "
+                              f"{row['via_label']})[/dim]")
+        return
+
+    edges = store.all_graph_edges()
+    if not edges:
+        console.print("[yellow]No edges yet[/yellow] — run `scout run`, "
+                      "`scout add` or `scout refresh` to populate the database.")
+        return
+    n_nodes = len({e["src_key"] for e in edges} | {e["dst_key"] for e in edges})
+    console.print(f"[bold]{n_nodes}[/bold] nodes · [bold]{len(edges)}[/bold] edges\n")
+
+    sections = [
+        ("Top investors (portfolio companies in this database)",
+         store.graph_hubs("invested_in", end="src")),
+        ("Top labs (founder alumni here)", store.graph_hubs("alum_of", end="dst")),
+        ("Acquirers", store.graph_hubs("acquired_by", end="dst")),
+        ("Most active watchers", store.graph_hubs("follows", end="src")),
+    ]
+    for title, hubs in sections:
+        hubs = [h for h in hubs if h[2] > 0]
+        if not hubs:
+            continue
+        table = Table(title=title, box=box.SIMPLE)
+        table.add_column("node")
+        table.add_column("connections", justify="right")
+        for _key, label, n in hubs:
+            table.add_row(label, str(n))
+        console.print(table)
+    console.print("[dim]`scout graph <name>` shows one node's connections.[/dim]")
 
 
 # --------------------------------------------------------------------- inspect

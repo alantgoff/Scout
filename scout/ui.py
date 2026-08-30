@@ -193,6 +193,66 @@ BAND_LABELS = rubric_mod.BAND_LABELS
 GROUNDED_SOURCES = {"website", "pinned_tweet", "tweets", "github", "research"}
 
 
+def _connections_html(lead: Lead) -> str:
+    """The card's knowledge-graph block: this startup's cross-links to the
+    REST of the database. Per-company facts (its own investors, founders)
+    already render as chips; what earns space here is what links sideways —
+    a backer with other portfolio companies in the pipeline, the acquirer
+    and its other purchases, a shared smart-money watcher. Empty string when
+    nothing cross-links: a Connections block with no connections is noise.
+    """
+    from scout.graph import company_node
+
+    ckey, _ = company_node(lead)
+    lines: list[str] = []
+
+    # Backers of this company → their other portfolio companies here.
+    for edge in _GRAPH_BY_DST.get(ckey, []):
+        if edge["rel"] != "invested_in":
+            continue
+        siblings = [
+            e["dst_label"] for e in _GRAPH_BY_SRC.get(edge["src_key"], [])
+            if e["rel"] == "invested_in" and e["dst_key"] != ckey
+        ]
+        if siblings:
+            shown = ", ".join(_e(x) for x in sorted(set(siblings))[:4])
+            lines.append(f"<b>{_e(edge['src_label'])}</b> also backs {shown}")
+
+    # The acquirer, and what else it bought from this database.
+    for edge in _GRAPH_BY_SRC.get(ckey, []):
+        if edge["rel"] != "acquired_by":
+            continue
+        others = [
+            e["src_label"] for e in _GRAPH_BY_DST.get(edge["dst_key"], [])
+            if e["rel"] == "acquired_by" and e["src_key"] != ckey
+        ]
+        line = f"Acquired by <b>{_e(edge['dst_label'])}</b>"
+        if others:
+            line += " — which also bought " + ", ".join(
+                _e(x) for x in sorted(set(others))[:3])
+        lines.append(line)
+
+    # Shared smart-money watchers (capped: follows are the commonest edge).
+    shared_watch: list[str] = []
+    for edge in _GRAPH_BY_DST.get(ckey, []):
+        if edge["rel"] != "follows":
+            continue
+        siblings = [
+            e["dst_label"] for e in _GRAPH_BY_SRC.get(edge["src_key"], [])
+            if e["rel"] == "follows" and e["dst_key"] != ckey
+        ]
+        if siblings:
+            shown = ", ".join(_e(x) for x in sorted(set(siblings))[:3])
+            shared_watch.append(f"{_e(edge['src_label'])} also follows {shown}")
+    lines += shared_watch[:2]
+
+    if not lines:
+        return ""
+    items = "".join(f"<div>· {line}</div>" for line in lines[:6])
+    return (f'<div class="subtle" style="margin-top:6px">'
+            f'<b>Connections</b>{items}</div>')
+
+
 def _grounding_chip(verdict: LLMVerdict) -> tuple[str, str] | None:
     """The evidence-trust chip: audit outcome first, else the classifier's
     own grounding claim. None for legacy verdicts (no claim either way)."""
@@ -1238,6 +1298,10 @@ def _load_workspace(stamp: tuple, thesis_id: str, version: str):
         store.all_votes(),
         store.all_comment_counts(),
         store.list_users(),
+        # The knowledge graph, whole: one row per relationship, so the
+        # Connections block on each card is pure-python lookups, not a
+        # query per render.
+        store.all_graph_edges(),
     )
 
 
@@ -1259,8 +1323,17 @@ def _load_filtered_ledger(
 
 (
     leads, latest_is_demo, ledger, pipeline, overrides, attrs_by_handle, _stale,
-    votes_by_handle, comment_counts, USERS,
+    votes_by_handle, comment_counts, USERS, GRAPH_EDGES,
 ) = _load_workspace(_db_stamp(), ACTIVE_THESIS_ID, ACTIVE_VERSION)
+
+# Graph lookups for the Connections block: connector node → the companies it
+# touches, and company → its inbound/outbound edges. Built once per rerun
+# from the cached edge list.
+_GRAPH_BY_SRC: dict[str, list[dict]] = {}
+_GRAPH_BY_DST: dict[str, list[dict]] = {}
+for _edge in GRAPH_EDGES:
+    _GRAPH_BY_SRC.setdefault(_edge["src_key"], []).append(_edge)
+    _GRAPH_BY_DST.setdefault(_edge["dst_key"], []).append(_edge)
 counts: dict[str, int] = {}
 for _row in pipeline.values():
     _status = _row.get("status") or "new"
@@ -2323,6 +2396,8 @@ def _lead_card(
             if verdict and verdict.verification_note:
                 st.markdown(f'<div class="subtle" style="margin-top:6px">Audit — {_e(verdict.verification_note)}</div>',
                             unsafe_allow_html=True)
+            if connections := _connections_html(lead):
+                st.markdown(connections, unsafe_allow_html=True)
             if ov:
                 ov_note = f" — “{ov['note']}”" if ov.get("note") else ""
                 st.markdown(

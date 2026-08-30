@@ -206,6 +206,16 @@ scout/
                     a child, not the scheduler. bootstrap_schedules seeds the
                     daily rhythm: run 06:00 → tracked refresh 06:45 → digest
                     07:30, every day, bounded by DAILY_SPEND_CAP_USD.
+  graph.py          The knowledge graph, pure: typed evidence-carrying
+                    edges (investor/person/lab/watcher/company) derived from
+                    fields the pipeline already sourced — funding_investors,
+                    founders, lab_move/bios (TOP_LABS), company_status_note,
+                    followed_by. Node identity normalized + aliased so
+                    spellings merge; junk investor names dropped. Store
+                    persists via rebuild_graph (FULL rebuild per save, so a
+                    corrected verdict retracts the edges it implied) and
+                    queries via graph_edges/graph_hubs/graph_related. CLI:
+                    `scout graph`; UI: the Connections block on each card.
   notify.py         Slack: mention/assignment pings (inline) and digests
                     (worker). Pure builders (digest_data → digest_blocks) so
                     message shape tests without network; post_slack swallows

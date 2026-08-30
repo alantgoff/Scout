@@ -3265,6 +3265,93 @@ class Store:
             total += float(row[0])
         return total
 
+    # -------------------------------------------------------- knowledge graph
+
+    def rebuild_graph(self, entries: list[LedgerEntry]) -> int:
+        """Derive the edge table from the ledger, wholesale.
+
+        Full rebuild rather than incremental upsert, deliberately: edges are
+        DERIVED data, and a corrected verdict (an audit fixing a fabricated
+        investor, a reclassify) must retract the edges it once implied.
+        Incremental writes can only add; a rebuild forgets what the evidence
+        no longer supports. The ledger orders newest-first per handle, so
+        dedupe keeps the freshest evidence string. Cheap enough to run after
+        every save: pure string work over rows already in memory.
+        """
+        from scout import graph as graph_mod
+
+        edges = graph_mod.dedupe([
+            edge for entry in entries for edge in graph_mod.edges_for_lead(entry.lead)
+        ])
+        with self.write_tx():
+            if self.db["edges"].exists():
+                self.db["edges"].drop()
+            if edges:
+                self.db["edges"].insert_all(
+                    [edge.model_dump() for edge in edges])
+        return len(edges)
+
+    def all_graph_edges(self) -> list[dict]:
+        """Every edge — small enough (one row per relationship) to hand the
+        UI whole, the same way all_pipeline/all_votes are."""
+        if not self.db["edges"].exists():
+            return []
+        return [dict(r) for r in self.db["edges"].rows]
+
+    def graph_edges(self, key: str, rel: str | None = None) -> list[dict]:
+        """Edges touching one node, either end."""
+        if not self.db["edges"].exists():
+            return []
+        where = "(src_key = ? or dst_key = ?)"
+        params: list = [key, key]
+        if rel:
+            where += " and rel = ?"
+            params.append(rel)
+        return [dict(r) for r in self.db["edges"].rows_where(where, params)]
+
+    def graph_hubs(
+        self, rel: str, end: str = "src", limit: int = 10
+    ) -> list[tuple[str, str, int]]:
+        """The most-connected nodes of one relationship — top investors by
+        portfolio-in-database (invested_in, src), top labs by alumni
+        (alum_of, dst), acquirers by purchases (acquired_by, dst), the most
+        active watchers (follows, src). (key, label, degree), most
+        connected first."""
+        if not self.db["edges"].exists():
+            return []
+        a, b = ("src", "dst") if end == "src" else ("dst", "src")
+        rows = self.db.execute(
+            f"select {a}_key, min({a}_label), count(distinct {b}_key) as n "
+            f"from edges where rel = ? group by {a}_key "
+            "order by n desc, 1 limit ?",
+            [rel, limit],
+        ).fetchall()
+        return [(r[0], r[1], int(r[2])) for r in rows]
+
+    def graph_related(self, company_key: str) -> list[dict]:
+        """Companies sharing a connector with this one — the two-hop query
+        the whole graph exists for. Returns {company_key, company_label,
+        via_label, rel} rows, strongest connectors (investors) first."""
+        if not self.db["edges"].exists():
+            return []
+        rows = self.db.execute(
+            """
+            select e2.dst_key, min(e2.dst_label), min(e1.src_label), e1.rel
+            from edges e1
+            join edges e2 on e2.src_key = e1.src_key and e2.rel = e1.rel
+                         and e2.dst_key != e1.dst_key
+            where e1.dst_key = ? and e1.rel in ('invested_in', 'follows')
+            group by e2.dst_key, e1.rel, e1.src_key
+            order by case e1.rel when 'invested_in' then 0 else 1 end
+            """,
+            [company_key],
+        ).fetchall()
+        return [
+            {"company_key": r[0], "company_label": r[1],
+             "via_label": r[2], "rel": r[3]}
+            for r in rows
+        ]
+
     def daily_budget_left_usd(self, cap_usd: float) -> float:
         """What today's envelope still allows; infinity when the cap is off.
 
