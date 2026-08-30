@@ -291,3 +291,18 @@ def test_to_account_prefers_profile_website_over_bio_links() -> None:
         followersCount=0, friendsCount=0,
     )
     assert _to_account(no_links, source="search").website is None
+
+
+def test_xapi_search_records_query_attribution(tmp_path) -> None:
+    """The scoreboard's raw material: every search records which handles it
+    surfaced, per query, cumulatively — separate from the overwritten cache."""
+    from pathlib import Path
+
+    from scout.store import Store
+
+    store = Store(Path(tmp_path) / "t.db")
+    store.record_query_hits('"left OpenAI" building', "departure", ["Ada", "bob"])
+    store.record_query_hits('"left OpenAI" building', "departure", ["bob", "carol"])
+    hits = store.query_hits()
+    assert {h["handle"] for h in hits} == {"ada", "bob", "carol"}
+    assert all(h["category"] == "departure" for h in hits)

@@ -1527,6 +1527,7 @@ def refresh(
             continue
 
         old_status = lead.llm.company_status or "independent"
+        old_round = lead.llm.funding_stage or "unknown"
         lead.llm = agents.apply_research(lead.llm, profile)
         new_status = lead.llm.company_status or "independent"
         if new_status != old_status and new_status != "unknown":
@@ -1536,6 +1537,34 @@ def refresh(
             alerts.append((display_name(lead),
                            COMPANY_STATUS_LABELS.get(new_status, new_status),
                            lead.llm.company_status_note))
+        # A newly-cited round is a captured OUTCOME: this company raised
+        # after we scored it — exactly the row the hindsight backtest needs
+        # and nobody remembers to write down. apply_research only lets a
+        # cited round land when it fills an unknown or progresses past the
+        # old one, so "it changed" here already means "a raise, with a
+        # source". detected_at is the detection, not the announcement — the
+        # weekly refresh cadence keeps the two close for tracked companies.
+        new_round = lead.llm.funding_stage or "unknown"
+        if new_round != old_round and new_round != "unknown":
+            recorded = store.record_outcome(
+                handle,
+                company=display_name(lead),
+                round_stage=new_round,
+                amount=lead.llm.funding_amount or "",
+                investors=lead.llm.funding_investors,
+                evidence=lead.llm.funding_evidence or "",
+                domain=(urlparse(lead.llm.company_url
+                                 or lead.account.website or "").hostname
+                        or "").removeprefix("www."),
+                github_repo=lead.account.github_repo or "",
+            )
+            if recorded:
+                alerts.append((display_name(lead),
+                               "raised — " + FUNDING_STAGE_LABELS.get(
+                                   new_round, new_round)
+                               + (f" · {lead.llm.funding_amount}"
+                                  if lead.llm.funding_amount else ""),
+                               lead.llm.funding_evidence or ""))
         refreshed.append(lead)
         store.mark_refreshed(handle)
         console.print(f"  [dim]~${meta.get('cost_usd', 0):.3f} · "
@@ -1656,6 +1685,16 @@ def graph_cmd(
         for _key, label, n in hubs:
             table.add_row(label, str(n))
         console.print(table)
+    from scout.graph import watchlist_candidates
+
+    seeds = _load_seeds_or_default()
+    suggested = watchlist_candidates(edges, seeds.watchers)
+    if suggested:
+        console.print("[bold]Graph suggests watching[/bold] (connected to 2+ "
+                      "tracked companies — find their X handle, then add to "
+                      "the watchlist):")
+        for name, n in suggested:
+            console.print(f"  {name} [dim]({n} companies)[/dim]")
     console.print("[dim]`scout graph <name>` shows one node's connections.[/dim]")
 
 
@@ -2154,21 +2193,33 @@ def hindsight(
     store = _open_store(settings)
     thesis = _resolve_thesis_or_exit(store, thesis_path)
 
-    if not outcomes_path.exists():
+    outcomes: list = []
+    controls: list = []
+    if outcomes_path.exists():
+        try:
+            outcomes, controls = hs.load_outcomes(outcomes_path)
+        except Exception as exc:
+            console.print(f"[red]Could not read {outcomes_path}:[/] {exc}")
+            raise typer.Exit(1) from exc
+    # Auto-captured rounds from the refresh — the self-accumulating half of
+    # the dataset. Curated YAML wins key collisions (it usually carries the
+    # real announce date; the auto row only knows when the refresh noticed).
+    auto = [hs.outcome_from_auto(row) for row in store.auto_outcomes()]
+    if auto:
+        before = len(outcomes)
+        outcomes = hs.merge_outcomes(outcomes, auto)
         console.print(
-            f"[red]No outcomes file at[/] {outcomes_path}\n"
-            "Create one listing companies that raised (and controls that did "
-            "not) — see outcomes.example.yaml for the shape."
+            f"[dim]{len(outcomes) - before} auto-captured outcome(s) merged "
+            f"from the refresh ledger ({len(auto)} total on file).[/dim]"
+        )
+    if not outcomes:
+        console.print(
+            f"[red]No outcomes to test.[/red] Curate {outcomes_path} (see "
+            "outcomes.example.yaml) — or let the daily refresh capture "
+            "rounds automatically as tracked companies raise."
         )
         raise typer.Exit(1)
-    try:
-        outcomes, controls = hs.load_outcomes(outcomes_path)
-    except Exception as exc:
-        console.print(f"[red]Could not read {outcomes_path}:[/] {exc}")
-        raise typer.Exit(1) from exc
-    if not outcomes:
-        console.print(f"[red]{outcomes_path} lists no outcomes.[/]")
-        raise typer.Exit(1)
+
 
     if cutoff:
         try:
@@ -2193,7 +2244,9 @@ def hindsight(
     if not controls:
         console.print(
             "[yellow]No controls supplied[/] — recall without a control group "
-            "cannot show whether the scorer discriminates. Add a `controls:` "
+            "cannot show whether the scorer discriminates, and weight "
+            "suggestions stay off until both sides have samples. The refresh "
+            "auto-captures only the RAISED side; add a `controls:` "
             "list of companies from the same window that did not raise."
         )
 
@@ -2736,9 +2789,16 @@ def strategy(
     seeds = _load_seeds_or_exit(seeds_path)
     store = _open_store(settings)
 
+    from scout.insights import performance_block_for
+
+    performance = performance_block_for(store)
+    if performance:
+        console.print("[dim]Feeding measured query yield + graph-derived "
+                      "watchlist leads to the strategy agent.[/dim]")
     try:
         with console.status("Designing sourcing strategy with Claude..."):
-            proposal = generate_strategy(description, thesis, seeds, settings)
+            proposal = generate_strategy(description, thesis, seeds, settings,
+                                         performance=performance)
     except RuntimeError as exc:
         console.print(f"[red]Cannot generate strategy:[/red] {exc}")
         raise typer.Exit(1) from None

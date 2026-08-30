@@ -101,3 +101,34 @@ def test_parse_weight_proposal_handles_fences_and_rejects_junk() -> None:
         parse_weight_proposal(json.dumps({"weights": {"unknown": 10}, "rationale": ""}), CURRENT)
     with pytest.raises(ValueError):
         parse_weight_proposal("[1, 2]", CURRENT)
+
+
+# --- query yield ---------------------------------------------------------------
+
+
+def test_query_yield_scores_and_flags_dead_queries() -> None:
+    from scout.insights import performance_block, query_yield
+
+    hits = ([{"query": "dead-q", "category": "launch", "handle": f"h{i}"}
+             for i in range(12)]
+            + [{"query": "gold-q", "category": "departure", "handle": "winner"},
+               {"query": "gold-q", "category": "departure", "handle": "meh"},
+               {"query": "young-q", "category": "hiring", "handle": "h1"}])
+    ledger = {"winner", "meh"} | {f"h{i}" for i in range(6)}
+    pipeline = {"winner": {"status": "shortlisted"}, "meh": {"status": "passed"}}
+
+    yields = query_yield(hits, ledger, pipeline)
+    by_query = {y.query: y for y in yields}
+    assert yields[0].query == "gold-q"  # earners first
+    assert (by_query["gold-q"].surfaced, by_query["gold-q"].triaged,
+            by_query["gold-q"].passed) == (2, 1, 1)
+    assert by_query["dead-q"].dead        # 12 surfaced, 0 triaged
+    assert by_query["young-q"].unproven   # too small a sample to condemn
+    assert not by_query["young-q"].dead
+
+    block = performance_block(yields, [("Bpifrance", 2)])
+    assert "'gold-q'" in block and "'dead-q'" in block
+    assert "'young-q'" not in block       # no verdict on no evidence
+    assert "Bpifrance (2 tracked companies)" in block
+    # Nothing measured → empty, never a block of zeros.
+    assert performance_block([], None) == ""

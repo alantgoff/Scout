@@ -177,3 +177,33 @@ def test_hubs_and_related_answer_the_sideways_questions(tmp_path: Path) -> None:
     related = store.graph_related(node_key("Acme"))
     assert [(r["company_label"], r["via_label"]) for r in related] == [
         ("Beta", "Sequoia")]
+
+
+def test_watchlist_candidates_names_multi_company_connectors_not_handles(tmp_path: Path) -> None:
+    """Investors/labs touching 2+ tracked companies, minus what the
+    watchlist covers — and NAMES only: guessing an X handle from a firm name
+    is the error the graph refuses everywhere else."""
+    from scout.graph import watchlist_candidates
+
+    edges = [
+        # Sequoia backs two companies; Bpifrance one; openai has two alumni.
+        {"src_type": "investor", "src_key": "sequoia", "src_label": "Sequoia",
+         "rel": "invested_in", "dst_type": "company", "dst_key": "a",
+         "dst_label": "A", "evidence": ""},
+        {"src_type": "investor", "src_key": "sequoia", "src_label": "Sequoia",
+         "rel": "invested_in", "dst_type": "company", "dst_key": "b",
+         "dst_label": "B", "evidence": ""},
+        {"src_type": "investor", "src_key": "bpifrance", "src_label": "Bpifrance",
+         "rel": "invested_in", "dst_type": "company", "dst_key": "a",
+         "dst_label": "A", "evidence": ""},
+        {"src_type": "person", "src_key": "ada", "src_label": "Ada",
+         "rel": "alum_of", "dst_type": "lab", "dst_key": "openai",
+         "dst_label": "openai", "evidence": ""},
+        {"src_type": "person", "src_key": "sam", "src_label": "Sam",
+         "rel": "alum_of", "dst_type": "lab", "dst_key": "openai",
+         "dst_label": "openai", "evidence": ""},
+    ]
+    ranked = watchlist_candidates(edges, current_watchers=[])
+    assert ranked == [("openai", 2), ("Sequoia", 2)]  # count desc, then name
+    # Already watched (any spelling) → not suggested again.
+    assert watchlist_candidates(edges, ["sequoia"]) == [("openai", 2)]

@@ -248,6 +248,38 @@ def hubs(
     return [(labels[k], len(v)) for k, v in ranked[:limit]]
 
 
+def watchlist_candidates(
+    edges: list[dict], current_watchers: list[str], limit: int = 8
+) -> list[tuple[str, int]]:
+    """(name, tracked-company count) for connectors the watchlist is missing.
+
+    Investors backing 2+ companies in the database, and labs with 2+ founder
+    alumni here, are the highest-yield follow-graph additions — their next
+    move is statistically about a company shaped like the ones already
+    tracked. Names, NOT handles: guessing an X handle from a firm's name is
+    the one error the graph refuses everywhere else, so the handle lookup
+    stays with a human or the strategy agent + validate_watchlist.
+    """
+    watcher_keys = {node_key(w) for w in current_watchers}
+    counts: dict[str, set[str]] = {}
+    labels: dict[str, str] = {}
+    for e in edges:
+        if e["rel"] == "invested_in":
+            key, label, other = e["src_key"], e["src_label"], e["dst_key"]
+        elif e["rel"] == "alum_of":
+            key, label, other = e["dst_key"], e["dst_label"], e["src_key"]
+        else:
+            continue
+        counts.setdefault(key, set()).add(other)
+        labels.setdefault(key, label)
+    ranked = [
+        (labels[k], len(v)) for k, v in counts.items()
+        if len(v) >= 2 and k not in watcher_keys
+    ]
+    ranked.sort(key=lambda kv: (-kv[1], kv[0].lower()))
+    return ranked[:limit]
+
+
 def dedupe(edges: list[Edge]) -> list[Edge]:
     """First edge per (src, rel, dst) wins — callers order by lead recency,
     so the freshest evidence string is the one kept."""

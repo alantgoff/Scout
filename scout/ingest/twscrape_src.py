@@ -281,6 +281,10 @@ class TwscrapeSource(SourceAdapter):
             self.store.upsert_tweets([_to_tweet(t) for t in tweets])
             for t in tweets:
                 add(t.user, f"search:{category}")
+            # Yield attribution: which query surfaced whom, kept forever —
+            # the input to the query scoreboard that prunes the bank.
+            self.store.record_query_hits(
+                query, category, [t.user.username for t in tweets])
 
         # 3) bio/people search — reaches BIOS ("ex-openai", "stealth"), which
         #    tweet search cannot; web-only capability, hence twscrape-only.
@@ -294,6 +298,8 @@ class TwscrapeSource(SourceAdapter):
                 continue
             for user in users:
                 add(user, "bio_search")
+            self.store.record_query_hits(
+                query, "bio", [u.username for u in users])
 
         # 4) watchlist graph hop — snapshot each watcher's following list into
         #    the store (first_seen diffing happens there), then surface only

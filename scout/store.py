@@ -1175,6 +1175,31 @@ class Store:
 
     # ------------------------------------------------------------- site cache
 
+    def record_query_hits(self, query: str, category: str,
+                          handles: list[str]) -> None:
+        """Append-only query→handle attribution — which search surfaced whom.
+
+        Deliberately separate from the `searches` cache table: that one is
+        overwritten per query (its READERS depend on it being the latest
+        result set), while yield accounting needs history that only grows.
+        first_seen is preserved on re-sighting (insert-or-ignore).
+        """
+        if not handles:
+            return
+        now = datetime.now(timezone.utc).isoformat()
+        self.db["query_hits"].insert_all(
+            [{"query": query, "category": category,
+              "handle": h.lstrip("@").lower(), "first_seen": now}
+             for h in dict.fromkeys(handles)],
+            pk=("query", "handle"), ignore=True,
+        )
+
+    def query_hits(self) -> list[dict]:
+        """Every attribution row — small (one per query×handle pair)."""
+        if not self.db["query_hits"].exists():
+            return []
+        return [dict(r) for r in self.db["query_hits"].rows]
+
     def record_site(self, page: SitePage) -> None:
         """Cache one fetched company site — failures too (negative caching)."""
         self.db["websites"].upsert(
@@ -1630,6 +1655,61 @@ class Store:
         ]
         due.sort(key=lambda r: r.get("researched_at") or "")
         return [r["handle"] for r in due[:limit]]
+
+    def record_outcome(
+        self,
+        handle: str,
+        *,
+        company: str,
+        round_stage: str,
+        amount: str = "",
+        investors: list[str] | None = None,
+        evidence: str = "",
+        domain: str = "",
+        github_repo: str = "",
+    ) -> bool:
+        """One detected funding round → one backtest outcome, captured the
+        moment the refresh finds it instead of waiting for a human to
+        remember outcomes.yaml. Returns False when this (handle, round) was
+        already recorded — re-detections on later refreshes are not new
+        rounds. Appends the funding_round_detected event in the SAME
+        transaction so the digest and Activity feed see it.
+        """
+        handle = handle.lstrip("@").lower()
+        with self.write_tx():
+            if self.db["outcomes"].exists() and list(self.db["outcomes"].rows_where(
+                    "handle = ? and round_stage = ?", [handle, round_stage],
+                    limit=1)):
+                return False
+            self.db["outcomes"].insert({
+                "handle": handle,
+                "company": company,
+                "round_stage": round_stage,
+                "amount": amount,
+                "investors": json.dumps(investors or []),
+                "evidence": evidence,
+                "domain": domain,
+                "github_repo": github_repo,
+                "detected_at": datetime.now(timezone.utc).isoformat(),
+            })
+            self._append_event(
+                "funding_round_detected", handle=handle,
+                actor=self.actor or "agent:refresh",
+                payload={"company": company, "round": round_stage,
+                         "amount": amount, "evidence": evidence},
+            )
+        return True
+
+    def auto_outcomes(self) -> list[dict]:
+        """Every auto-captured outcome, investors decoded, oldest first."""
+        if not self.db["outcomes"].exists():
+            return []
+        rows = []
+        for r in self.db["outcomes"].rows_where(order_by="detected_at"):
+            row = dict(r)
+            row["investors"] = json.loads(row.get("investors") or "[]")
+            rows.append(row)
+        return rows
 
     def flag_company_status(
         self, handle: str, old: str | None, new: str, note: str = ""

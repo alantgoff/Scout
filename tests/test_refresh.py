@@ -177,3 +177,47 @@ def test_refresh_without_a_key_does_nothing(tmp_path: Path) -> None:
     )
     assert result.exit_code == 0
     assert "needs the research agent" in result.output.replace("\n", " ")
+
+
+def test_a_detected_round_is_captured_as_an_outcome(tmp_path: Path, monkeypatch) -> None:
+    """The flywheel closure: refresh finds a cited round → an outcomes row,
+    an activity event, and (via merge) the hindsight dataset — with no human
+    writing YAML. Progression past a cited round counts; re-detection of the
+    same round on a later refresh does not duplicate."""
+    store = Store(tmp_path / "t.db")
+    _track(store, "raiser", refreshed_days_ago=30, website="https://raiser.example/")
+    # Give the stored verdict a cited seed round so this is a PROGRESSION.
+    lead = store.latest_lead("raiser")
+    lead.llm.funding_stage = "seed"
+    lead.llm.funding_evidence = "site: press page"
+    store.save_leads("seed2-raiser", [lead])
+
+    _stub_research(monkeypatch, {
+        "https://raiser.example/": CompanyProfile(
+            funding_stage="series_a", funding_amount="$14M",
+            funding_investors=["Sequoia"],
+            funding_evidence="techcrunch 2026-08-29",
+        ),
+    })
+    result = _refresh(tmp_path)
+    assert result.exit_code == 0, result.output
+    assert "raised — Series A" in result.output
+
+    store = Store(tmp_path / "t.db")
+    rows = store.auto_outcomes()
+    assert len(rows) == 1
+    assert rows[0]["round_stage"] == "series_a"
+    assert rows[0]["amount"] == "$14M"
+    assert rows[0]["evidence"] == "techcrunch 2026-08-29"
+    assert rows[0]["domain"] == "raiser.example"
+    events = store.events(verbs=["funding_round_detected"])
+    assert len(events) == 1 and events[0].handle == "raiser"
+
+    # Second refresh re-detects the same round — no duplicate row or event.
+    _track(store, "raiser", refreshed_days_ago=30,
+           website="https://raiser.example/")
+    result = _refresh(tmp_path)
+    assert result.exit_code == 0, result.output
+    store = Store(tmp_path / "t.db")
+    assert len(store.auto_outcomes()) == 1
+    assert len(store.events(verbs=["funding_round_detected"])) == 1

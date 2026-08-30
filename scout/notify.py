@@ -183,17 +183,29 @@ def digest_data(store: Store, since: datetime, window: str = "daily") -> dict:
 
     alerts: list[dict] = []
     for event in events:
-        if event.verb != "company_status_changed" or not event.handle:
+        if (event.verb not in ("company_status_changed", "funding_round_detected")
+                or not event.handle):
             continue
         lead = next((e.lead for e in ledger
                      if e.lead.account.handle.lower() == event.handle), None)
         payload = event.payload or {}
+        if event.verb == "funding_round_detected":
+            from scout.models import FUNDING_STAGE_LABELS
+
+            label = "💰 raised " + FUNDING_STAGE_LABELS.get(
+                payload.get("round", ""), payload.get("round", "a round"))
+            if payload.get("amount"):
+                label += f" · {payload['amount']}"
+            note = payload.get("evidence", "")
+        else:
+            label = COMPANY_STATUS_LABELS.get(
+                payload.get("new", ""), payload.get("new", "changed"))
+            note = payload.get("note", "")
         alerts.append({
             "handle": event.handle,
             "name": display_name(lead) if lead else f"@{event.handle}",
-            "status": COMPANY_STATUS_LABELS.get(
-                payload.get("new", ""), payload.get("new", "changed")),
-            "note": payload.get("note", ""),
+            "status": label,
+            "note": note,
             "link": deep_link(store, event.handle, "Startups"),
         })
     alerts = alerts[:5]

@@ -16,6 +16,8 @@ No I/O and no network — fully unit-testable.
 
 from __future__ import annotations
 
+from dataclasses import dataclass
+
 from pydantic import BaseModel, Field
 
 from scout.models import Lead, LedgerEntry, Vote
@@ -286,3 +288,113 @@ def model_disagreements(
         MODEL_LIKED if d.kind == "model_liked_you_passed" else MODEL_COOL
     )))
     return out[:limit]
+
+
+# ------------------------------------------------------------- query yield
+# The discovery loop's report card: which search queries actually produce
+# companies the firm triages, and which just burn the sourcing time budget.
+# Pure functions over store.query_hits() + the ledger + pipeline — the same
+# contrast philosophy as triage_stats, pointed at the query bank.
+
+
+@dataclass
+class QueryYield:
+    """One query's lifetime scoreboard."""
+
+    query: str
+    category: str
+    surfaced: int  # distinct accounts this query ever hit
+    scored: int  # of those, how many made it into the ledger
+    triaged: int  # … and were longlisted or further (POSITIVE_STATUSES)
+    passed: int
+
+    @property
+    def dead(self) -> bool:
+        """Surfaced a real sample, triaged nothing — the pruning candidate.
+        The floor keeps a query that has only ever hit 3 accounts from being
+        condemned on no evidence."""
+        return self.surfaced >= 10 and self.triaged == 0
+
+    @property
+    def unproven(self) -> bool:
+        return self.surfaced < 10 and self.triaged == 0
+
+
+def query_yield(
+    hits: list[dict],
+    ledger_handles: set[str],
+    pipeline: dict[str, dict],
+) -> list[QueryYield]:
+    """Scoreboard rows, best earners first (triaged desc, then surfaced).
+
+    `hits` = store.query_hits(); `ledger_handles` = lowercased handles that
+    exist in the lead ledger; `pipeline` = store.all_pipeline().
+    """
+    by_query: dict[tuple[str, str], set[str]] = {}
+    for hit in hits:
+        by_query.setdefault((hit["query"], hit.get("category") or ""),
+                            set()).add(hit["handle"])
+    rows = []
+    for (query, category), handles in by_query.items():
+        scored = {h for h in handles if h in ledger_handles}
+        statuses = [(pipeline.get(h) or {}).get("status") or "new"
+                    for h in scored]
+        rows.append(QueryYield(
+            query=query, category=category,
+            surfaced=len(handles), scored=len(scored),
+            triaged=sum(1 for s in statuses if s in POSITIVE_STATUSES),
+            passed=sum(1 for s in statuses if s == "passed"),
+        ))
+    rows.sort(key=lambda r: (-r.triaged, -r.surfaced, r.query))
+    return rows
+
+
+def performance_block_for(store) -> str:
+    """The strategy agent's briefing, straight from a Store — the one-call
+    wrapper the CLI and UI share. Empty string when nothing is measured."""
+    from scout.graph import watchlist_candidates
+
+    hits = store.query_hits()
+    edges = store.all_graph_edges()
+    if not hits and not edges:
+        return ""
+    ledger_handles = {
+        e.lead.account.handle.lower() for e in store.load_lead_ledger()
+    }
+    yields = query_yield(hits, ledger_handles, store.all_pipeline())
+    try:
+        from scout.config import load_seeds
+
+        watchers = load_seeds().watchers
+    except Exception:  # seeds file missing/unreadable — suggestions still work
+        watchers = []
+    return performance_block(yields, watchlist_candidates(edges, watchers))
+
+
+def performance_block(
+    yields: list[QueryYield],
+    watchlist_candidates: list[tuple[str, int]] | None = None,
+) -> str:
+    """The strategy agent's performance briefing — measured yield per query
+    plus graph-derived watchlist leads, compact enough to sit in the prompt.
+    Empty string when there is nothing measured yet (a block of zeros would
+    teach the agent that everything is dead)."""
+    lines: list[str] = []
+    earners = [y for y in yields if y.triaged > 0]
+    dead = [y for y in yields if y.dead]
+    if earners:
+        lines.append("Queries that produced triaged companies (keep this shape):")
+        lines += [f"- [{y.category}] {y.query!r}: {y.surfaced} surfaced, "
+                  f"{y.triaged} triaged" for y in earners[:10]]
+    if dead:
+        lines.append("Queries that surfaced plenty but produced NOTHING triaged "
+                     "(drop or replace these):")
+        lines += [f"- [{y.category}] {y.query!r}: {y.surfaced} surfaced, 0 triaged"
+                  for y in dead[:10]]
+    if watchlist_candidates:
+        lines.append(
+            "Investors/labs connected to 2+ companies already in the database "
+            "(if any have a known X account, they belong on the watchlist):")
+        lines += [f"- {name} ({n} tracked companies)"
+                  for name, n in watchlist_candidates[:8]]
+    return "\n".join(lines)

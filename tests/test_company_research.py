@@ -138,7 +138,7 @@ def test_grounding_is_only_claimed_when_something_was_actually_cited() -> None:
         product_summary=None, sources=["https://a.example"])).grounding == "none"
 
 
-def test_a_cited_round_beats_an_uncited_unknown_but_not_a_cited_round() -> None:
+def test_cited_rounds_fill_unknowns_and_progressions_but_never_conflicts() -> None:
     """"unknown" is what the classifier is instructed to say when the dossier
     is silent, and the dossier is silent about almost every round."""
     filled = apply_research(
@@ -157,12 +157,25 @@ def test_a_cited_round_beats_an_uncited_unknown_but_not_a_cited_round() -> None:
     )
     assert unsourced.funding_stage == "unknown"
 
-    # A round the classifier read from evidence is not second-guessed.
-    kept = apply_research(
+    # A cited LATER round is a progression — the company raised — and lands.
+    raised = apply_research(
         LLMVerdict(handle="p", funding_stage="seed", funding_evidence="site: press page"),
-        CompanyProfile(funding_stage="series_b", funding_evidence="a blog"),
+        CompanyProfile(funding_stage="series_a", funding_amount="$14M",
+                       funding_evidence="techcrunch 2026-08-01"),
     )
-    assert kept.funding_stage == "seed"
+    assert raised.funding_stage == "series_a"
+    assert raised.funding_amount == "$14M"
+
+    # A cited round equal or EARLIER than the current one is a conflict, not
+    # a raise — the verdict's own evidence stands.
+    for conflicting in ("seed", "pre_seed"):
+        kept = apply_research(
+            LLMVerdict(handle="p", funding_stage="seed",
+                       funding_evidence="site: press page"),
+            CompanyProfile(funding_stage=conflicting, funding_evidence="a blog"),
+        )
+        assert kept.funding_stage == "seed"
+        assert kept.funding_evidence == "site: press page"
 
 
 def test_acquisition_survives_the_overlay_with_its_source() -> None:

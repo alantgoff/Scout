@@ -206,6 +206,13 @@ scout/
                     a child, not the scheduler. bootstrap_schedules seeds the
                     daily rhythm: run 06:00 → tracked refresh 06:45 → digest
                     07:30, every day, bounded by DAILY_SPEND_CAP_USD.
+  insights.py       Triage insights (shortlist-vs-pass contrast for the
+                    weight agent) + the QUERY-YIELD scoreboard: query_hits
+                    attribution (recorded by both adapters) joined to the
+                    ledger and pipeline → which queries produce triaged
+                    companies vs burn the time budget. performance_block(_for)
+                    renders it (with graph.watchlist_candidates) into the
+                    strategy agent's prompt and the Thesis page.
   publish.py        The GitHub Pages app: `scout publish` renders docs/ as
                     a self-contained read-only PWA — four hash-routed views
                     (Startups with client-side search/sort/filters off
@@ -239,7 +246,12 @@ scout/
                     message shape tests without network; post_slack swallows
                     its own failures — a Slack outage must never break a
                     triage click.
-  hindsight.py      The backtest. Reconstructs public evidence as it stood on
+  hindsight.py      The backtest. Outcomes now come from TWO sources:
+                    hand-curated outcomes.yaml and the auto-captured rounds
+                    `scout refresh` writes to store.outcomes the moment a
+                    tracked company's newly-cited round lands
+                    (outcome_from_auto / merge_outcomes; YAML wins key
+                    collisions — it carries the real announce date). Reconstructs public evidence as it stood on
                     a past date (HN Algolia archive + GitHub starring
                     TIMESTAMPS, never today's counts), scores it with the
                     SAME pipeline production uses, and compares against

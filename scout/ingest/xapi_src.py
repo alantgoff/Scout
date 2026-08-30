@@ -338,6 +338,7 @@ class XApiSource(SourceAdapter):
                 seen_handles.append(account.handle)
                 merge(account)
             self.store.record_search(query, seen_handles)
+            self.store.record_query_hits(query, category, seen_handles)
         return list(accounts.values())
 
     async def fetch_tweets(self, account: Account, *, limit: int = 20) -> list[Tweet]:

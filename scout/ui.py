@@ -112,7 +112,14 @@ _DB_COMPUTED_LABELS = DB_COMPUTED_LABELS
 from scout.export import memo_pdf_bytes, pipeline_rows, write_pipeline_csv
 from scout.hindsight import default_limitations as hindsight_limitations
 from scout.hindsight import render_report as hindsight_report_markdown
-from scout.insights import actor_stats, model_disagreements, stats_prompt, triage_stats
+from scout.insights import (
+    actor_stats,
+    model_disagreements,
+    performance_block_for,
+    query_yield,
+    stats_prompt,
+    triage_stats,
+)
 from scout import jobs as jobs_mod
 from scout import notify
 from scout import theses as theses_mod
@@ -3767,8 +3774,13 @@ if nav == "Thesis":
             status.write("Claude is drafting your full sourcing config — "
                          "targeting, the X query bank, bio searches, GitHub "
                          "topics, and a watchlist.")
-            proposal_new = generate_strategy(description, thesis, seeds, settings,
-                                             on_progress=on_progress)
+            proposal_new = generate_strategy(
+                description, thesis, seeds, settings,
+                on_progress=on_progress,
+                # Measured yield + graph leads — the agent designs against
+                # what the running system has already learned.
+                performance=performance_block_for(store),
+            )
             status.update(label="Validating watchlist handles on X…")
             status.write("🔎 Checking the watchlist resolves on X…")
             _, wl_invalid, wl_validated = validate_watchlist(
@@ -3961,6 +3973,34 @@ if nav == "Thesis":
                 st.success("Saved."); st.rerun()
 
     with st.expander("Query bank — X searches and bio search"):
+        # The report card first, the editors second: which of these queries
+        # ever produced a company the firm triaged. Dead queries burn the
+        # sourcing time budget every single run.
+        _yields = query_yield(
+            store.query_hits(),
+            {e.lead.account.handle.lower() for e in ledger},
+            pipeline,
+        )
+        if _yields:
+            _earners = [y for y in _yields if y.triaged > 0]
+            _dead = [y for y in _yields if y.dead]
+            _lines = [
+                f'<div class="subtle">✓ <b>{_e(y.query)}</b> '
+                f'[{_e(y.category)}] — {y.surfaced} surfaced, '
+                f'<b>{y.triaged} triaged</b></div>'
+                for y in _earners[:8]
+            ] + [
+                f'<div class="subtle">✗ <b>{_e(y.query)}</b> '
+                f'[{_e(y.category)}] — {y.surfaced} surfaced, none triaged '
+                '— consider dropping</div>'
+                for y in _dead[:8]
+            ]
+            if _lines:
+                st.markdown("**Query yield** — measured over every run",
+                            help="✓ produced triaged companies · ✗ surfaced "
+                                 "10+ accounts, none triaged. The strategy "
+                                 "agent sees this too.")
+                st.markdown("".join(_lines), unsafe_allow_html=True)
         with st.form("seeds_form"):
             c1, c2 = st.columns(2)
             with c1:
@@ -3982,6 +4022,20 @@ if nav == "Thesis":
                 st.success("Saved."); st.rerun()
 
     with st.expander("Watchlist & discovery — follow-graph, GitHub, lists"):
+        # Graph-derived leads: connectors already touching 2+ tracked
+        # companies. Names, not handles — the graph never guesses handles;
+        # find the person's X account (or let the strategy agent propose
+        # one, which gets existence-checked) before adding.
+        from scout.graph import watchlist_candidates as _wl_candidates
+
+        _suggested = _wl_candidates(GRAPH_EDGES, seeds.watchers)
+        if _suggested:
+            st.markdown("**Graph suggests watching** — connected to 2+ "
+                        "tracked companies:")
+            st.markdown("".join(
+                f'<div class="subtle">· {_e(name)} ({n} companies)</div>'
+                for name, n in _suggested
+            ), unsafe_allow_html=True)
         with st.form("watchlist_form"):
             c3, c4 = st.columns(2)
             with c3:
@@ -4940,6 +4994,15 @@ if nav == "Startups":
 # English.
 _VERB_TEXT = {
     "status_changed": lambda p: f"moved to {STATUS_LABELS.get(p.get('new', ''), p.get('new', ''))}",
+    "funding_round_detected": lambda p: (
+        f"raised {FUNDING_STAGE_LABELS.get(p.get('round', ''), p.get('round', 'a round'))}"
+        + (f" · {p['amount']}" if p.get("amount") else "")
+        + (f" ({p['evidence']})" if p.get("evidence") else "")
+    ),
+    "company_status_changed": lambda p: (
+        f"is now {COMPANY_STATUS_LABELS.get(p.get('new', ''), p.get('new', ''))}"
+        + (f" — {p['note']}" if p.get("note") else "")
+    ),
     "vote_cast": lambda p: (
         f"voted {STANCE_LABELS.get(p.get('stance', ''), p.get('stance', '')).lower()}"
         + (f" — “{p['rationale']}”" if p.get("rationale") else "")
@@ -4994,6 +5057,7 @@ if nav == "Activity":
                    "override_set", "attrs_changed"],
         "Memos": ["memo_generated", "memo_edited", "memo_review_requested",
                   "memo_approved", "memo_changes_requested"],
+        "Company news": ["funding_round_detected", "company_status_changed"],
     }
     unread = store.unread_count(ACTOR)
     if unread:

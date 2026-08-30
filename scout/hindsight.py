@@ -1017,6 +1017,54 @@ def load_outcomes(path) -> tuple[list[Outcome], list[Outcome]]:
     return outcomes, controls
 
 
+def outcome_from_auto(row: dict) -> Outcome:
+    """One auto-captured store row (store.auto_outcomes) → an Outcome.
+
+    round_date is the DETECTION time, not the announcement — the refresh's
+    weekly cadence keeps them close for tracked companies, and the honest
+    date we observed beats a fabricated announce date. x_handles are carried
+    for the record even though only github/hn/domain evidence scores.
+    """
+    github_users: list[str] = []
+    github_repos: list[str] = []
+    gh = (row.get("github_repo") or "").strip().rstrip("/")
+    if gh:
+        path = gh.split("github.com/")[-1].strip("/")
+        if "/" in path:
+            github_repos.append(path)
+        elif path:
+            github_users.append(path)
+    return Outcome(
+        company=row["company"],
+        round_date=datetime.fromisoformat(row["detected_at"]),
+        round_stage=row.get("round_stage") or "",
+        amount=row.get("amount") or "",
+        domain=row.get("domain") or "",
+        x_handles=[row["handle"]],
+        github_users=github_users,
+        github_repos=github_repos,
+        note=("auto-captured by scout refresh — "
+              + (row.get("evidence") or "no evidence string")),
+    )
+
+
+def merge_outcomes(
+    curated: list[Outcome], auto: list[Outcome]
+) -> list[Outcome]:
+    """Hand-curated outcomes + auto-captured ones, deduped by Outcome.key.
+
+    The YAML wins a collision: a human wrote that row deliberately, usually
+    with the real announce date — the auto row only knows when the refresh
+    noticed. Auto rows grow the RAISED side of the backtest; controls stay
+    curated, because "did not raise" is exactly the claim automation cannot
+    make from absence of evidence.
+    """
+    merged = {o.key: o for o in auto}
+    for o in curated:
+        merged[o.key] = o
+    return list(merged.values())
+
+
 # ------------------------------------------------------- longitudinal sweep
 
 

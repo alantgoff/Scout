@@ -185,7 +185,9 @@ reclassify   Re-score without discovery — no X spend, cache-first
 
 refresh      Re-research the tracked companies whose facts are oldest —
              the daily watch on longlisted+ companies for raises,
-             acquisitions and shutdowns. Rotating and budget-gated: a fixed
+             acquisitions and shutdowns. A newly-cited round is captured as
+             a backtest OUTCOME automatically (see hindsight) and alerted
+             in the digest. Rotating and budget-gated: a fixed
              daily allowance (SCAN_REFRESH_PER_DAY) sweeps the whole
              tracked list on a cycle, and the pass stops mid-list when
              today's spend envelope (DAILY_SPEND_CAP_USD) runs out.
@@ -233,7 +235,10 @@ schedule     --list · --add <kind> --at 06:00 --weekdays --tz Europe/London
 digest       Post the Slack digest now (the scheduled one runs via the worker)
 memo <handle>  Write one memo headlessly · --depth quick|standard|deep
 
-hindsight    Backtest the scorer against companies that went on to raise
+hindsight    Backtest the scorer against companies that went on to raise.
+             Auto-captured rounds from `scout refresh` merge in by
+             themselves (curated YAML wins collisions); controls stay
+             hand-curated — automation can't prove a negative.
   --outcomes outcomes.yaml   companies that raised, plus controls that did not
   --cutoff 2025-02-01        score only evidence public on that date
   --sweep 3                  three cutoffs six months apart, for signal decay

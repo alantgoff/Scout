@@ -532,3 +532,49 @@ def test_ordinary_rates_pass_through_unbounded() -> None:
     assert bounded is False
     assert (tpr, fpr) == (metrics.true_positive_rate,
                           metrics.false_positive_rate)
+
+
+# --- auto-captured outcomes -----------------------------------------------------
+
+
+def test_auto_outcome_row_becomes_a_scoreable_outcome() -> None:
+    from scout.hindsight import outcome_from_auto
+
+    outcome = outcome_from_auto({
+        "handle": "raiser", "company": "Raiser Co", "round_stage": "series_a",
+        "amount": "$14M", "evidence": "techcrunch 2026-08-29",
+        "domain": "raiser.example", "github_repo": "https://github.com/raiser/core",
+        "detected_at": "2026-08-30T06:45:00+00:00",
+    })
+    assert outcome.key == "raiser-co"
+    assert outcome.round_stage == "series_a"
+    assert outcome.domain == "raiser.example"
+    assert outcome.github_repos == ["raiser/core"]
+    assert outcome.x_handles == ["raiser"]
+    assert "auto-captured" in outcome.note
+
+    org_only = outcome_from_auto({
+        "handle": "x", "company": "X", "round_stage": "seed",
+        "github_repo": "https://github.com/raiserorg",
+        "detected_at": "2026-08-30T06:45:00+00:00",
+    })
+    assert org_only.github_users == ["raiserorg"] and not org_only.github_repos
+
+
+def test_merge_outcomes_curated_wins_collisions() -> None:
+    from scout.hindsight import Outcome, merge_outcomes
+
+    curated = [Outcome(company="Raiser Co", round_date=datetime(2026, 6, 1),
+                       round_stage="series_a", note="hand-written")]
+    auto = [
+        Outcome(company="Raiser Co!", round_date=datetime(2026, 8, 30),
+                round_stage="series_a", note="auto"),  # same key: raiser-co
+        Outcome(company="Other", round_date=datetime(2026, 8, 1),
+                round_stage="seed", note="auto"),
+    ]
+    merged = {o.key: o for o in merge_outcomes(curated, auto)}
+    assert len(merged) == 2
+    # The human row wins: it usually carries the real announce date.
+    assert merged["raiser-co"].note == "hand-written"
+    assert merged["raiser-co"].round_date.month == 6
+    assert merged["other"].note == "auto"

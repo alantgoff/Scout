@@ -75,6 +75,7 @@ from scout.config import (
 from scout.models import (
     COMPANY_STATUS_LABELS,
     FUNDING_STAGE_LABELS,
+    FUNDING_STAGE_ORDER,
     Lead,
     LLMVerdict,
 )
@@ -935,6 +936,7 @@ def _call_stream(
 def generate_strategy(
     description: str, thesis: Thesis, seeds: Seeds, settings: Settings,
     on_progress: Callable[[str], None] | None = None,
+    performance: str = "",
 ) -> StrategyProposal:
     """Turn a natural-language thesis into a full sourcing configuration.
 
@@ -958,6 +960,13 @@ def generate_strategy(
             "\n\nCurrent watchlist (keep entries that still fit, drop ones that "
             "don't, add better ones): " + ", ".join(seeds.watchers)
         )
+    if performance.strip():
+        # Measured yield from the running system (insights.performance_block):
+        # what actually produced triaged companies, what burned the budget,
+        # and graph-derived watchlist leads. The agent otherwise designs the
+        # bank blind, and a bank that never hears back never improves.
+        context += "\n\nMEASURED PERFORMANCE of the current configuration " \
+                   "(ground your changes in this):\n" + performance.strip()
 
     prompt = context
     last_error: Exception | None = None
@@ -1628,14 +1637,26 @@ def apply_research(verdict: LLMVerdict, profile: CompanyProfile) -> LLMVerdict:
     if not out.tags:
         out.tags = list(profile.tags)
 
-    # Funding: a cited round beats an uncited "unknown", never a cited one.
+    # Funding: a cited round fills an uncited "unknown", and a cited LATER
+    # round replaces a cited earlier one — that is a company raising, the
+    # exact event the refresh exists to catch, not a conflict. A cited round
+    # equal or EARLIER than the current one never lands: two sources
+    # disagreeing about the same round is a conflict, and the verdict's own
+    # evidence stands. (`unknown` ranks last in FUNDING_STAGE_ORDER, so the
+    # rank comparison alone would misread it — hence the explicit branch.)
     if (profile.funding_stage not in ("", "unknown")
-            and (profile.funding_evidence or "").strip()
-            and out.funding_stage in (None, "unknown")):
-        out.funding_stage = profile.funding_stage
-        out.funding_amount = profile.funding_amount
-        out.funding_investors = list(profile.funding_investors)
-        out.funding_evidence = profile.funding_evidence
+            and (profile.funding_evidence or "").strip()):
+        current = out.funding_stage or "unknown"
+        progressed = (
+            current != "unknown"
+            and FUNDING_STAGE_ORDER.get(profile.funding_stage, 6)
+            > FUNDING_STAGE_ORDER.get(current, 6)
+        )
+        if current == "unknown" or progressed:
+            out.funding_stage = profile.funding_stage
+            out.funding_amount = profile.funding_amount
+            out.funding_investors = list(profile.funding_investors)
+            out.funding_evidence = profile.funding_evidence
 
     # Grounding: cited live research IS product evidence — the strongest kind
     # available for a company with no X presence for the classifier to read.
