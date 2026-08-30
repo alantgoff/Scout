@@ -2818,11 +2818,13 @@ def publish(
     ] = False,
     thesis_path: Annotated[Path, typer.Option("--thesis")] = Path("thesis.yaml"),
 ) -> None:
-    """Render the phone digest (docs/index.html) for GitHub Pages.
+    """Render the phone app (docs/) for GitHub Pages.
 
-    A read-only, mobile-first snapshot of the deal flow: launched startups
-    grouped by company, the pre-launch watchlist, briefs. Lead data only —
-    never secrets or config.
+    A read-only, installable snapshot of the deal flow — four views behind
+    a tab bar: Startups (search, sort, filters), Funnel (pipeline by
+    status), Graph (the knowledge-graph canvas), Alerts (acquisitions,
+    arrivals, movers) — plus a manifest and service worker so it opens
+    offline. Lead data only — never notes, votes, spend, secrets or config.
     """
     import subprocess as sp
 

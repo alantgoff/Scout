@@ -198,24 +198,33 @@ const canvas = document.getElementById("net");
 const info = document.getElementById("info");
 const ctx = canvas.getContext("2d");
 let W = 0, H = 0, DPR = window.devicePixelRatio || 1;
-function resize() {{
-  W = canvas.clientWidth; H = canvas.clientHeight;
-  canvas.width = W * DPR; canvas.height = H * DPR;
-  ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
-}}
-resize(); window.addEventListener("resize", () => {{ resize(); draw(); }});
+let alpha = 1.0;
 
 // ---- layout state ----------------------------------------------------------
 const N = NODES.length;
-for (let i = 0; i < N; i++) {{
-  const a = 2 * Math.PI * i / Math.max(N, 1);
-  const rr = Math.min(W, H) * 0.42 * (0.5 + 0.5 * Math.random());
-  NODES[i].x = W / 2 + rr * Math.cos(a);
-  NODES[i].y = H / 2 + rr * Math.sin(a);
-  NODES[i].vx = 0; NODES[i].vy = 0;
-  NODES[i].r = (NODES[i].type === "company" ? 7 : 5)
-             + 2.2 * Math.sqrt(Math.max(NODES[i].degree - 1, 0));
+function seed() {{
+  for (let i = 0; i < N; i++) {{
+    const a = 2 * Math.PI * i / Math.max(N, 1);
+    const rr = Math.min(W, H) * 0.42 * (0.5 + 0.5 * Math.random());
+    NODES[i].x = W / 2 + rr * Math.cos(a);
+    NODES[i].y = H / 2 + rr * Math.sin(a);
+    NODES[i].vx = 0; NODES[i].vy = 0;
+    NODES[i].r = (NODES[i].type === "company" ? 7 : 5)
+               + 2.2 * Math.sqrt(Math.max(NODES[i].degree - 1, 0));
+  }}
 }}
+function resize() {{
+  // A canvas inside a hidden tab measures 0×0; seeding then piles every
+  // node at the origin. Re-seed and re-heat on the FIRST real measure —
+  // the tab switcher dispatches a resize when it reveals us.
+  const hadSize = W > 4 && H > 4;
+  W = canvas.clientWidth; H = canvas.clientHeight;
+  canvas.width = W * DPR; canvas.height = H * DPR;
+  ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
+  if (!hadSize && W > 4 && H > 4) {{ seed(); alpha = 1.0; }}
+}}
+resize(); if (W > 4 && H > 4) seed();
+window.addEventListener("resize", () => {{ resize(); draw(); }});
 const adj = NODES.map(() => []);
 LINKS.forEach((l, i) => {{ adj[l.s].push(i); adj[l.d].push(i); }});
 
@@ -226,7 +235,6 @@ const labelled = new Set(byDegree.slice(0, Math.min(18, N)));
 if (FOCUS) NODES.forEach((n, i) => {{ if (n.key === FOCUS) labelled.add(i); }});
 
 // ---- physics: springs + sampled repulsion + gravity ------------------------
-let alpha = 1.0;
 function tick() {{
   const K = 0.02, REST = 128, GRAV = 0.005;
   for (const l of LINKS) {{

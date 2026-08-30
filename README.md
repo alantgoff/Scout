@@ -211,6 +211,11 @@ graph        The knowledge graph: cross-links derived from evidence the
              portfolio-in-database, labs by founder alumni, acquirers,
              watchers) or `scout graph <name>` for one node's connections
              and the companies it shares a backer with.
+publish      Render docs/ as a read-only phone app for GitHub Pages —
+             Startups (search/sort/filters), Funnel, Graph, Alerts, offline
+             via a service worker. Lead data only; never notes, votes,
+             spend, secrets or config.
+  --push                   commit docs/ and push to DIGEST_REPO
 budget       Today's spend envelope + Claude and X API ledgers
 demo         $0 offline end-to-end test
 ui           Launch the workspace

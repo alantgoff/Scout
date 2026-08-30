@@ -206,6 +206,16 @@ scout/
                     a child, not the scheduler. bootstrap_schedules seeds the
                     daily rhythm: run 06:00 → tracked refresh 06:45 → digest
                     07:30, every day, bounded by DAILY_SPEND_CAP_USD.
+  publish.py        The GitHub Pages app: `scout publish` renders docs/ as
+                    a self-contained read-only PWA — four hash-routed views
+                    (Startups with client-side search/sort/filters off
+                    data-* attributes, Funnel by FUNNEL_STAGES, Graph via
+                    the embedded graph_view canvas, Alerts for
+                    acquisitions/arrivals/movers) plus manifest + service
+                    worker for offline. Privacy contract: leads, verdicts,
+                    statuses and briefs publish; notes, votes, comments,
+                    spend and config never do. digest_context gathers every
+                    store read; render_page is pure given it.
   graph.py          The knowledge graph, pure: typed evidence-carrying
                     edges (investor/person/lab/watcher/company) derived from
                     fields the pipeline already sourced — funding_investors,
