@@ -566,6 +566,37 @@ class Store:
             pk=("run_id", "handle"),
         )
 
+    def ledger_stamp(self) -> tuple:
+        """Content fingerprint of the EXPENSIVE half of a workspace load.
+
+        The UI caches the lead ledger (which parses every stored lead's
+        JSON) and the graph edges. Keying that cache on the database file's
+        mtime meant a single triage click — a one-row pipeline write —
+        invalidated it, so recording "longlisted" re-parsed the whole
+        database. This changes only when leads, runs or edges actually
+        change, so triage stops paying for work it did not cause; a CLI run
+        in another process still invalidates it, because a run writes leads.
+        """
+        # The db path leads: two DIFFERENT databases with identical row
+        # counts (two empty ones, say) must never share a cache entry —
+        # which is exactly what tests running against separate temp files
+        # in one process would otherwise do.
+        parts: list = [str(self.db_path)]
+        for table, column in (("leads", "created_at"), ("runs", "created_at"),
+                              ("edges", None)):
+            if not self.db[table].exists():
+                parts += [0, ""]
+                continue
+            if column:
+                row = self.db.execute(
+                    f"select count(*), coalesce(max({column}), '') from {table}"
+                ).fetchone()
+                parts += [int(row[0]), row[1]]
+            else:
+                row = self.db.execute(f"select count(*) from {table}").fetchone()
+                parts += [int(row[0]), ""]
+        return tuple(parts)
+
     def latest_lead(self, handle: str) -> Lead | None:
         """The most recently saved Lead for one handle, across all runs.
 

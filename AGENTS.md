@@ -213,6 +213,19 @@ scout/
                     companies vs burn the time budget. performance_block(_for)
                     renders it (with graph.watchlist_candidates) into the
                     strategy agent's prompt and the Thesis page.
+  ui.py             The Streamlit workspace. TWO cache tiers, and the split
+                    matters: _load_workspace holds only the EXPENSIVE reads
+                    (ledger window query + re-parsing every stored lead's
+                    JSON + graph edges), keyed on store.ledger_stamp() —
+                    CONTENT, not the DB file mtime. Judgment state
+                    (pipeline/votes/overrides/attrs) is read fresh every
+                    rerun instead. Keying on mtime meant one triage click
+                    re-parsed the whole database to record a status change;
+                    triage is the highest-frequency action in the product.
+                    Quick-find in the masthead routes to the feed via
+                    session_state["feed_q"] + nav_target. _empty_state() is
+                    the one empty-state shape: what is empty AND the next
+                    step.
   publish.py        The GitHub Pages app: `scout publish` renders docs/ as
                     a self-contained read-only PWA — four hash-routed views
                     (Startups with client-side search/sort/filters off

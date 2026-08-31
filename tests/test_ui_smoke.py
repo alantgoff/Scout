@@ -908,4 +908,52 @@ def test_graph_page_empty_state(tmp_path, monkeypatch) -> None:
     at.session_state["nav"] = "Graph"
     at.run()
     assert not at.exception, at.exception[0].message if at.exception else ""
-    assert "No edges yet" in " ".join(getattr(el, "value", "") for el in at.info)
+    # The shared empty-state shape: names what is empty AND the next step.
+    text = _page_text(at)
+    assert "No connections yet" in text
+    assert "scout graph --rebuild" in text
+
+
+def test_quickfind_routes_to_startups_with_the_search_applied(tmp_path, monkeypatch) -> None:
+    """Quick-find is the cross-page affordance: type a name anywhere, land on
+    the feed already filtered to it."""
+    at = _app(tmp_path, monkeypatch)
+    at.session_state["nav"] = "Memos"
+    at.run()
+    assert not at.exception, at.exception[0].message if at.exception else ""
+
+    quickfind = next(i for i in at.text_input if i.key == "quickfind")
+    quickfind.set_value("SmokeCo").run()
+    assert not at.exception, at.exception[0].message if at.exception else ""
+    assert at.session_state["nav"] == "Startups"
+    assert at.session_state["feed_q"] == "SmokeCo"
+
+
+def test_bulk_triage_moves_every_selected_row(tmp_path, monkeypatch) -> None:
+    """Twenty decisions should cost one write pass and one rerun. AppTest
+    can't drive dataframe selection, so this exercises the write path the
+    bulk buttons call — the part that must not regress."""
+    from scout.status import POSITIVE_STATUSES
+
+    db = tmp_path / "smoke.db"
+    store = seed_store(db)
+    handles = ["smoke_founder", "nora_builds"]
+    for handle in handles:
+        store.set_pipeline(handle, status="longlisted")
+    rows = store.all_pipeline()
+    assert all(rows[h]["status"] in POSITIVE_STATUSES for h in handles)
+
+
+def test_triage_writes_do_not_invalidate_the_expensive_cache(tmp_path) -> None:
+    """The point of the cache split: a status change must not force the
+    ledger (every stored lead's JSON) to be re-parsed."""
+    db = tmp_path / "smoke.db"
+    store = seed_store(db)
+    before = store.ledger_stamp()
+    store.set_pipeline("smoke_founder", status="longlisted")
+    store.set_vote("smoke_founder", "yes", "", thesis_id="t",
+                   actor="alan@firm.com")
+    assert store.ledger_stamp() == before
+    # …but real new evidence still does.
+    store.save_leads("run-2", store.load_latest_leads())
+    assert store.ledger_stamp() != before

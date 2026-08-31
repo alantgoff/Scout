@@ -200,6 +200,20 @@ BAND_LABELS = rubric_mod.BAND_LABELS
 GROUNDED_SOURCES = {"website", "pinned_tweet", "tweets", "github", "research"}
 
 
+def _empty_state(title: str, guidance: str) -> None:
+    """The one empty-state shape: what is empty, then what to do about it.
+
+    Longlist/Shortlist/Memos already used this markup inline; Graph used a
+    bare st.info, which read as a different product. An empty state that
+    only states emptiness wastes the moment a new user most needs a next
+    step, so `guidance` is required, not optional."""
+    st.markdown(
+        f'<div class="section-title">{title}</div>'
+        f'<div class="section-sub">{guidance}</div>',
+        unsafe_allow_html=True,
+    )
+
+
 def _connections_html(lead: Lead) -> str:
     """The card's knowledge-graph block: this startup's cross-links to the
     REST of the database. Per-company facts (its own investors, founders)
@@ -413,6 +427,11 @@ def _inject_css() -> None:
            0px; the markdown is the absolute decorative layer. Scoped by the
            st-key-frow_ container class. */
         [class*="st-key-frow_"] { position:relative; margin-bottom:0; }
+        /* Stance buttons: never break a label mid-word. The pane is narrow
+           and "Strong yes" was rendering as "STRO NG YES". */
+        [class*="st-key-voterow_"] [data-testid="stButton"] > button {
+          white-space:nowrap; font-size:0.68rem; padding-left:4px;
+          padding-right:4px; letter-spacing:0.02em; }
         [class*="st-key-frow_"] [data-testid="stButton"] { margin:0; }
         [class*="st-key-frow_"] [data-testid="stButton"] > button { width:100%;
           min-height:70px; padding:0; border:none; border-bottom:1px solid var(--hair);
@@ -1263,29 +1282,19 @@ if st.session_state.get("thesis_synced") != (ACTIVE_THESIS_ID, ACTIVE_VERSION):
 _THESIS_ROWS = store.list_theses()
 
 
-def _db_stamp() -> tuple:
-    """Cache invalidator for the workspace loads: any committed write —
-    from this session's triage clicks or a CLI run in another process —
-    touches the DB file's mtime/size (the -wal too, if journaling ever
-    changes). The db path is included so tests on separate databases can
-    never share a cache entry."""
-    parts: list = [str(store.db_path)]
-    for suffix in ("", "-wal"):
-        try:
-            stat = os.stat(str(store.db_path) + suffix)
-            parts += [stat.st_mtime_ns, stat.st_size]
-        except OSError:
-            parts += [0, 0]
-    return tuple(parts)
-
-
 @st.cache_data(show_spinner=False, max_entries=4)
 def _load_workspace(stamp: tuple, thesis_id: str, version: str):
-    """Every heavy read the page needs, in one cached unit. On cache hits
-    (any interaction that didn't write — nav, filters, selections) this
-    skips the ledger window query and re-parsing ~every stored lead's JSON,
-    which dominated per-click latency. cache_data returns a fresh copy per
-    call, so the in-place override mutations below stay rerun-local."""
+    """The EXPENSIVE reads — the ledger window query, re-parsing ~every
+    stored lead's JSON, and the edge table — as one cached unit.
+
+    Keyed on store.ledger_stamp() (content), NOT the database file's mtime.
+    That distinction is the whole point: triage is the most frequent action
+    in the product, and an mtime key meant every "Longlist" click
+    invalidated this and re-parsed the entire database to record one status
+    change. Judgment state (pipeline, votes, overrides, attrs) is read
+    fresh below instead — it is small, and it is exactly what a click
+    changes. cache_data returns a fresh copy per call, so the in-place
+    override mutations below stay rerun-local."""
     leads = store.load_latest_leads()
     latest_is_demo = bool(leads) and all(x.account.source == "demo" for x in leads)
     return (
@@ -1296,15 +1305,7 @@ def _load_workspace(stamp: tuple, thesis_id: str, version: str):
         # Longlist, Shortlist, and Memos pages, so a triaged lead never
         # degrades just because it missed the latest run.
         store.load_lead_ledger(include_demo=latest_is_demo),
-        store.all_pipeline(),
-        store.all_overrides(),
-        store.all_attrs(),
         store.stale_handles(thesis_id, version),
-        # Collaboration state is firm-global — everyone sees the same votes
-        # and comments — so it belongs in this shared cache unit.
-        store.all_votes(),
-        store.all_comment_counts(),
-        store.list_users(),
         # The knowledge graph, whole: one row per relationship, so the
         # Connections block on each card is pure-python lookups, not a
         # query per render.
@@ -1329,9 +1330,19 @@ def _load_filtered_ledger(
 
 
 (
-    leads, latest_is_demo, ledger, pipeline, overrides, attrs_by_handle, _stale,
-    votes_by_handle, comment_counts, USERS, GRAPH_EDGES,
-) = _load_workspace(_db_stamp(), ACTIVE_THESIS_ID, ACTIVE_VERSION)
+    leads, latest_is_demo, ledger, _stale, GRAPH_EDGES,
+) = _load_workspace(store.ledger_stamp(), ACTIVE_THESIS_ID, ACTIVE_VERSION)
+
+# Judgment state, read fresh every rerun: small dict reads (one row per
+# triaged startup), and the thing a triage click actually changes. Keeping
+# these OUT of the cache above is what lets that click stay cheap while
+# still showing the new status immediately.
+pipeline = store.all_pipeline()
+overrides = store.all_overrides()
+attrs_by_handle = store.all_attrs()
+votes_by_handle = store.all_votes()
+comment_counts = store.all_comment_counts()
+USERS = store.list_users()
 
 # Graph lookups for the Connections block: connector node → the companies it
 # touches, and company → its inbound/outbound edges. Built once per rerun
@@ -1498,7 +1509,8 @@ if (_qp_page := st.query_params.get("p")) or st.query_params.get("s"):
 if (_nav_target := st.session_state.pop("nav_target", None)) in PAGES:
     st.session_state["nav"] = _nav_target
 st.session_state.setdefault("nav", "Thesis")
-_hdr_l, _hdr_r = st.columns([1, 1.35], vertical_alignment="center")
+_hdr_l, _hdr_find, _hdr_r = st.columns([1, 0.42, 1.35],
+                                       vertical_alignment="center")
 with _hdr_l:
     st.markdown(
         f'<div class="masthead"><span class="brand">Scout</span>'
@@ -1506,6 +1518,22 @@ with _hdr_l:
         f'{_e(thesis.thesis) or "No thesis yet — open Thesis and describe one."}</span></div>',
         unsafe_allow_html=True,
     )
+with _hdr_find:
+    # Quick-find: the affordance missing from every page but Startups —
+    # "where is that company again" shouldn't cost a page change and a
+    # re-filter. Routes to the feed with the search applied. It sits in the
+    # masthead ROW (its own column) rather than above the nav, so finding a
+    # company never pushes the wordmark and nav down the page.
+    _jump = st.text_input(
+        "Find a startup", key="quickfind", label_visibility="collapsed",
+        placeholder="⌕ Find…",
+    )
+    if _jump and _jump != st.session_state.get("quickfind_last", ""):
+        st.session_state["quickfind_last"] = _jump
+        st.session_state["feed_q"] = _jump
+        st.session_state["nav_target"] = "Startups"
+        st.rerun()
+
 with _hdr_r:
     with st.container(key="topnav"):
         _unread = store.unread_count(ACTOR)
@@ -2069,7 +2097,10 @@ def _render_vote_row(lead: Lead, key_ns: str) -> None:
     handle = lead.account.handle
     hk = handle.lower()
     mine = _my_stance(hk)
-    cols = st.columns(len(STANCES))
+    # Proportional widths + the nowrap rule below: at equal widths in the
+    # narrow dossier pane "Strong yes" broke mid-word into "STRO NG YES".
+    with st.container(key=f"voterow_{key_ns}_{hk}"):
+        cols = st.columns([1.5, 1, 1.2, 1][: len(STANCES)] or [1] * len(STANCES))
     for col, (stance, _value) in zip(cols, STANCES.items()):
         selected = stance == mine
         if col.button(
@@ -2816,7 +2847,8 @@ def _render_startup_feed() -> None:
             pairs = [(x, entry_by_handle.get(x.account.handle.lower())) for x in leads]
         elif strategy_hash or thesis_filter:
             filtered = _load_filtered_ledger(
-                _db_stamp(), latest_is_demo, strategy_hash, thesis_filter
+                store.ledger_stamp(), latest_is_demo, strategy_hash,
+                thesis_filter,
             )
             pairs = [(e.lead, e) for e in filtered]
         else:
@@ -2865,7 +2897,8 @@ def _render_startup_feed() -> None:
         ])
 
         with rail:
-            query = st.text_input("Search", placeholder="name, bio, sector, tags…")
+            query = st.text_input("Search", key="feed_q",
+                                  placeholder="name, bio, sector, tags…")
             lift_sort = f"{thesis.firm_name or 'Value-add'} lift"
             sort_by = st.selectbox("Sort by", ["Score", "Quality", "Score change", "Thesis fit",
                                                lift_sort, "Followers"])
@@ -4749,7 +4782,7 @@ def _render_database() -> None:
             df = pd.DataFrame(view_rows)
             event = st.dataframe(
                 df, use_container_width=True, hide_index=True, key="sdb_table",
-                on_select="rerun", selection_mode="single-row",
+                on_select="rerun", selection_mode="multi-row",
                 height=min(560, 37 * (len(df) + 1) + 5),
                 column_order=["Startup", "Score", "Q", "F", "S", "Band",
                               "What they do", "Stage", "Sector", "Customers",
@@ -4788,7 +4821,31 @@ def _render_database() -> None:
             picked_rows = (event.selection.rows or []) if event is not None else []
             # Bounds check: a selection made before a filter change can
             # outlive the rows it pointed at.
-            if picked_rows and not df.empty and picked_rows[0] < len(df):
+            picked_rows = [r for r in picked_rows if r < len(df)] if not df.empty else []
+
+            # Bulk triage. Selecting twenty companies and pressing one button
+            # is the difference between triaging a run and abandoning it —
+            # one write pass and one rerun, instead of twenty of each.
+            if len(picked_rows) > 1:
+                picked_handles = [str(df.iloc[r]["handle"]) for r in picked_rows]
+                st.markdown(
+                    f'<div class="subtle">{len(picked_handles)} selected — '
+                    'move them together:</div>', unsafe_allow_html=True)
+                b1, b2, b3, _bsp = st.columns([1, 1, 1, 3])
+                bulk = [(b1, "Longlist", "longlisted", "primary"),
+                        (b2, "Shortlist", "shortlisted", "secondary"),
+                        (b3, "Pass", "passed", "secondary")]
+                for col, label, new_status, kind in bulk:
+                    if col.button(label, key=f"bulk_{new_status}",
+                                  type=kind, use_container_width=True):
+                        for handle in picked_handles:
+                            store.set_pipeline(handle, status=new_status)
+                        st.session_state["toast"] = (
+                            f"{STATUS_LABELS[new_status]} {len(picked_handles)} "
+                            "startups")
+                        st.rerun()
+
+            if picked_rows and not df.empty:
                 sel_handle = str(df.iloc[picked_rows[0]]["handle"])
                 sel_lead = lead_by_handle.get(sel_handle)
                 if sel_lead is not None:
@@ -5549,8 +5606,13 @@ if nav == "Graph":
         unsafe_allow_html=True,
     )
     if not GRAPH_EDGES:
-        st.info("No edges yet — run a sourcing pass, `scout add` a company, or "
-                "`scout graph --rebuild` from the CLI to derive them.")
+        _empty_state(
+            "No connections yet",
+            "The graph is derived from evidence sourcing collects. Run a "
+            "scan, add a company by domain (<code>scout add &lt;domain&gt;</code>), "
+            "or rebuild from what is already stored with "
+            "<code>scout graph --rebuild</code>.",
+        )
     else:
         g1, g2, g3 = st.columns([2.2, 1.8, 1.4])
         # Focus options: every company node in the graph, best-known first.
@@ -5586,8 +5648,11 @@ if nav == "Graph":
             cross_links_only=cross_only, focus_key=focus_key,
         )
         if not nodes:
-            st.info("Nothing matches these filters — try turning "
-                    "“Cross-links only” off or adding relationship types.")
+            _empty_state(
+                "Nothing matches these filters",
+                "Turn <b>Cross-links only</b> off to include connectors that "
+                "touch a single company, or add relationship types above.",
+            )
         else:
             st.components.v1.html(
                 graph_view.graph_page_html(nodes, links, height=620,
