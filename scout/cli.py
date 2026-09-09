@@ -397,6 +397,10 @@ def _discovery_sources(
         from scout.ingest.arxiv_src import ArxivSource
 
         sources.append(ArxivSource(settings, store))
+    if "rss" in names:
+        from scout.ingest.rss_src import RSSSource
+
+        sources.append(RSSSource(settings, store))
     return sources
 
 
@@ -1090,8 +1094,7 @@ def _parse_add_target(target: str) -> tuple[str, str | None, str | None]:
     website = web.normalize_site_url(raw)
     if website is None:
         raise ValueError(f"{target!r} is neither an X handle nor a usable website")
-    domain = (urlparse(website).hostname or "").removeprefix("www.")
-    slug = slugify(domain.rsplit(".", 1)[0])
+    slug = web.domain_slug(website)
     if not slug:
         raise ValueError(f"could not derive a name from {target!r}")
     return slug, website, website

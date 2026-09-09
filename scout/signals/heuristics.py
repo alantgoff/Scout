@@ -67,6 +67,14 @@ def _launch_regex(phrases: tuple[str, ...]) -> re.Pattern[str]:
     )
 
 
+def matches_any(text: str, terms: list[str]) -> bool:
+    """Does `text` contain any of `terms`, on the same word-boundary rules the
+    signals use? Shared so a caller filtering on thesis terms (the RSS
+    source screening feed entries) can never drift from what bio_intent
+    counts as a match."""
+    return any(_keyword_pattern(term).search(text) for term in terms if term)
+
+
 def _bio_intent(account: Account, thesis: Thesis) -> Signal:
     matched = [
         term for term in thesis.keywords if _keyword_pattern(term).search(account.bio)

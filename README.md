@@ -112,6 +112,7 @@ bio search       →  + Claude classification  → Memo
 GitHub topics       + adversarial audit        Outreach
 Hacker News         + thesis fit
 arXiv papers
+RSS / Atom feeds
 investor follows
 ```
 

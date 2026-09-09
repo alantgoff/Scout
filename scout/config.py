@@ -212,8 +212,11 @@ STAGE_DISCOVERY_SOURCES: dict[str, set[str]] = {
     # and useless by the time a company is scaling.
     "idea": {"arxiv"},
     "stealth": {"github", "arxiv"},
-    "launched": {"github", "hn"},
-    "scaling": {"hn"},
+    # RSS is a post-launch instrument: launch feeds and funding coverage
+    # only carry a company once it has something to announce, which is
+    # exactly why it is useless for idea/stealth and valuable after.
+    "launched": {"github", "hn", "rss"},
+    "scaling": {"hn", "rss"},
 }
 
 # Bio search & watchlist graph-hop are early-stage instruments.
@@ -345,6 +348,10 @@ class Seeds(BaseModel):
     watchlist: list[str] = Field(default_factory=list)  # investors/operators to follow-diff
     tastemakers: list[str] = Field(default_factory=list)  # legacy alias for watchlist
     github_topics: list[str] = Field(default_factory=list)  # GitHub repo topics
+    # RSS/Atom feeds read by the rss discovery source: launch feeds (YC,
+    # Product Hunt), funding coverage, portfolio announcements, company
+    # blogs. Free and keyless, so this is the cheapest channel to widen.
+    rss_feeds: list[str] = Field(default_factory=list)
 
     @property
     def all_searches(self) -> list[tuple[str, str]]:

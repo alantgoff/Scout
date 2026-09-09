@@ -10,6 +10,7 @@ timeout, cache-first via the store, negative caching for failures).
 from __future__ import annotations
 
 import asyncio
+import re
 import ipaddress
 from collections.abc import Callable
 from datetime import datetime, timezone
@@ -76,6 +77,28 @@ def normalize_site_url(url: str | None) -> str | None:
     if host.removeprefix("www.") in _SKIP_HOSTS:
         return None
     return f"https://{host}/"
+
+
+def domain_slug(host_or_url: str) -> str:
+    """A company's stable key from its domain: "pollen-robotics.com" and
+    "https://www.pollen-robotics.com/about" both → "pollen-robotics".
+
+    One definition shared by every path that keys a company with no X
+    presence — the manual `scout add <domain>` and the RSS source — so the
+    same company discovered two ways lands on one row instead of two.
+    """
+    text = (host_or_url or "").strip()
+    if not text:
+        return ""
+    if "/" in text or ":" in text:
+        normalized = normalize_site_url(text)
+        if normalized is None:
+            return ""
+        text = urlparse(normalized).hostname or ""
+    host = text.lower().removeprefix("www.").strip(".")
+    if not host:
+        return ""
+    return re.sub(r"[^a-z0-9]+", "-", host.rsplit(".", 1)[0]).strip("-")
 
 
 def extract_site_text(html: str, max_chars: int) -> str:

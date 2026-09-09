@@ -4078,10 +4078,19 @@ if nav == "Thesis":
             with c4:
                 github_topics = st.text_area("GitHub topics", _to_lines(seeds.github_topics), height=70)
                 lists = st.text_area("Public X List IDs", _to_lines(seeds.lists), height=60)
+            rss_feeds = st.text_area(
+                "RSS / Atom feeds", _to_lines(seeds.rss_feeds), height=90,
+                help="Launch feeds (YC, Product Hunt), funding coverage, "
+                     "portfolio announcements, company blogs. Free and "
+                     "keyless. Entries linking to a company become scoreable "
+                     "leads; entries linking to an ARTICLE about one are kept "
+                     "as unlinked leads rather than filed under the publisher.",
+            )
             if st.form_submit_button("Save watchlist", type="primary"):
                 save_seeds(seeds.model_copy(update={
                     "watchlist": _from_lines(watchlist), "tastemakers": [],
                     "github_topics": _from_lines(github_topics),
+                    "rss_feeds": _from_lines(rss_feeds),
                     "lists": _from_lines(lists)}), SEEDS_PATH)
                 st.success("Saved."); st.rerun()
 

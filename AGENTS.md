@@ -236,6 +236,21 @@ scout/
                     statuses and briefs publish; notes, votes, comments,
                     spend and config never do. digest_context gathers every
                     store read; render_page is pure given it.
+  ingest/rss_src.py RSS/Atom discovery — free, keyless, no rate limits; the
+                    channel the X query bank cannot reach (launch feeds,
+                    funding coverage, portfolio notes, company blogs). The
+                    rule that shapes it: an entry may only BRIDGE to an
+                    Account when it yields an X handle or a company domain
+                    that is neither a known publisher (PUBLISHER_HOSTS) nor
+                    the feed's own host — otherwise a TechCrunch article
+                    would file a company under techcrunch.com. Company-
+                    linking entries become domain-keyed Accounts with
+                    profile_url set (same identity as `scout add <domain>`,
+                    via the shared web.domain_slug), so the normal pipeline
+                    classifies them at no extra cost; article entries stay
+                    UnlinkedLeads keyed on the article URL. Off-thesis
+                    entries are dropped in parse_entries (heuristics.
+                    matches_any) before they can spend classification budget.
   graph.py          The knowledge graph, pure: typed evidence-carrying
                     edges (investor/person/lab/watcher/company) derived from
                     fields the pipeline already sourced — funding_investors,

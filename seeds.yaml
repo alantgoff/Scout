@@ -63,6 +63,13 @@ github_topics:
 - domain-specific-llm
 - retrieval-augmented-generation
 - autonomous-agents
+# RSS/Atom feeds for the `rss` discovery source (free, keyless, no rate
+# limits). Feed choice is thesis-specific, so this ships empty with examples:
+# uncomment what fits, or add portfolio/company blogs of your own.
+rss_feeds: []
+#  - https://www.ycombinator.com/launches/rss
+#  - https://techcrunch.com/category/startups/feed/
+#  - https://news.ycombinator.com/rss
 # arXiv categories swept for on-thesis papers. These are the earliest place a
 # technical founder appears — often a year before a repo or a stealth bio.
 # Which affiliations count as a frontier lab is signal mechanics and lives in
