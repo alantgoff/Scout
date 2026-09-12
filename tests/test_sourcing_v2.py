@@ -204,6 +204,10 @@ def test_extract_x_handle_skips_reserved_paths() -> None:
 
 
 def test_parse_hn_hits_bridges_and_unlinks() -> None:
+    """Three shapes: an X link bridges to the handle; a Show HN whose link is
+    the company's own site bridges to a domain-keyed account (the `scout add
+    <domain>` identity, real profile_url); anything else — a launch that
+    links to a demo video, a comment in the hiring thread — stays unlinked."""
     now = datetime.now(timezone.utc)
     hits = [
         {
@@ -220,11 +224,29 @@ def test_parse_hn_hits_bridges_and_unlinks() -> None:
             "url": "https://cache.dev",
             "objectID": "2",
         },
+        {
+            "author": "videodev",
+            "title": "Show HN: Robot arm demo",
+            "story_text": "",
+            "url": "https://www.youtube.com/watch?v=abc",
+            "objectID": "3",
+        },
+        {
+            "author": "jobseeker",
+            "title": "",
+            "comment_text": "Ex-DeepMind, looking for an agentic robotics role",
+            "objectID": "4",
+        },
     ]
     accounts, unlinked = parse_hn_hits(hits, now=now)
-    assert [a.handle for a in accounts] == ["eval_erin"]
-    assert accounts[0].source == "hn"
-    assert [u.ref for u in unlinked] == ["quietdev"]
+    assert [a.handle for a in accounts] == ["eval_erin", "cache"]
+    assert all(a.source == "hn" for a in accounts)
+    site_keyed = accounts[1]
+    assert site_keyed.profile_url == "https://cache.dev/"
+    assert site_keyed.url == "https://cache.dev/"  # never a fabricated x.com link
+    assert site_keyed.name == "LLM inference cache"  # "Show HN:" stripped
+    assert "quietdev" in site_keyed.bio  # the poster travels as provenance
+    assert [u.ref for u in unlinked] == ["videodev", "jobseeker"]
 
 
 # --- deal-flow pipeline ----------------------------------------------------------

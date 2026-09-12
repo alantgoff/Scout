@@ -197,6 +197,21 @@ def handle_refresh(store: Store, settings: Settings, job: dict) -> dict:
     return {"log_path": str(log_path)}
 
 
+def handle_resolve(store: Store, settings: Settings, job: dict) -> dict:
+    """Work through the unlinked leads discovery could not key to a company
+    — funding headlines, launches linking to a video — and turn them into
+    scored leads. Budget-gated inside the CLI against DAILY_SPEND_CAP_USD."""
+    payload = job.get("payload") or {}
+    args = ["resolve"]
+    if payload.get("limit"):
+        args += ["--limit", str(payload["limit"])]
+    code, log_path, tail = _run_cli(args, settings, "resolve",
+                                    job.get("requested_by", "system:scout"))
+    if code != 0:
+        raise RuntimeError(f"unlinked-lead resolve exited {code}\n{tail}")
+    return {"log_path": str(log_path)}
+
+
 def handle_verify(store: Store, settings: Settings, job: dict) -> dict:
     code, log_path, tail = _run_cli(["verify"], settings, "verify",
                                     job.get("requested_by", "system:scout"))
@@ -211,6 +226,7 @@ HANDLERS = {
     jobs_mod.KIND_DIGEST: handle_digest,
     jobs_mod.KIND_VERIFY: handle_verify,
     jobs_mod.KIND_REFRESH: handle_refresh,
+    jobs_mod.KIND_RESOLVE: handle_resolve,
 }
 
 
@@ -313,8 +329,9 @@ def bootstrap_schedules(store: Store, actor: str = "system:scout") -> list[int]:
     """Create the default schedules on a fresh install.
 
     Chosen for a firm that wants Scout to be a standing process rather than
-    a tool someone remembers to open: source every weekday morning, and
-    digest just after so the summary describes a run that has finished.
+    a tool someone remembers to open: source every morning, resolve what the
+    run could not key, refresh the tracked list, then digest — so the
+    summary describes work that has finished.
     Idempotent — existing schedules of the same kind are left alone.
     """
     existing = {s["kind"] for s in store.schedules()}
@@ -327,6 +344,15 @@ def bootstrap_schedules(store: Store, actor: str = "system:scout") -> list[int]:
             "Daily sourcing run", jobs_mod.KIND_RUN,
             jobs_mod.ScheduleSpec(daily_at="06:00", tz="UTC"),
             {"source": "twscrape"}, actor=actor,
+        ))
+    if jobs_mod.KIND_RESOLVE not in existing:
+        # Right after the run: the headlines it just read with no company
+        # behind them become scored leads before the refresh and the digest,
+        # so "Acme raised" is a row in this morning's summary.
+        created.append(store.upsert_schedule(
+            "Unlinked-lead resolve", jobs_mod.KIND_RESOLVE,
+            jobs_mod.ScheduleSpec(daily_at="06:30", tz="UTC"),
+            {}, actor=actor,
         ))
     if jobs_mod.KIND_REFRESH not in existing:
         # After the run (cheap, cache-warm), before the digest (so a found

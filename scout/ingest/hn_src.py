@@ -6,8 +6,11 @@ Two plays:
 2. The monthly "Who wants to be hired?" thread — individuals announcing
    availability, including just-left-a-lab engineers.
 
-X/GitHub links found in posts bridge to Accounts; everything else becomes an
-UnlinkedLead (HN username + story URL) for manual lookup.
+X links found in posts bridge to handle-keyed Accounts; a Show HN whose
+story URL is the company's own site bridges to a domain-keyed Account (the
+`scout add <domain>` identity, via web.company_domain); everything else —
+people in the hiring thread, launches linking to a repo or a video — becomes
+an UnlinkedLead (HN username + story URL) for `scout resolve`.
 """
 
 from __future__ import annotations
@@ -28,6 +31,7 @@ from tenacity import (
 from scout.config import Seeds, Settings, Thesis
 from scout.ingest.base import DiscoverySource
 from scout.models import Account, UnlinkedLead
+from scout.web import company_domain, domain_slug, normalize_site_url
 from scout.store import Store
 
 _console = Console()
@@ -89,6 +93,29 @@ def parse_hn_hits(
                 )
             )
         elif author:
+            # A Show HN whose link IS the company's site bridges to a
+            # domain-keyed Account — the same identity `scout add <domain>`
+            # produces, profile_url pointing at the real site. Links to the
+            # thread itself, a repo, or a demo video are not a company key
+            # and stay unlinked for the resolver.
+            domain = company_domain(story_url, "news.ycombinator.com")
+            slug = domain_slug(domain) if domain else ""
+            if slug:
+                site = normalize_site_url(story_url)
+                shown = re.sub(r"^show hn:\s*", "", title, flags=re.I).strip() or title
+                accounts.append(
+                    Account(
+                        id=f"hn:{slug}",
+                        handle=slug,
+                        name=shown[:120] or author,
+                        bio=f"{title} — Show HN by {author}"[:280],
+                        website=site,
+                        profile_url=site,
+                        source="hn",
+                        fetched_at=now,
+                    )
+                )
+                continue
             unlinked.append(
                 UnlinkedLead(
                     source="hn",

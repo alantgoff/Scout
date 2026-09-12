@@ -101,6 +101,125 @@ def domain_slug(host_or_url: str) -> str:
     return re.sub(r"[^a-z0-9]+", "-", host.rsplit(".", 1)[0]).strip("-")
 
 
+def registrable_domain(url: str | None) -> str | None:
+    """The bare host a company is identified by: "https://www.acme.io/x" →
+    "acme.io". None for anything normalize_site_url rejects (socials, code
+    hosts, raw IPs) — those never identify a company."""
+    normalized = normalize_site_url(url)
+    if normalized is None:
+        return None
+    host = (urlparse(normalized).hostname or "").lower().removeprefix("www.")
+    return host or None
+
+
+# Hosts whose links are articles ABOUT companies, never the company itself —
+# a link here can never be keyed by its domain. Shared by every source that
+# bridges an outbound link to a company (RSS entries, Show HN story URLs,
+# GitHub owners' sites) so "is this link a company" has exactly one answer.
+PUBLISHER_HOSTS = {
+    "techcrunch.com", "venturebeat.com", "theinformation.com", "axios.com",
+    "bloomberg.com", "reuters.com", "forbes.com", "businessinsider.com",
+    "wsj.com", "ft.com", "cnbc.com", "theverge.com", "wired.com",
+    "sifted.eu", "tech.eu", "eu-startups.com", "medium.com", "substack.com",
+    "news.ycombinator.com", "reddit.com", "youtube.com", "twitter.com",
+    "x.com", "linkedin.com", "prnewswire.com", "businesswire.com",
+    "globenewswire.com", "producthunt.com", "crunchbase.com",
+}
+
+
+def company_domain(link: str, own_host: str) -> str | None:
+    """The company's own site behind a link, or None.
+
+    None means "this link is an article, not a company": a known publisher,
+    the linking site's own host (a feed or forum writing about itself is not
+    a new company), or anything without a usable hostname. Returning None is
+    the safe answer — a wrong company domain becomes a wrong database entry.
+    """
+    host = registrable_domain(link)
+    if not host or host in PUBLISHER_HOSTS or host == own_host:
+        return None
+    # A bare registrable domain only — a link deep into a publisher's
+    # subdomain is still that publisher.
+    if any(host.endswith("." + publisher) for publisher in PUBLISHER_HOSTS):
+        return None
+    return host
+
+
+def fetch_page_html(url: str, timeout_s: float = 10.0) -> str | None:
+    """One page's raw HTML, or None. For the resolver's cheap first move —
+    reading the ARTICLE about a company for the company's own link — where
+    the site cache (keyed by normalized root) is the wrong tool: the page
+    that matters is the article, not the publisher's homepage. Never raises."""
+    if not url or not url.startswith(("http://", "https://")):
+        return None
+    try:
+        resp = httpx.get(url, follow_redirects=True, timeout=timeout_s,
+                         headers={"User-Agent": _UA})
+        if resp.status_code >= 400:
+            return None
+        ctype = (resp.headers.get("content-type") or "").lower()
+        if ctype and "html" not in ctype and "text" not in ctype:
+            return None
+        if len(resp.content) > _MAX_CONTENT_BYTES:
+            return None
+        return resp.text[:_MAX_HTML_BYTES]
+    except Exception:  # a dead article must never sink the resolve pass
+        return None
+
+
+def candidate_company_links(html: str, page_url: str) -> list[str]:
+    """(pure, tested) Registrable domains of outbound links on an article
+    page that could be the company it is about, most-linked first.
+
+    Drops the page's own host, publishers, socials and code hosts (the same
+    gate every source uses: company_domain). What remains is a shortlist,
+    not an answer — pick_company_domain still has to match one against the
+    company's name, because an ad network linked three times is not the
+    startup in the headline."""
+    own = registrable_domain(page_url) or ""
+    soup = BeautifulSoup(html[:_MAX_HTML_BYTES], "html.parser")
+    counts: dict[str, int] = {}
+    for tag in soup.find_all("a", href=True):
+        href = str(tag["href"]).strip()
+        if not href.startswith(("http://", "https://")):
+            continue
+        domain = company_domain(href, own)
+        if domain:
+            counts[domain] = counts.get(domain, 0) + 1
+    return [d for d, _ in sorted(counts.items(), key=lambda kv: (-kv[1], kv[0]))]
+
+
+# Headline words that never name a company. The brand is almost always the
+# first word left after these go — "Acme Robotics raises $2M" → "acme".
+_HEADLINE_STOPWORDS = {
+    "the", "and", "for", "with", "from", "how", "why", "what", "new", "this",
+    "raises", "raised", "raise", "raising", "launches", "launch", "launched",
+    "announces", "announced", "introduces", "unveils", "secures", "closes",
+    "lands", "gets", "bags", "nabs", "series", "seed", "pre", "round",
+    "funding", "million", "billion", "startup", "startups", "company",
+    "inc", "labs", "lab", "tech", "data", "cloud", "app", "apps", "platform",
+    "software", "systems", "show", "hn", "exclusive", "meet", "inside",
+}
+
+
+def pick_company_domain(candidates: list[str], headline: str) -> str | None:
+    """(pure, tested) The candidate domain that carries the company's name,
+    or None. Matches the first distinctive word of the headline against the
+    domain label with hyphens removed ("acme" in "acmerobotics"), because
+    the brand leads a headline and a wrong domain becomes a wrong row —
+    None hands the question to the resolver's paid step instead."""
+    words = [w for w in re.findall(r"[a-z0-9]+", headline.lower())
+             if len(w) >= 3 and w not in _HEADLINE_STOPWORDS]
+    if not words:
+        return None
+    brand = words[0]
+    for domain in candidates:
+        label = domain.rsplit(".", 1)[0].replace("-", "").replace(".", "")
+        if brand in label:
+            return domain
+    return None
+
+
 def extract_site_text(html: str, max_chars: int) -> str:
     """Visible page text, product-copy first: <title> and meta/og
     descriptions lead (JS-only SPAs almost always still have those), then

@@ -27,8 +27,9 @@ KIND_MEMO = "generate_memo"
 KIND_DIGEST = "digest"
 KIND_VERIFY = "verify"
 KIND_REFRESH = "refresh_tracked"
+KIND_RESOLVE = "resolve_unlinked"
 
-JOB_KINDS = {KIND_RUN, KIND_MEMO, KIND_DIGEST, KIND_VERIFY, KIND_REFRESH}
+JOB_KINDS = {KIND_RUN, KIND_MEMO, KIND_DIGEST, KIND_VERIFY, KIND_REFRESH, KIND_RESOLVE}
 
 JOB_LABELS = {
     KIND_RUN: "Sourcing run",
@@ -36,6 +37,7 @@ JOB_LABELS = {
     KIND_DIGEST: "Digest",
     KIND_VERIFY: "Verification",
     KIND_REFRESH: "Tracked refresh",
+    KIND_RESOLVE: "Unlinked-lead resolve",
 }
 
 # Terminal states never re-enter the queue.

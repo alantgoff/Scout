@@ -4391,7 +4391,9 @@ DB_TABLE_HELP = {
     "score_overrides": "Your manual scoring adjustments (dims, fit, pinned score).",
     "websites": "Company-site text cache (memo + classifier evidence).",
     "runs": "Run provenance — source, strategy hash, config snapshot.",
-    "unlinked_leads": "GitHub/HN founders with no X handle (manual lookup).",
+    "unlinked_leads": "GitHub/HN/RSS signals with no company key yet; "
+                      "`scout resolve` works through them and stamps each "
+                      "with what it became.",
     "follow_edges": "Investor follow-graph snapshots (the smart-money signals).",
     "follow_meta": "Per-watcher snapshot baselines.",
     "bio_snapshots": "Bio history behind the bio_change signal.",
@@ -5091,6 +5093,15 @@ _VERB_TEXT = {
     "attrs_changed": lambda p: f"updated {', '.join(p.get('keys', [])) or 'fields'}",
     "notes_edited": lambda p: "edited the notes",
     "thesis_switched": lambda p: f"switched the workspace thesis to {p.get('name', '')}",
+    "handle_merged": lambda p: (
+        f"merged @{p.get('from', '')} into this company"
+        + (f" ({p['rows']} rows)" if p.get("rows") else "")
+    ),
+    "lead_resolved": lambda p: (
+        f"resolved from {p.get('source', 'a signal')}"
+        + (f": “{p['headline']}”" if p.get("headline") else "")
+        + (f" → scored {p['score']:.0f}" if isinstance(p.get("score"), (int, float)) else "")
+    ),
 }
 
 

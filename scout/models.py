@@ -92,17 +92,26 @@ class SitePage(BaseModel):
 
 
 class UnlinkedLead(BaseModel):
-    """A founder signal from a non-X source with no X handle to bridge to.
+    """A company signal from a non-X source with no company key yet — no X
+    handle and no company domain to bridge to (a funding headline on a
+    publisher's site, a Show HN whose link is a demo video).
 
-    Surfaced in `scout source` output and report appendices for manual lookup.
+    Surfaced in `scout source` output; `scout resolve` works through them,
+    budget-gated, and stamps each with what it became so the same headline
+    is never paid for twice.
     """
 
-    source: str  # "github" | "hn"
-    ref: str  # github login / hn username
+    source: str  # "github" | "hn" | "rss"
+    ref: str  # github login / hn username / article URL — (source, ref) is the pk
     name: str = ""
     bio: str = ""
-    url: str = ""  # repo / story URL
+    url: str = ""  # repo / story / article URL
     found_at: datetime | None = None
+    # Set by the resolver, never by a source: "bridged:@handle" |
+    # "no_company" | "failed". Excluded from source upserts so a re-sighting
+    # of the same headline cannot reopen a lead already worked.
+    resolved_at: datetime | None = None
+    resolution: str = ""
 
 
 class Tweet(BaseModel):

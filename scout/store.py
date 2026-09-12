@@ -597,6 +597,238 @@ class Store:
                 parts += [int(row[0]), ""]
         return tuple(parts)
 
+    # ------------------------------------------------------------ identity
+
+    def handle_for_domain(self, domain: str | None) -> str | None:
+        """The tracked handle that already owns this company domain, or None.
+
+        `handle` is the key everywhere, but a company reaches the database
+        under different keys from different sources: its X handle from
+        search, a slug invented from its domain by RSS/HN/`scout add`, a
+        GitHub org. This is the lookup that lets a domain FIND its handle,
+        so a second sighting merges onto the first row instead of opening a
+        second one. Both claims count: the website an adapter saw on the
+        account, and the company_url the classifier established in the
+        latest stored lead. When several handles claim one domain (a
+        database that predates this rule), a real handle beats a slug we
+        invented, and newer beats older.
+        """
+        from scout.web import domain_slug, registrable_domain
+
+        want = registrable_domain(domain)
+        if want is None:
+            return None
+        slug = domain_slug(want)
+        claims: list[tuple[int, str, str]] = []  # (is_real_handle, seen_at, handle)
+        if self.db["accounts"].exists():
+            for row in self.db["accounts"].rows_where(
+                "website like ?", [f"%{want}%"],
+                select="handle, website, fetched_at",
+            ):
+                if registrable_domain(row["website"]) == want:
+                    claims.append((int(row["handle"].lower() != slug),
+                                   row["fetched_at"] or "", row["handle"]))
+        if self.db["leads"].exists():
+            # Newest rows first, bounded: the LIKE prefilter keeps this to the
+            # handful of leads that mention the domain at all.
+            for row in self.db["leads"].rows_where(
+                "lead_json like ?", [f"%{want}%"],
+                select="handle, lead_json, created_at",
+                order_by="created_at desc", limit=50,
+            ):
+                try:
+                    lead = Lead.model_validate_json(row["lead_json"])
+                except ValueError:
+                    continue
+                urls = [lead.account.website,
+                        lead.llm.company_url if lead.llm else None]
+                if any(registrable_domain(u) == want for u in urls if u):
+                    claims.append((int(row["handle"].lower() != slug),
+                                   row["created_at"] or "", row["handle"]))
+        if not claims:
+            return None
+        claims.sort(reverse=True)
+        return claims[0][2]
+
+    def domain_owners(self) -> dict[str, tuple[str, bool]]:
+        """Every claimed company domain → (owning handle, domain_keyed), in
+        ONE pass over accounts and the lead ledger.
+
+        The pipeline reconciles hundreds of accounts per run; asking
+        handle_for_domain for each would scan the leads table hundreds of
+        times. Same precedence as handle_for_domain: a real handle beats a
+        slug we invented, newer beats older. `domain_keyed` is True when the
+        owner is such a slug (profile_url points at the site), which is what
+        decides whether a real handle arriving later may rename it.
+        """
+        from scout.web import domain_slug, registrable_domain
+
+        claims: dict[str, list[tuple[int, str, str, bool]]] = {}
+
+        def claim(url: str | None, seen_at: str, handle: str, domain_keyed: bool) -> None:
+            want = registrable_domain(url)
+            if want and handle:
+                real = int(not domain_keyed and handle.lower() != domain_slug(want))
+                claims.setdefault(want, []).append((real, seen_at or "", handle, domain_keyed))
+
+        if self.db["accounts"].exists():
+            for row in self.db["accounts"].rows_where(
+                "website is not null and website != ''",
+                select="handle, website, profile_url, fetched_at",
+            ):
+                claim(row["website"], row["fetched_at"], row["handle"],
+                      bool(row.get("profile_url")))
+        for entry in self.load_lead_ledger(include_demo=False):
+            lead = entry.lead
+            seen = str(getattr(entry, "last_seen_at", "") or "")
+            keyed = bool(lead.account.profile_url)
+            claim(lead.account.website, seen, lead.account.handle, keyed)
+            if lead.llm is not None:
+                claim(lead.llm.company_url, seen, lead.account.handle, keyed)
+        owners: dict[str, tuple[str, bool]] = {}
+        for domain, entries in claims.items():
+            best = max(entries)
+            owners[domain] = (best[2], best[3])
+        return owners
+
+    def rename_handle(self, old: str, new: str) -> dict[str, int]:
+        """Re-key every row filed under `old` to `new`; rows moved per table.
+
+        The identity fix: the real X handle turns up for a company keyed by
+        a slug invented from its domain (RSS, HN, `scout add <domain>`), or
+        a person merges two rows that were always one company. The slug row
+        was provisional and the handle carries tweets and followers, so the
+        handle wins. Every table with a `handle` column is covered by
+        introspection — a table added later is renamed too instead of
+        silently keeping a handle that no longer exists. Where the target
+        already holds a row under a unique key (pipeline, a vote by the same
+        person, the verdict cache) the target's row stands and the old one
+        is dropped: same company, seen later, with more evidence. Leads
+        rewrite the embedded JSON as well so `account.handle` inside the
+        stored Lead agrees with its row key. The graph is DERIVED — callers
+        rebuild it after (cli._rebuild_graph).
+        """
+        old_key = old.lstrip("@").lower()
+        new_handle = new.lstrip("@")
+        new_key = new_handle.lower()
+        if not old_key or not new_key or old_key == new_key:
+            return {}
+        moved: dict[str, int] = {}
+        with self.write_tx():
+            target_account = self.get_account(new_handle)
+            for name in self.db.table_names():
+                if name.startswith("sqlite_"):
+                    continue
+                table = self.db[name]
+                columns = table.columns_dict
+                if name == "leads":
+                    moved[name] = self._rename_leads(old_key, new_handle, target_account)
+                    continue
+                if name == "accounts":
+                    moved[name] = self._rename_account(old_key, new_handle, target_account)
+                    continue
+                if name == "follow_edges" and "followee" in columns:
+                    self.db.execute(
+                        "delete from follow_edges where followee = ? and exists "
+                        "(select 1 from follow_edges x where x.followee = ? "
+                        "and x.watcher = follow_edges.watcher)", [old_key, new_key])
+                    n = self.db.execute(
+                        "update follow_edges set followee = ? where followee = ?",
+                        [new_key, old_key]).rowcount
+                    if n:
+                        moved[name] = n
+                    continue
+                if "handle" not in columns:
+                    continue
+                pks = [c for c in table.pks if c != "rowid"]
+                if "handle" in pks:
+                    others = [c for c in pks if c != "handle"]
+                    same = " and ".join(f"x.[{c}] = [{name}].[{c}]" for c in others) or "1=1"
+                    self.db.execute(
+                        f"delete from [{name}] where lower(handle) = ? and exists "
+                        f"(select 1 from [{name}] x where lower(x.handle) = ? and {same})",
+                        [old_key, new_key])
+                n = self.db.execute(
+                    f"update [{name}] set handle = ? where lower(handle) = ?",
+                    [new_key, old_key]).rowcount
+                if n:
+                    moved[name] = n
+            total = sum(moved.values())
+            if total and self.actor:
+                self._append_event(
+                    "handle_merged", handle=new_key,
+                    payload={"from": old_key, "rows": total, "tables": sorted(moved)},
+                )
+        return moved
+
+    def _rename_leads(self, old_key: str, new_handle: str,
+                      target_account: Account | None) -> int:
+        """(inside rename_handle's transaction) Re-key lead rows and the Lead
+        JSON they carry. A run that already holds the target keeps its row."""
+        if not self.db["leads"].exists():
+            return 0
+        rows = list(self.db["leads"].rows_where("lower(handle) = ?", [old_key]))
+        n = 0
+        for row in rows:
+            clash = list(self.db["leads"].rows_where(
+                "run_id = ? and lower(handle) = ?",
+                [row["run_id"], new_handle.lower()], limit=1))
+            if clash:
+                self.db.execute("delete from leads where run_id = ? and handle = ?",
+                                [row["run_id"], row["handle"]])
+                continue
+            try:
+                lead = Lead.model_validate_json(row["lead_json"])
+            except ValueError:
+                lead = None
+            payload = row["lead_json"]
+            if lead is not None:
+                lead.account.handle = new_handle
+                if target_account is not None:
+                    # The target is the real account: its id and its (usually
+                    # absent) profile_url are the truth about where this
+                    # company lives online.
+                    lead.account.id = target_account.id
+                    lead.account.profile_url = target_account.profile_url
+                if lead.llm is not None:
+                    lead.llm.handle = new_handle
+                payload = lead.model_dump_json()
+            self.db.execute(
+                "update leads set handle = ?, lead_json = ? where run_id = ? and handle = ?",
+                [new_handle, payload, row["run_id"], row["handle"]])
+            n += 1
+        return n
+
+    def _rename_account(self, old_key: str, new_handle: str,
+                        target_account: Account | None) -> int:
+        """(inside rename_handle's transaction) Fold the old account row into
+        the target's when one exists (facts fill gaps, sources merge), else
+        re-key it."""
+        if not self.db["accounts"].exists():
+            return 0
+        rows = list(self.db["accounts"].rows_where("lower(handle) = ?", [old_key]))
+        if not rows:
+            return 0
+        if target_account is None:
+            self.db.execute("update accounts set handle = ? where lower(handle) = ?",
+                            [new_handle, old_key])
+            return len(rows)
+        merged = target_account.model_copy()
+        for r in rows:
+            old_row = dict(r)
+            merged.website = merged.website or old_row.get("website")
+            merged.github_repo = merged.github_repo or old_row.get("github_repo")
+            merged.bio = merged.bio or (old_row.get("bio") or "")
+            for src in json.loads(old_row.get("sources") or "[]"):
+                if src and src not in merged.sources:
+                    merged.sources.append(src)
+            for watcher in json.loads(old_row.get("followed_by") or "[]"):
+                if watcher not in merged.followed_by:
+                    merged.followed_by.append(watcher)
+        self.db.execute("delete from accounts where lower(handle) = ?", [old_key])
+        self.upsert_accounts([merged])
+        return len(rows)
+
     def latest_lead(self, handle: str) -> Lead | None:
         """The most recently saved Lead for one handle, across all runs.
 
@@ -1540,9 +1772,13 @@ class Store:
     # --------------------------------------------------------- unlinked leads
 
     def upsert_unlinked_leads(self, leads: list[UnlinkedLead]) -> None:
+        # Sources re-sight the same headline every day; the resolver's stamp
+        # on it must survive that, so a source upsert never carries the
+        # resolution columns.
         if leads:
             self.db["unlinked_leads"].upsert_all(
-                [lead.model_dump(mode="json") for lead in leads],
+                [lead.model_dump(mode="json", exclude={"resolved_at", "resolution"})
+                 for lead in leads],
                 pk=("source", "ref"),
             )
 
@@ -1553,7 +1789,54 @@ class Store:
         rows = self.db["unlinked_leads"].rows_where(
             "found_at >= ?", [cutoff], order_by="found_at desc"
         )
-        return [UnlinkedLead.model_validate(dict(r)) for r in rows]
+        return [self._unlinked_from_row(r) for r in rows]
+
+    @staticmethod
+    def _unlinked_from_row(row) -> UnlinkedLead:
+        # Rows written before the resolver existed read the alter-added
+        # columns back as NULL; the model wants "" for "not resolved".
+        data = dict(row)
+        data["resolution"] = data.get("resolution") or ""
+        return UnlinkedLead.model_validate(data)
+
+    def unresolved_leads(self, *, days: int = 30, limit: int = 50,
+                         sources: tuple[str, ...] = ("rss", "hn")) -> list[UnlinkedLead]:
+        """Unlinked leads the resolver has not yet worked, newest first.
+
+        Only sources whose entries describe a COMPANY: RSS headlines and HN
+        posts. GitHub owners with no site are people, and paying to research
+        a person by their login is the wrong spend.
+        """
+        if not self.db["unlinked_leads"].exists() or not sources:
+            return []
+        cutoff = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat()
+        where = "found_at >= ? and source in (%s)" % ",".join("?" * len(sources))
+        if "resolved_at" in self.db["unlinked_leads"].columns_dict:
+            where += " and (resolved_at is null or resolved_at = '')"
+        rows = self.db["unlinked_leads"].rows_where(
+            where, [cutoff, *sources], order_by="found_at desc", limit=limit
+        )
+        return [self._unlinked_from_row(r) for r in rows]
+
+    def note_lead_resolved(self, handle: str, *, source: str, headline: str,
+                           url: str, score: float | None) -> None:
+        """Activity-spine entry for a headline that became a lead — the
+        provenance a partner sees on the company's page and in the digest."""
+        self._append_event(
+            "lead_resolved", handle=handle.lstrip("@").lower(),
+            actor=self.actor or "agent:resolve",
+            payload={"source": source, "headline": headline[:160], "url": url,
+                     "score": round(score, 1) if score is not None else None},
+        )
+
+    def mark_resolved(self, source: str, ref: str, resolution: str) -> None:
+        """Stamp one unlinked lead with what it became — once per headline,
+        whatever the outcome, so tomorrow's budget goes to new signals."""
+        self.db["unlinked_leads"].upsert(
+            {"source": source, "ref": ref, "resolution": resolution,
+             "resolved_at": datetime.now(timezone.utc).isoformat()},
+            pk=("source", "ref"), alter=True,
+        )
 
     # ------------------------------------------------------- deal-flow pipeline
 

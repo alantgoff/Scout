@@ -93,9 +93,10 @@ carries its own limitations — including the ones that undercut it.
 Momentum signals decay in days, so the run that matters is the one nobody had
 to remember. Sourcing runs, digests and memos can all be scheduled or queued.
 `scout worker --bootstrap` sets up the daily rhythm: a sourcing run at 06:00,
-a tracked-company refresh at 06:45 (re-researches the longlisted+ companies
-whose facts are oldest — raises, acquisitions, shutdowns land in the feed),
-and the digest at 07:30. The whole day is bounded by one spend envelope
+an unlinked-lead resolve at 06:30 (turns the headlines and launches the run
+could not key to a company into scored leads), a tracked-company refresh at
+06:45 (re-researches the longlisted+ companies whose facts are oldest —
+raises, acquisitions, shutdowns land in the feed), and the digest at 07:30. The whole day is bounded by one spend envelope
 (`DAILY_SPEND_CAP_USD`, default $1): heuristics, caches and free scraping
 always run; paid Claude/X calls stop when the envelope is spent and resume
 tomorrow.
@@ -117,7 +118,12 @@ investor follows
 ```
 
 A run sources candidate accounts, folds a founder and their company account
-into one entry, and scores each on three components:
+into one entry — and lands every source's sighting of one company on one row,
+whatever key it arrived under (an X handle from search, a domain from a feed
+or a Show HN, a GitHub org), so a company seen three ways is one lead with
+three corroborating sources, not three leads. Signals with no company key at
+all — a funding headline on a publisher's site — are resolved into leads the
+same morning (`scout resolve`). Each lead is then scored on three components:
 
 - **Quality** — a readiness scorecard (B2B or B2C rubric), criteria scored 1–3
   from cited evidence only, rolled up 0–100
@@ -205,6 +211,22 @@ add <domain>   Add ONE company by domain; the system fills in the rest.
   --no-classify            record only what you typed, grounded "manual"
   --force                  add it even if no company is found at the domain
 
+resolve      Turn the signals discovery could not key to a company — a
+             funding headline on a publisher's site, a Show HN linking to a
+             demo video — into scored leads. Free move first (the article's
+             own outbound links, matched against the name), then one small
+             web-search call; then the SAME path `add <domain>` takes. A
+             headline about a company already tracked lands on that row and
+             its cited round is captured as an outcome. Each unlinked lead
+             is attempted once and stamped with what it became. Budget-gated
+             (SCAN_RESOLVE_PER_DAY, DAILY_SPEND_CAP_USD); runs daily at 06:30.
+  --limit N
+
+merge <dup> <keep>   Fold one company's records into another's — the manual
+             fix for a duplicate (the same company keyed by its X handle and
+             by a slug from its domain). Every table follows; where both hold
+             one unique thing (a status, a person's vote) the kept row wins.
+
 thesis       list · show <id> · new <name> · use <id> · clone <id> <name> · archive <id>
 source       Discovery preview — raw accounts per strategy, no scoring or cost
 inspect <handle>   Score one account, print the per-signal breakdown
@@ -229,7 +251,8 @@ migrate      Adopt a single-user database into the multi-member schema
 
 worker       Run the background worker: schedules fire, queued jobs execute
   --bootstrap              create the default daily schedules: sourcing run
-                           (06:00), tracked refresh (06:45), digest (07:30)
+                           (06:00), unlinked-lead resolve (06:30), tracked
+                           refresh (06:45), digest (07:30)
   --once                   drain the queue and exit (for cron)
 jobs         Queue state · --enqueue <kind> · --cancel <id>
 schedule     --list · --add <kind> --at 06:00 --weekdays --tz Europe/London

@@ -119,25 +119,51 @@ about the hidden-`.pth` issue).
 ```
 scout/
   cli.py            Typer app — ALL orchestration. Commands: run, source,
-                    add, inspect, verify, reclassify, probe, demo, export,
-                    budget, strategy, thesis, publish, ui + the v9 additions:
-                    migrate, worker, jobs, schedule, digest, memo, hindsight.
+                    add, refresh, resolve, merge, inspect, verify,
+                    reclassify, probe, demo, export, budget, strategy, thesis,
+                    graph, publish, ui + the v9 additions: migrate, worker,
+                    jobs, schedule, digest, memo, hindsight.
                     Pipeline helpers: _run_pipeline, _enrich_accounts,
                     _run_discovery, _merge_accounts (fills Account.sources),
+                    _reconcile_identities (THE identity rule, see below),
                     _fetch_tweets (parallel for free adapters),
                     _resolve_thesis_or_exit (explicit --thesis-id → workspace
                     default → file), _parse_add_target (handle / x.com URL /
                     company website → the key a manual add is stored under).
                     `add` is the by-domain path: crawl → agents.research_company
                     → the normal classify/score pipeline → agents.apply_research
-                    overlays the researched facts onto the verdict.
+                    overlays the researched facts onto the verdict. That body
+                    is _company_lead, shared with `resolve`, which works the
+                    unlinked leads (free move first: the article's own
+                    outbound links via web.candidate_company_links /
+                    pick_company_domain; then the small agents.locate_company
+                    call), lands each on the row that already owns its domain
+                    (store.handle_for_domain), and captures a newly cited
+                    round via _capture_changes (shared with `refresh`).
+                    IDENTITY RULE: `handle` is the key everywhere, and one
+                    company arrives under several — X handle from search, a
+                    slug invented from its domain by RSS/HN/`add`, a GitHub
+                    org. _reconcile_identities runs right after
+                    _merge_accounts: a domain-keyed newcomer whose domain a
+                    real handle owns adopts that handle; a real-handle
+                    newcomer whose site a slug-keyed row owns renames that
+                    row (store.rename_handle — every handle-keyed table by
+                    introspection, Lead JSON rewritten, target's row wins
+                    unique-key collisions). Two REAL handles sharing a site
+                    (founder + company account) are left alone. `merge` is
+                    the manual form.
   config.py         Pydantic Settings (.env) + Thesis/Seeds/SignalParams (yaml)
                     + save_thesis/save_seeds (shared by CLI + UI).
                     STAGE_* maps: stage → search categories / discovery sources.
   models.py         The ONLY data structures crossing module boundaries:
-                    Account, Tweet, Signal, LLMVerdict, Lead, UnlinkedLead.
+                    Account, Tweet, Signal, LLMVerdict, Lead, UnlinkedLead
+                    (resolved_at/resolution are written ONLY by the resolver
+                    and excluded from source upserts, so a re-sighted
+                    headline cannot reopen a lead already worked).
   store.py          SQLite (sqlite-utils) — cache, dedupe, TTL, budget ledger,
-                    follow-edge/bio snapshots, unlinked leads, deal-flow pipeline,
+                    follow-edge/bio snapshots, unlinked leads (+ unresolved_leads
+                    / mark_resolved), identity (handle_for_domain,
+                    rename_handle), deal-flow pipeline,
                     llm_verdicts cache, score_overrides, and the user-owned
                     startup data layer: startup_columns (schema: select/
                     multiselect/text/number/checkbox, options, ai_fill flag,
@@ -204,8 +230,9 @@ scout/
                     scraper rate limits each get exactly one contender).
                     Long jobs run as SUBPROCESSES so a scraper segfault kills
                     a child, not the scheduler. bootstrap_schedules seeds the
-                    daily rhythm: run 06:00 → tracked refresh 06:45 → digest
-                    07:30, every day, bounded by DAILY_SPEND_CAP_USD.
+                    daily rhythm: run 06:00 → unlinked-lead resolve 06:30 →
+                    tracked refresh 06:45 → digest 07:30, every day, bounded
+                    by DAILY_SPEND_CAP_USD.
   insights.py       Triage insights (shortlist-vs-pass contrast for the
                     weight agent) + the QUERY-YIELD scoreboard: query_hits
                     attribution (recorded by both adapters) joined to the
@@ -241,9 +268,11 @@ scout/
                     funding coverage, portfolio notes, company blogs). The
                     rule that shapes it: an entry may only BRIDGE to an
                     Account when it yields an X handle or a company domain
-                    that is neither a known publisher (PUBLISHER_HOSTS) nor
-                    the feed's own host — otherwise a TechCrunch article
-                    would file a company under techcrunch.com. Company-
+                    that is neither a known publisher (web.PUBLISHER_HOSTS)
+                    nor the feed's own host (web.company_domain — the one
+                    gate shared with HN, GitHub and the resolver) —
+                    otherwise a TechCrunch article would file a company
+                    under techcrunch.com. Company-
                     linking entries become domain-keyed Accounts with
                     profile_url set (same identity as `scout add <domain>`,
                     via the shared web.domain_slug), so the normal pipeline
@@ -325,8 +354,13 @@ scout/
     twscrape_src.py Primary free X adapter: query bank, bio search, list members,
                     follow-graph snapshotting.
     xapi_src.py     Paid X API v2 adapter — BUDGET-GUARDED. BudgetExceededError.
-    github_src.py   GitHub discovery (repo search → owner → X-handle bridge).
-    hn_src.py       Hacker News (Algolia) discovery.
+    github_src.py   GitHub discovery (repo search → owner → X-handle bridge;
+                    an owner with no handle but a real site (profile `blog`,
+                    via web.company_domain) becomes a domain-keyed Account).
+    hn_src.py       Hacker News (Algolia) discovery. A Show HN whose story
+                    URL is the company's own site becomes a domain-keyed
+                    Account; hiring-thread people and launches linking to a
+                    repo or video stay UnlinkedLeads for `scout resolve`.
     arxiv_src.py    arXiv discovery — the EARLIEST founder signal available.
                     A researcher publishes, keeps publishing, then the
                     affiliation changes and a company follows months later.
@@ -352,7 +386,19 @@ scout/
                     fan-out, cache-first, negative caching), and the memo
                     crawl — bundle_urls/bundle_text (pure) + fetch_site_bundle
                     (root + about/product/pricing/… + extra candidate roots).
-tests/              pytest, no network — test_agents (incl. mocked memo
+                    Also the identity helpers every source shares:
+                    domain_slug (the key for a company with no X presence),
+                    registrable_domain, PUBLISHER_HOSTS + company_domain (the
+                    ONE gate deciding whether a link may key a company), and
+                    the resolver's free move — fetch_page_html (the article,
+                    not the publisher root) + candidate_company_links /
+                    pick_company_domain (outbound domains, matched on the
+                    headline's first distinctive word; None over a guess).
+tests/              pytest, no network — test_identity (domain→handle,
+                    rename_handle across every table, reconcile, merge),
+                    test_resolve (free-before-paid, once-only stamps,
+                    check-before-call budget, tracked-company overlay),
+                    test_agents (incl. mocked memo
                     stream/pause_turn/retry loop + categorization), test_score
                     (incl. apply_override), test_store (incl. columns/attrs/
                     overrides), test_dbfields, test_memo_export (PDF bytes +
@@ -478,7 +524,10 @@ math can never drift.
 The 9 signals (heuristics.py). Three read enrichment fields set by the pipeline
 from store history, not by adapters — `recent_followed_by`, `bio_changed`,
 `github_repo`; `source_corroboration` reads `Account.sources`, filled by
-`cli._merge_accounts` and the twscrape adapter's internal dedupe:
+`cli._merge_accounts`, the twscrape adapter's internal dedupe, and
+`cli._reconcile_identities` (which unions the stored row's sources onto a
+sighting that lands on an already-tracked handle — the first time a company
+found on X AND in a feed corroborates itself):
 
 | signal | fires on |
 |---|---|

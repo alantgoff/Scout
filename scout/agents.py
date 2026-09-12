@@ -1674,6 +1674,86 @@ def apply_research(verdict: LLMVerdict, profile: CompanyProfile) -> LLMVerdict:
     return LLMVerdict.model_validate(out.model_dump())
 
 
+LOCATE_MAX_SEARCHES = 2
+LOCATE_MAX_FETCHES = 1
+
+_LOCATE_SYSTEM = """You identify the ONE startup a news headline or launch post is about, and find \
+its official website. Use web_search (at most {max_searches} searches) to check. You are locating, \
+not judging: no prose, no assessment.
+
+Return ONLY a JSON object:
+{{"company_name": str|null, "website": str|null, "x_handle": str|null, "note": str}}
+
+Rules:
+- website must be the company's OWN domain. Never the publisher, never github.com, linkedin.com, \
+crunchbase.com, producthunt.com or x.com.
+- x_handle only if you saw it on the company's own site or its own X profile. Never guess one — \
+a wrong handle merges two companies' records. null is the right answer when unsure.
+- If the text is about a person, a fund, a public company, several companies, or you cannot \
+identify a single company, return website null and say why in note."""
+
+
+def parse_location(text: str) -> tuple[str | None, str | None, str]:
+    """(pure, tested) The locate agent's JSON → (company domain | None,
+    x handle | None, note). Every field runs through the same gates the
+    sources use — company_domain refuses publishers and code hosts,
+    _clean_handle refuses anything that is not a plausible handle — so a
+    model that ignores the rules still cannot write a wrong key."""
+    from scout.web import company_domain
+
+    try:
+        data = json.loads(_strip_code_fences(text))
+    except json.JSONDecodeError:
+        return None, None, "unparseable answer"
+    if not isinstance(data, dict):
+        return None, None, "unparseable answer"
+    website = data.get("website")
+    domain = company_domain(str(website), "") if isinstance(website, str) and website else None
+    note = data.get("note")
+    return domain, _clean_handle(data.get("x_handle")), (note if isinstance(note, str) else "")
+
+
+def locate_company(
+    headline: str,
+    context: str,
+    settings: Settings,
+    *,
+    on_event=None,
+    store=None,
+) -> tuple[str | None, str | None, dict]:
+    """Which company is this headline about, and where does it live online?
+
+    The resolver's paid step, taken only after the free one (the article's
+    own outbound links) found nothing. Deliberately small — two searches, a
+    few hundred output tokens — because it answers one question; the full
+    research that follows (research_company) is what establishes facts.
+    Returns (domain, x_handle, meta); domain None means "no single company
+    here", and meta["note"] says why. Spend is ledgered under "resolve".
+    """
+    meta: dict = {"searches": 0, "fetches": 0, "sources": [], "researched": False}
+    if not settings.anthropic_api_key:
+        return None, None, meta
+    system = _LOCATE_SYSTEM.format(max_searches=LOCATE_MAX_SEARCHES)
+    prompt = f"Headline / post: {headline}\n\nContext:\n{context[:1500]}\n"
+    client = _client(settings, RESEARCH_TIMEOUT_S)
+    response = _run_research_stream(
+        client, settings, system, prompt, True, on_event, meta,
+        max_tokens=600,
+        max_searches=LOCATE_MAX_SEARCHES,
+        max_fetches=LOCATE_MAX_FETCHES,
+        max_continuations=2,
+    )
+    _record_agent_spend(store, settings, "resolve", meta)
+    meta["researched"] = True
+    text = "".join(
+        block.text for block in response.content
+        if getattr(block, "type", None) == "text"
+    )
+    domain, handle, note = parse_location(text)
+    meta["note"] = note
+    return domain, handle, meta
+
+
 def research_company(
     domain: str,
     settings: Settings,

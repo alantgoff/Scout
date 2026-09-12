@@ -22,9 +22,10 @@ honestly become:
 Bridging is therefore never guessed: an Account appears only when the entry
 yields an X handle or a company domain that isn't the feed's own publisher.
 
-Pure parsing (`parse_entries`, `company_domain`) is separated from I/O and
-unit-tested against recorded feeds, the same split as the HN and arXiv
-sources.
+Pure parsing (`parse_entries`) is separated from I/O and unit-tested
+against recorded feeds, the same split as the HN and arXiv sources. The
+bridging gate itself (`web.company_domain`, `web.PUBLISHER_HOSTS`) lives in
+scout.web because the HN and GitHub sources apply the identical rule.
 """
 
 from __future__ import annotations
@@ -44,7 +45,7 @@ from scout.ingest.base import DiscoverySource
 from scout.models import Account, UnlinkedLead
 from scout.signals.heuristics import matches_any
 from scout.store import Store
-from scout.web import domain_slug, normalize_site_url
+from scout.web import company_domain, domain_slug, normalize_site_url
 
 _console = Console()
 
@@ -55,20 +56,6 @@ _MAX_CONCURRENCY = 6
 # A polite, honest UA: feed publishers block unidentified bulk readers, and
 # an unattended daily reader should say what it is.
 _UA = "Mozilla/5.0 (compatible; scout/0.1; +startup research; feed reader)"
-
-# Hosts whose links are articles ABOUT companies, never the company itself —
-# so an entry linking here can never be keyed by its domain. Anything not on
-# this list is still checked against the feed's own host before bridging.
-PUBLISHER_HOSTS = {
-    "techcrunch.com", "venturebeat.com", "theinformation.com", "axios.com",
-    "bloomberg.com", "reuters.com", "forbes.com", "businessinsider.com",
-    "wsj.com", "ft.com", "cnbc.com", "theverge.com", "wired.com",
-    "sifted.eu", "tech.eu", "eu-startups.com", "medium.com", "substack.com",
-    "news.ycombinator.com", "reddit.com", "youtube.com", "twitter.com",
-    "x.com", "linkedin.com", "prnewswire.com", "businesswire.com",
-    "globenewswire.com",
-}
-
 
 def _entry_text(entry: Any) -> str:
     """Everything readable in one entry, for keyword matching and handles."""
@@ -97,27 +84,6 @@ def _entry_time(entry: Any, now: datetime) -> datetime:
             except (TypeError, ValueError):
                 continue
     return now
-
-
-def company_domain(link: str, feed_host: str) -> str | None:
-    """The company's own site behind an entry link, or None.
-
-    None means "this link is an article, not a company": a known publisher,
-    the feed's own host (a blog writing about itself is not a new company),
-    or anything without a usable hostname. Returning None is the safe answer
-    — a wrong company domain becomes a wrong database entry.
-    """
-    normalized = normalize_site_url(link)
-    if normalized is None:
-        return None
-    host = (urlparse(normalized).hostname or "").lower().removeprefix("www.")
-    if not host or host in PUBLISHER_HOSTS or host == feed_host:
-        return None
-    # A bare registrable domain only — a link deep into a publisher's
-    # subdomain is still that publisher.
-    if any(host.endswith("." + publisher) for publisher in PUBLISHER_HOSTS):
-        return None
-    return host
 
 
 def parse_entries(

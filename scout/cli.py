@@ -593,6 +593,105 @@ def _merge_accounts(*groups: list[Account]) -> list[Account]:
     return list(merged.values())
 
 
+def _absorb(into: Account, other: Account) -> None:
+    """Fold one sighting of a company into another's Account: provenance
+    and watchers union, facts fill gaps. `into` keeps its own identity."""
+    for src in [other.source, *other.sources]:
+        if src and src not in into.sources:
+            into.sources.append(src)
+    for watcher in other.followed_by:
+        if watcher not in into.followed_by:
+            into.followed_by.append(watcher)
+    into.website = into.website or other.website
+    into.github_repo = into.github_repo or other.github_repo
+    into.bio = into.bio or other.bio
+
+
+def _reconcile_identities(accounts: list[Account], store: Store) -> list[Account]:
+    """Land every account on the handle that already owns its company.
+
+    `_merge_accounts` dedupes by handle — the key everywhere — but one
+    company reaches this list under different keys from different sources:
+    its X handle from search, a slug invented from its domain by RSS, HN or
+    `scout add`, a GitHub org. Two keys is two leads: split evidence, split
+    votes, and a source_corroboration signal that never fires for exactly
+    the multi-source hits it exists to reward. Two moves, both by domain:
+
+    - a domain-keyed newcomer (a slug carrying profile_url) whose domain a
+      real handle owns → folded onto that handle, before scoring, so its
+      sighting counts as corroboration of the existing row;
+    - a real-handle newcomer whose site a SLUG-keyed row owns → that row is
+      renamed to the handle (it was provisional; the handle carries tweets
+      and followers).
+
+    Ownership comes from ONE store pass (store.domain_owners) and is
+    updated as the run proceeds, so two sightings of a brand-new company in
+    the same run merge too. Either way the loser's stored rows follow
+    (store.rename_handle). Two REAL handles sharing a site are left alone:
+    a founder's personal account and the company account both list the
+    company's domain, and they are not the same row.
+    """
+    owners = store.domain_owners()
+    in_run: dict[str, Account] = {}  # handle.lower() → this run's object
+    out: list[Account] = []
+
+    def keep(account: Account) -> None:
+        out.append(account)
+        in_run[account.handle.lower()] = account
+
+    for account in accounts:
+        domain = web.registrable_domain(account.website)
+        claim = owners.get(domain) if domain else None
+        if claim is None or claim[0].lower() == account.handle.lower():
+            if domain and claim is None:
+                owners[domain] = (account.handle, bool(account.profile_url))
+            keep(account)
+            continue
+        owner, owner_is_slug = claim
+        if account.profile_url:
+            loser, winner = account.handle, owner
+        elif owner_is_slug:
+            loser, winner = owner, account.handle
+        else:
+            keep(account)  # two real accounts, one site: not the same row
+            continue
+        moved = store.rename_handle(loser, winner)
+        console.print(
+            f"[dim]identity: @{loser} is @{winner} "
+            f"({sum(moved.values())} stored rows re-keyed).[/dim]"
+        )
+        if winner == owner:
+            # Newcomer adopts the owner — into this run's copy when the owner
+            # is here too, else re-keyed onto the stored row.
+            target = in_run.get(owner.lower())
+            if target is not None:
+                _absorb(target, account)
+            else:
+                account.handle = owner
+                keep(account)
+        else:
+            prior = in_run.pop(loser.lower(), None)
+            if prior is not None:
+                out.remove(prior)
+                _absorb(account, prior)
+            keep(account)
+        owners[domain] = (winner, owner_is_slug if winner == owner else False)
+        merged = store.get_account(winner)
+        landed = in_run.get(winner.lower())
+        if merged is not None and landed is not None:
+            # The stored row carries every earlier sighting; this run's copy
+            # must too, or source_corroboration scores today's alone.
+            landed.id = merged.id
+            landed.profile_url = merged.profile_url
+            for src in merged.sources:
+                if src and src not in landed.sources:
+                    landed.sources.append(src)
+            for watcher in merged.followed_by:
+                if watcher not in landed.followed_by:
+                    landed.followed_by.append(watcher)
+    return _merge_accounts(out)
+
+
 # ------------------------------------------------------------------------- run
 
 
@@ -652,6 +751,7 @@ def _run_pipeline(
         thesis.active_discovery_sources, seeds, thesis, settings, store
     )
     accounts = _merge_accounts(accounts, discovered)
+    accounts = _reconcile_identities(accounts, store)
     console.print(f"Fetched [bold]{len(accounts)}[/bold] candidate accounts.")
     if unlinked:
         console.print(
@@ -1100,6 +1200,211 @@ def _parse_add_target(target: str) -> tuple[str, str | None, str | None]:
     return slug, website, website
 
 
+class _NoCompany(Exception):
+    """Research established there is no company behind the domain."""
+
+
+def _company_lead(
+    handle: str,
+    website: str | None,
+    profile_url: str | None,
+    *,
+    store: Store,
+    settings: Settings,
+    thesis: Thesis,
+    name: str | None = None,
+    bio: str = "",
+    note: str = "",
+    source: str = "manual",
+    do_research: bool = True,
+    do_classify: bool = True,
+    force: bool = False,
+    rekey_to_found_handle: bool = True,
+) -> tuple[Lead, Account, agents.CompanyProfile, dict]:
+    """A domain (or handle) → a Lead judged by the same code as a discovered one.
+
+    The shared body of `scout add` and `scout resolve`: crawl the site,
+    research the company live (budget-gated against DAILY_SPEND_CAP_USD),
+    key the entry to the X handle research found (moving any rows filed
+    under the invented slug), merge onto an existing account row rather than
+    replacing it, run the heuristics and the classifier, and layer the
+    research facts on LAST — facts fill gaps, judgments stay the
+    classifier's. `source` is the discovery strategy that surfaced the
+    company ("manual" for a person, "rss"/"hn" for the resolver) and names
+    the account id and its first sources entry.
+
+    Raises _NoCompany when the research says nothing is there and `force`
+    is off. Saving, pipeline status and reporting stay with the caller.
+    """
+    pages: list[SitePage] = []
+    if website and (do_research or do_classify):
+        console.print(f"Crawling [bold]{website}[/bold]...")
+        pages = asyncio.run(web.fetch_site_bundle(website, settings, store=store))
+        usable = [x for x in pages if x.usable]
+        console.print(
+            f"Read [bold]{len(usable)}[/bold] of {len(pages)} pages."
+            if usable else
+            f"[yellow]Nothing readable at {website} "
+            f"({pages[0].status if pages else 'unreachable'}).[/yellow]"
+        )
+
+    profile = agents.CompanyProfile()
+    research_meta: dict = {"researched": False, "searches": 0, "fetches": 0}
+    if (do_research and website
+            and store.daily_budget_left_usd(settings.daily_spend_cap_usd) <= 0):
+        console.print(
+            f"[yellow]Daily spend cap reached (${settings.daily_spend_cap_usd:.2f}"
+            "/day, DAILY_SPEND_CAP_USD) — skipping the live research. "
+            "Classification still runs on the crawled site.[/yellow]"
+        )
+        do_research = False
+    if do_research and website:
+        console.print("Researching the company...")
+        try:
+            profile, research_meta = agents.research_company(
+                website, settings, store=store,
+                site_text=web.bundle_text(pages, settings.web_text_max_chars),
+                on_event=lambda kind, detail: console.print(
+                    f"  [dim]{kind}: {detail[:90]}[/dim]"),
+            )
+        except (RuntimeError, anthropic.APIError) as exc:
+            console.print(f"[yellow]Research failed ({exc}) — continuing without it.[/yellow]")
+    elif do_research and not website:
+        console.print(
+            "[dim]No website to research — pass --url to enable it. Add by "
+            "domain (`scout add pollen-robotics.com`) to skip the handle.[/dim]"
+        )
+
+    if research_meta.get("researched") and not profile.is_company and not force:
+        raise _NoCompany(profile.not_company_reason or "The research established nothing.")
+
+    # A researched X handle re-keys the entry, so a later sourcing run merges
+    # onto this row instead of creating a second one for the same company.
+    # Only when the handle we have is a slug WE invented from the domain — an
+    # explicitly typed handle is the person's answer and stands.
+    if rekey_to_found_handle and profile.x_handle:
+        console.print(f"[dim]Found @{profile.x_handle} — keying the entry to it.[/dim]")
+        if store.get_account(handle) is not None or store.latest_lead(handle) is not None:
+            # Rows a source already filed under the slug (RSS, HN, an earlier
+            # add) follow the company to its real handle.
+            moved = store.rename_handle(handle, profile.x_handle)
+            if moved:
+                console.print(f"[dim]@{handle} → @{profile.x_handle}: "
+                              f"{sum(moved.values())} stored rows re-keyed.[/dim]")
+        handle, profile_url = profile.x_handle, None
+
+    # Merge onto the existing row rather than replacing it: a company sourcing
+    # already found keeps its followers, watchers and discovery provenance.
+    # `source`/`sources` are NOT touched for a known account — a person typing
+    # a name is not an independent discovery strategy, and letting it count as
+    # one would hand the account free source_corroboration credit.
+    existing = store.get_account(handle)
+    if existing is not None:
+        console.print(f"[dim]@{existing.handle} is already in the database — updating it.[/dim]")
+    researched_site = web.normalize_site_url(profile.website)
+    github_repo = (
+        f"https://github.com/{profile.github_org.strip('/').rsplit('/', 1)[-1]}"
+        if profile.github_org else None
+    )
+    account = Account(
+        id=existing.id if existing else f"{source}:{handle.lower()}",
+        handle=existing.handle if existing else handle,
+        name=name or profile.company_name or (existing.name if existing else "") or handle,
+        # The bio drives the heuristics. Prefer a real X bio; fall back to the
+        # researched one-liner, which is at least a sourced description of the
+        # company rather than nothing.
+        bio=bio or (existing.bio if existing else "") or profile.one_line_summary,
+        website=website or researched_site or (existing.website if existing else None),
+        profile_url=profile_url or (existing.profile_url if existing else None),
+        followers=existing.followers if existing else 0,
+        following=existing.following if existing else 0,
+        pinned_tweet_id=existing.pinned_tweet_id if existing else None,
+        followed_by=list(existing.followed_by) if existing else [],
+        github_repo=(existing.github_repo if existing else None) or github_repo,
+        source=existing.source if existing else source,
+        sources=list(existing.sources) if existing else [source],
+        fetched_at=datetime.now(timezone.utc),
+    )
+    store.upsert_account(account)
+
+    accounts = [account]
+    _enrich_accounts(accounts, store, thesis, settings)
+    account = accounts[0]
+    tweets = store.get_tweets(account.id, settings.tweets_per_account)
+    signals, disqualified = run_heuristics(account, tweets, thesis)
+    if disqualified:
+        console.print(
+            "[yellow]The bio matches a thesis disqualifier — a sourcing run "
+            "would have dropped this. Keeping it: you named it.[/yellow]"
+        )
+    lead = Lead(account=account, signals=signals, disqualified=disqualified)
+
+    sites: dict[str, SitePage] = {}
+    if do_classify:
+        # Reuse the crawl above when it happened; fall back to the root fetch
+        # so --no-research still grounds the classifier in the site.
+        root = next((x for x in pages if x.usable), None)
+        if root is not None:
+            sites = {account.handle.lower(): root}
+        elif not pages:  # no crawl happened — don't re-fetch a site we just failed on
+            sites = _fetch_candidate_sites([(account, tweets)], settings, store)
+        page = sites.get(account.handle.lower())
+        if page is not None and not page.usable:
+            console.print(
+                f"[yellow]Could not read {account.website} ({page.status}) — "
+                "classifying on the bio alone.[/yellow]"
+            )
+        console.print("Classifying with Claude...")
+        verdicts = classify([(account, tweets)], thesis, settings, store=store, sites=sites)
+        lead.llm = verdicts.get(account.handle.lower())
+        if lead.llm is not None:
+            term = verdict_disqualified(lead.llm, thesis)
+            if term:
+                console.print(
+                    f"[yellow]The classified product hits a product "
+                    f"disqualifier ({term}) — a run would have dropped this. "
+                    "Keeping it: you named it.[/yellow]"
+                )
+    if lead.llm is None:
+        # No classifier ran (--no-classify, or no API key). An earlier verdict
+        # for this handle is real evidence and outranks anything typed here —
+        # re-adding a company must never downgrade a classified one to a stub.
+        prior = store.latest_lead(account.handle)
+        if prior is not None and prior.llm is not None:
+            lead.llm = prior.llm
+            console.print(
+                "[dim]Kept the existing classification (nothing re-read).[/dim]"
+            )
+    if lead.llm is None:
+        # Nothing has ever been read about this company. Record what the
+        # person asserted, marked as such: account_type makes it a STARTUP so
+        # it groups and shows like one, grounding "manual" keeps it outside
+        # GROUNDED_SOURCES so scoring applies the unverified multiplier, and
+        # confidence stays 0 because nothing here was read.
+        lead.llm = LLMVerdict(
+            handle=account.handle,
+            account_type="startup",
+            company_name=name or account.name or account.handle,
+            company_url=account.website,
+            one_line_summary=note,
+            grounding="manual",
+            confidence=0.0,
+        )
+        console.print(
+            "[dim]Recorded unclassified — grounding \"manual\", confidence 0. "
+            "Run `scout reclassify` once a key is set to score it on evidence.[/dim]"
+        )
+
+    # The research layers onto the verdict LAST: it owns the facts the
+    # classifier cannot reach (founders, HQ, whether the company still exists)
+    # and fills gaps, but never overwrites a judgment. See agents.apply_research.
+    if research_meta.get("researched"):
+        lead.llm = agents.apply_research(lead.llm, profile)
+
+    lead = score_leads([lead], thesis)[0]
+    return lead, account, profile, research_meta
+
+
 @app.command("add")
 def add(
     target: Annotated[
@@ -1198,6 +1503,19 @@ def add(
     seeds = _load_seeds_or_default()
     console.print(f"Thesis: [bold]{_thesis_banner(thesis, seeds, store)}[/bold]")
 
+    # Identity before anything is spent: a domain the database already
+    # tracks under its X handle IS that row, not a second one keyed by slug.
+    adopted = False
+    if derived_site:
+        owner = store.handle_for_domain(website)
+        if owner and owner.lower() != handle.lower():
+            owner_account = store.get_account(owner)
+            console.print(f"[dim]{website} is already tracked as @{owner} — "
+                          "updating that entry.[/dim]")
+            handle = owner
+            profile_url = owner_account.profile_url if owner_account else None
+            adopted = True
+
     # --- crawl + research: everything the person did not have to type --------
     # One warning, not three: without a key nothing here can read anything, so
     # skip the crawl too rather than spending fetches on text no one will see.
@@ -1208,171 +1526,19 @@ def add(
         )
         do_research = do_classify = False
 
-    pages: list[SitePage] = []
-    if website and (do_research or do_classify):
-        console.print(f"Crawling [bold]{website}[/bold]...")
-        pages = asyncio.run(web.fetch_site_bundle(website, settings, store=store))
-        usable = [x for x in pages if x.usable]
-        console.print(
-            f"Read [bold]{len(usable)}[/bold] of {len(pages)} pages."
-            if usable else
-            f"[yellow]Nothing readable at {website} "
-            f"({pages[0].status if pages else 'unreachable'}).[/yellow]"
+    try:
+        lead, account, profile, research_meta = _company_lead(
+            handle, website, profile_url, store=store, settings=settings,
+            thesis=thesis, name=name, bio=bio, note=note,
+            do_research=do_research, do_classify=do_classify, force=force,
+            rekey_to_found_handle=bool(derived_site) and not adopted,
         )
-
-    profile = agents.CompanyProfile()
-    research_meta: dict = {"researched": False, "searches": 0, "fetches": 0}
-    if (do_research and website
-            and store.daily_budget_left_usd(settings.daily_spend_cap_usd) <= 0):
+    except _NoCompany as exc:
         console.print(
-            f"[yellow]Daily spend cap reached (${settings.daily_spend_cap_usd:.2f}"
-            "/day, DAILY_SPEND_CAP_USD) — skipping the live research. "
-            "Classification still runs on the crawled site.[/yellow]"
-        )
-        do_research = False
-    if do_research and website:
-        console.print("Researching the company...")
-        try:
-            profile, research_meta = agents.research_company(
-                website, settings, store=store,
-                site_text=web.bundle_text(pages, settings.web_text_max_chars),
-                on_event=lambda kind, detail: console.print(
-                    f"  [dim]{kind}: {detail[:90]}[/dim]"),
-            )
-        except (RuntimeError, anthropic.APIError) as exc:
-            console.print(f"[yellow]Research failed ({exc}) — continuing without it.[/yellow]")
-    elif do_research and not website:
-        console.print(
-            "[dim]No website to research — pass --url to enable it. Add by "
-            "domain (`scout add pollen-robotics.com`) to skip the handle.[/dim]"
-        )
-
-    if research_meta.get("researched") and not profile.is_company and not force:
-        console.print(
-            f"[red]No company found at {website}.[/red] "
-            f"{profile.not_company_reason or 'The research established nothing.'}\n"
+            f"[red]No company found at {website}.[/red] {exc}\n"
             "[dim]Add it anyway with --force, or --no-research to skip the check.[/dim]"
         )
-        raise typer.Exit(1)
-
-    # A researched X handle re-keys the entry, so a later sourcing run merges
-    # onto this row instead of creating a second one for the same company.
-    # Only when the handle we have is a slug WE invented from the domain — an
-    # explicitly typed handle is the person's answer and stands.
-    if derived_site and profile.x_handle:
-        console.print(f"[dim]Found @{profile.x_handle} — keying the entry to it.[/dim]")
-        handle, profile_url = profile.x_handle, None
-
-    # Merge onto the existing row rather than replacing it: a company sourcing
-    # already found keeps its followers, watchers and discovery provenance.
-    # `source`/`sources` are NOT touched for a known account — a person typing
-    # a name is not an independent discovery strategy, and letting it count as
-    # one would hand the account free source_corroboration credit.
-    existing = store.get_account(handle)
-    if existing is not None:
-        console.print(f"[dim]@{existing.handle} is already in the database — updating it.[/dim]")
-    researched_site = web.normalize_site_url(profile.website)
-    github_repo = (
-        f"https://github.com/{profile.github_org.strip('/').rsplit('/', 1)[-1]}"
-        if profile.github_org else None
-    )
-    account = Account(
-        id=existing.id if existing else f"manual:{handle.lower()}",
-        handle=existing.handle if existing else handle,
-        name=name or profile.company_name or (existing.name if existing else "") or handle,
-        # The bio drives the heuristics. Prefer a real X bio; fall back to the
-        # researched one-liner, which is at least a sourced description of the
-        # company rather than nothing.
-        bio=bio or (existing.bio if existing else "") or profile.one_line_summary,
-        website=website or researched_site or (existing.website if existing else None),
-        profile_url=profile_url or (existing.profile_url if existing else None),
-        followers=existing.followers if existing else 0,
-        following=existing.following if existing else 0,
-        pinned_tweet_id=existing.pinned_tweet_id if existing else None,
-        followed_by=list(existing.followed_by) if existing else [],
-        github_repo=(existing.github_repo if existing else None) or github_repo,
-        source=existing.source if existing else "manual",
-        sources=list(existing.sources) if existing else ["manual"],
-        fetched_at=datetime.now(timezone.utc),
-    )
-    store.upsert_account(account)
-
-    accounts = [account]
-    _enrich_accounts(accounts, store, thesis, settings)
-    account = accounts[0]
-    tweets = store.get_tweets(account.id, settings.tweets_per_account)
-    signals, disqualified = run_heuristics(account, tweets, thesis)
-    if disqualified:
-        console.print(
-            "[yellow]The bio matches a thesis disqualifier — a sourcing run "
-            "would have dropped this. Keeping it: you named it.[/yellow]"
-        )
-    lead = Lead(account=account, signals=signals, disqualified=disqualified)
-
-    sites: dict[str, SitePage] = {}
-    if do_classify:
-        # Reuse the crawl above when it happened; fall back to the root fetch
-        # so --no-research still grounds the classifier in the site.
-        root = next((x for x in pages if x.usable), None)
-        if root is not None:
-            sites = {account.handle.lower(): root}
-        elif not pages:  # no crawl happened — don't re-fetch a site we just failed on
-            sites = _fetch_candidate_sites([(account, tweets)], settings, store)
-        page = sites.get(account.handle.lower())
-        if page is not None and not page.usable:
-            console.print(
-                f"[yellow]Could not read {account.website} ({page.status}) — "
-                "classifying on the bio alone.[/yellow]"
-            )
-        console.print("Classifying with Claude...")
-        verdicts = classify([(account, tweets)], thesis, settings, store=store, sites=sites)
-        lead.llm = verdicts.get(account.handle.lower())
-        if lead.llm is not None:
-            term = verdict_disqualified(lead.llm, thesis)
-            if term:
-                console.print(
-                    f"[yellow]The classified product hits a product "
-                    f"disqualifier ({term}) — a run would have dropped this. "
-                    "Keeping it: you named it.[/yellow]"
-                )
-    if lead.llm is None:
-        # No classifier ran (--no-classify, or no API key). An earlier verdict
-        # for this handle is real evidence and outranks anything typed here —
-        # re-adding a company must never downgrade a classified one to a stub.
-        prior = store.latest_lead(account.handle)
-        if prior is not None and prior.llm is not None:
-            lead.llm = prior.llm
-            console.print(
-                "[dim]Kept the existing classification (nothing re-read).[/dim]"
-            )
-    if lead.llm is None:
-        # Nothing has ever been read about this company. Record what the
-        # person asserted, marked as such: account_type makes it a STARTUP so
-        # it groups and shows like one, grounding "manual" keeps it outside
-        # GROUNDED_SOURCES so scoring applies the unverified multiplier, and
-        # confidence stays 0 because nothing here was read.
-        lead.llm = LLMVerdict(
-            handle=account.handle,
-            account_type="startup",
-            company_name=name or account.name or account.handle,
-            company_url=account.website,
-            one_line_summary=note,
-            grounding="manual",
-            confidence=0.0,
-        )
-        console.print(
-            "[dim]Recorded unclassified — grounding \"manual\", confidence 0. "
-            "Run `scout reclassify` once a key is set to score it on evidence.[/dim]"
-        )
-
-    # The research layers onto the verdict LAST: it owns the facts the
-    # classifier cannot reach (founders, HQ, whether the company still exists)
-    # and fills gaps, but never overwrites a judgment. See agents.apply_research.
-    if research_meta.get("researched"):
-        lead.llm = agents.apply_research(lead.llm, profile)
-
-    scored = score_leads([lead], thesis)
-    lead = scored[0]
+        raise typer.Exit(1) from None
     run_id = datetime.now(timezone.utc).strftime("manual-%Y%m%d-%H%M%S-%f")
     store.save_leads(run_id, [lead])
     _record_run(store, run_id, "manual", thesis, seeds)
@@ -1425,6 +1591,52 @@ def add(
 
 
 # ----------------------------------------------------------------- refresh
+
+
+def _capture_changes(store: Store, handle: str, lead: Lead,
+                     old_status: str, old_round: str) -> list[tuple[str, str, str]]:
+    """What live research found that changes what this company IS — a
+    status change (acquired, shut down) or a newly cited round — recorded
+    where humans and the backtest will see it. Returns the alerts to print:
+    (name, label, note). Shared by `scout refresh` and `scout resolve`."""
+    alerts: list[tuple[str, str, str]] = []
+    new_status = lead.llm.company_status or "independent"
+    if new_status != old_status and new_status != "unknown":
+        store.flag_company_status(
+            handle, old_status, new_status, lead.llm.company_status_note
+        )
+        alerts.append((display_name(lead),
+                       COMPANY_STATUS_LABELS.get(new_status, new_status),
+                       lead.llm.company_status_note))
+    # A newly-cited round is a captured OUTCOME: this company raised
+    # after we scored it — exactly the row the hindsight backtest needs
+    # and nobody remembers to write down. apply_research only lets a
+    # cited round land when it fills an unknown or progresses past the
+    # old one, so "it changed" here already means "a raise, with a
+    # source". detected_at is the detection, not the announcement — the
+    # weekly refresh cadence keeps the two close for tracked companies.
+    new_round = lead.llm.funding_stage or "unknown"
+    if new_round != old_round and new_round != "unknown":
+        recorded = store.record_outcome(
+            handle,
+            company=display_name(lead),
+            round_stage=new_round,
+            amount=lead.llm.funding_amount or "",
+            investors=lead.llm.funding_investors,
+            evidence=lead.llm.funding_evidence or "",
+            domain=(urlparse(lead.llm.company_url
+                             or lead.account.website or "").hostname
+                    or "").removeprefix("www."),
+            github_repo=lead.account.github_repo or "",
+        )
+        if recorded:
+            alerts.append((display_name(lead),
+                           "raised — " + FUNDING_STAGE_LABELS.get(
+                               new_round, new_round)
+                           + (f" · {lead.llm.funding_amount}"
+                              if lead.llm.funding_amount else ""),
+                           lead.llm.funding_evidence or ""))
+    return alerts
 
 
 @app.command()
@@ -1532,42 +1744,7 @@ def refresh(
         old_status = lead.llm.company_status or "independent"
         old_round = lead.llm.funding_stage or "unknown"
         lead.llm = agents.apply_research(lead.llm, profile)
-        new_status = lead.llm.company_status or "independent"
-        if new_status != old_status and new_status != "unknown":
-            store.flag_company_status(
-                handle, old_status, new_status, lead.llm.company_status_note
-            )
-            alerts.append((display_name(lead),
-                           COMPANY_STATUS_LABELS.get(new_status, new_status),
-                           lead.llm.company_status_note))
-        # A newly-cited round is a captured OUTCOME: this company raised
-        # after we scored it — exactly the row the hindsight backtest needs
-        # and nobody remembers to write down. apply_research only lets a
-        # cited round land when it fills an unknown or progresses past the
-        # old one, so "it changed" here already means "a raise, with a
-        # source". detected_at is the detection, not the announcement — the
-        # weekly refresh cadence keeps the two close for tracked companies.
-        new_round = lead.llm.funding_stage or "unknown"
-        if new_round != old_round and new_round != "unknown":
-            recorded = store.record_outcome(
-                handle,
-                company=display_name(lead),
-                round_stage=new_round,
-                amount=lead.llm.funding_amount or "",
-                investors=lead.llm.funding_investors,
-                evidence=lead.llm.funding_evidence or "",
-                domain=(urlparse(lead.llm.company_url
-                                 or lead.account.website or "").hostname
-                        or "").removeprefix("www."),
-                github_repo=lead.account.github_repo or "",
-            )
-            if recorded:
-                alerts.append((display_name(lead),
-                               "raised — " + FUNDING_STAGE_LABELS.get(
-                                   new_round, new_round)
-                               + (f" · {lead.llm.funding_amount}"
-                                  if lead.llm.funding_amount else ""),
-                               lead.llm.funding_evidence or ""))
+        alerts.extend(_capture_changes(store, handle, lead, old_status, old_round))
         refreshed.append(lead)
         store.mark_refreshed(handle)
         console.print(f"  [dim]~${meta.get('cost_usd', 0):.3f} · "
@@ -1591,6 +1768,173 @@ def refresh(
         console.print("[dim]No verdicts updated this pass.[/dim]")
 
 
+# ----------------------------------------------------------------- resolve
+
+
+def _is_person_signal(item: UnlinkedLead) -> bool:
+    """An HN 'who wants to be hired' comment, or any HN post that links only
+    to its own thread and is not a Show HN launch: a person, not a company.
+    Paying to research a person by username is the wrong spend."""
+    if item.source != "hn":
+        return False
+    host = web.registrable_domain(item.url)
+    if host not in (None, "news.ycombinator.com"):
+        return False
+    return not item.bio.lower().startswith("show hn")
+
+
+@app.command()
+def resolve(
+    limit: Annotated[
+        int | None,
+        typer.Option("--limit", help="Unlinked leads to work this pass "
+                     "(default: SCAN_RESOLVE_PER_DAY)."),
+    ] = None,
+    thesis_path: Annotated[
+        Path, typer.Option("--thesis", help="Path to thesis.yaml.")
+    ] = Path("thesis.yaml"),
+) -> None:
+    """Turn the signals discovery could not key to a company into scored leads.
+
+    A funding headline on a publisher's site, a Show HN whose link is a demo
+    video, an announcement with no X handle: discovery records these as
+    unlinked leads because keying them to the publisher would be a lie.
+    This pass works through them, newest first. The free move comes first —
+    the article's own outbound links, matched against the company's name;
+    only when that fails does a small web-search call ask which company the
+    headline is about. The company then goes through the SAME path `scout
+    add <domain>` uses: site crawl, live research, classifier, scorer.
+
+    Identity is checked before anything is created: a headline about a
+    company already in the database lands on that row, and a round it cites
+    is captured as an outcome — "Acme raised" attaches to Acme instead of
+    opening a second Acme.
+
+    Every unlinked lead is attempted ONCE and stamped with what it became
+    (bridged, no company, failed), so the same headline never spends
+    tomorrow's budget. Budget-gated per lead against DAILY_SPEND_CAP_USD.
+    """
+    settings = Settings()
+    thesis = _load_thesis_or_exit(thesis_path)
+    store = _open_store(settings, actor="agent:resolve")
+    seeds = _load_seeds_or_default()
+    if not settings.anthropic_api_key:
+        console.print("[yellow]ANTHROPIC_API_KEY not set — resolving needs the "
+                      "research agent. Nothing to do.[/yellow]")
+        return
+    todo = store.unresolved_leads(
+        limit=limit if limit is not None else settings.scan_resolve_per_day
+    )
+    if not todo:
+        console.print("[green]Nothing to resolve[/green] — every unlinked lead "
+                      "from the last 30 days has been worked.")
+        return
+    console.print(f"Thesis: [bold]{_thesis_banner(thesis, seeds, store)}[/bold]")
+    console.print(f"Resolving [bold]{len(todo)}[/bold] unlinked lead"
+                  f"{'' if len(todo) == 1 else 's'}...")
+
+    created: list[Lead] = []
+    alerts: list[tuple[str, str, str]] = []
+    narrate = lambda kind, detail: console.print(f"  [dim]{kind}: {detail[:90]}[/dim]")  # noqa: E731
+    for item in todo:
+        headline = " ".join((item.name or item.bio).split())
+        if _is_person_signal(item):
+            store.mark_resolved(item.source, item.ref, "skipped:person")
+            continue
+        left = store.daily_budget_left_usd(settings.daily_spend_cap_usd)
+        if left <= 0:
+            console.print(
+                f"[yellow]Daily spend cap reached "
+                f"(${settings.daily_spend_cap_usd:.2f}/day) — stopping. The rest "
+                "stay at the front of tomorrow's pass.[/yellow]"
+            )
+            break
+        console.print(f"[bold]{headline[:100]}[/bold] [dim]({item.source} · {item.url})[/dim]")
+
+        # 1) Free: the article's own links, matched against the name.
+        domain: str | None = None
+        x_handle: str | None = None
+        html = web.fetch_page_html(item.url, settings.web_fetch_timeout_s)
+        if html:
+            domain = web.pick_company_domain(
+                web.candidate_company_links(html, item.url), headline)
+            if domain:
+                console.print(f"  [dim]site: {domain} (linked from the article)[/dim]")
+        # 2) Paid, small: which company is this about?
+        if domain is None:
+            try:
+                domain, x_handle, meta = agents.locate_company(
+                    headline, f"{item.bio}\n{item.url}", settings,
+                    store=store, on_event=narrate,
+                )
+            except (RuntimeError, anthropic.APIError) as exc:
+                console.print(f"  [yellow]lookup failed ({exc}) — marked failed.[/yellow]")
+                store.mark_resolved(item.source, item.ref, "failed")
+                continue
+            if domain is None:
+                console.print(f"  [dim]no single company behind it"
+                              f"{' — ' + meta['note'] if meta.get('note') else ''}.[/dim]")
+                store.mark_resolved(item.source, item.ref, "no_company")
+                continue
+            console.print(f"  [dim]site: {domain}"
+                          + (f" · @{x_handle}" if x_handle else "") + "[/dim]")
+
+        website = web.normalize_site_url(domain)
+        # 3) Identity: a company already tracked IS that row.
+        owner = store.handle_for_domain(website)
+        prior = store.latest_lead(owner) if owner else None
+        if owner:
+            owner_account = store.get_account(owner)
+            handle, profile_url, rekey = owner, (
+                owner_account.profile_url if owner_account else None), False
+            console.print(f"  [dim]already tracked as @{owner} — updating that entry.[/dim]")
+        elif x_handle:
+            handle, profile_url, rekey = x_handle, None, False
+        else:
+            handle, profile_url, rekey = web.domain_slug(website or domain), website, True
+        try:
+            lead, account, profile, meta = _company_lead(
+                handle, website, profile_url, store=store, settings=settings,
+                thesis=thesis, note=f"{headline} — via {item.source}",
+                source=item.source, rekey_to_found_handle=rekey,
+            )
+        except _NoCompany as exc:
+            console.print(f"  [dim]no company at {domain}: {exc}[/dim]")
+            store.mark_resolved(item.source, item.ref, "no_company")
+            continue
+        except (RuntimeError, anthropic.APIError) as exc:
+            console.print(f"  [yellow]research failed ({exc}) — marked failed.[/yellow]")
+            store.mark_resolved(item.source, item.ref, "failed")
+            continue
+        if prior is not None and prior.llm is not None and lead.llm is not None:
+            alerts.extend(_capture_changes(
+                store, account.handle, lead,
+                prior.llm.company_status or "independent",
+                prior.llm.funding_stage or "unknown",
+            ))
+        created.append(lead)
+        store.mark_resolved(item.source, item.ref, f"bridged:@{account.handle}")
+        store.note_lead_resolved(account.handle, source=item.source, headline=headline,
+                                 url=item.url, score=lead.score)
+        console.print(f"  → [bold]{display_name(lead)}[/bold] @{account.handle} · "
+                      f"score {lead.score:.1f} · today ${store.spend_today_usd():.2f}"
+                      + (f" of ${settings.daily_spend_cap_usd:.2f}"
+                         if settings.daily_spend_cap_usd > 0 else ""))
+
+    if created:
+        run_id = datetime.now(timezone.utc).strftime("resolve-%Y%m%d-%H%M%S-%f")
+        store.save_leads(run_id, created)
+        _record_run(store, run_id, "resolve", thesis, seeds)
+        _rebuild_graph(store)
+        console.print(f"Resolved [bold]{len(created)}[/bold] into scored leads "
+                      f"(run {run_id}).")
+    for name, label, note in alerts:
+        console.print(f"[bold yellow]⚠ {name}: {label}[/bold yellow]"
+                      + (f" — {note}" if note else ""))
+    if not created:
+        console.print("[dim]No new leads this pass.[/dim]")
+
+
 # ------------------------------------------------------------------- graph
 
 
@@ -1604,6 +1948,49 @@ def _rebuild_graph(store: Store) -> None:
     except Exception as exc:  # noqa: BLE001
         console.print(f"[yellow]Graph rebuild failed ({exc}) — "
                       "run `scout graph --rebuild` to retry.[/yellow]")
+
+
+@app.command("merge")
+def merge_cmd(
+    source: Annotated[
+        str, typer.Argument(help="The duplicate — its rows move (handle or slug).")
+    ],
+    target: Annotated[str, typer.Argument(help="The company that stays.")],
+) -> None:
+    """Fold one company's records into another's.
+
+    The manual fix for a duplicate the identity rules did not catch, or one
+    that predates them: the same company keyed once by its X handle and
+    once by a slug from its domain. Every table follows — leads, pipeline
+    status, votes, notes, comments, memos, refresh stamps, outcomes — and
+    where both rows hold the same unique thing (a status, one person's
+    vote) the TARGET's stands. Logged to the activity feed; the graph is
+    rebuilt from the merged ledger.
+    """
+    settings = Settings()
+    store = _open_store(settings)
+    src = source.strip().lstrip("@")
+    dst = target.strip().lstrip("@")
+    if not src or not dst or src.lower() == dst.lower():
+        console.print("[red]Give two different handles: the duplicate, then "
+                      "the one that stays.[/red]")
+        raise typer.Exit(1)
+    if store.get_account(src) is None and store.latest_lead(src) is None:
+        console.print(f"[red]Nothing is recorded under @{src}.[/red]")
+        raise typer.Exit(1)
+    moved = store.rename_handle(src, dst)
+    if not moved:
+        console.print(f"[yellow]Nothing to move from @{src}.[/yellow]")
+        return
+    table = Table(box=box.SIMPLE, title=f"@{src} → @{dst}")
+    table.add_column("table")
+    table.add_column("rows", justify="right")
+    for name, n in sorted(moved.items()):
+        table.add_row(name, str(n))
+    console.print(table)
+    _rebuild_graph(store)
+    console.print(f"Merged [bold]@{src}[/bold] into [bold]@{dst}[/bold] "
+                  f"({sum(moved.values())} rows).")
 
 
 @app.command("graph")
@@ -2530,6 +2917,7 @@ def source_preview(
         chosen & _DISCOVERY_STRATEGIES, seeds, thesis, settings, store
     )
     accounts = _merge_accounts(x_accounts, discovered)
+    accounts = _reconcile_identities(accounts, store)
     _enrich_accounts(accounts, store, thesis, settings)
 
     if not accounts and not unlinked:

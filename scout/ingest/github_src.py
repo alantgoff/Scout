@@ -2,8 +2,10 @@
 
 Searches recent repos by thesis topics (created recently, minimum stars),
 then bridges repo owners to X handles via the profile's twitter_username /
-social accounts. This is the one free, ToS-clean identity bridge from code
-to X. Owners without an X handle are still surfaced as UnlinkedLeads.
+social accounts — the one free, ToS-clean identity bridge from code to X.
+Owners with no X handle but a real website (the profile's `blog`) become
+domain-keyed Accounts (the `scout add <domain>` identity); the rest are
+surfaced as UnlinkedLeads.
 
 Rate limits: the Search API is the real throttle (~30 req/min authenticated,
 ~10/min anonymous) — we sleep between search calls and cap pages, so a run
@@ -31,6 +33,7 @@ from tenacity import (
 from scout.config import Seeds, Settings, Thesis
 from scout.ingest.base import DiscoverySource
 from scout.models import Account, UnlinkedLead
+from scout.web import company_domain, domain_slug, normalize_site_url
 from scout.store import Store
 
 _console = Console()
@@ -87,6 +90,20 @@ def profile_to_x_handle(
             if tail and tail not in ("twitter.com", "x.com"):
                 return tail.lstrip("@")
     return None
+
+
+def profile_to_site(profile: dict[str, Any]) -> str | None:
+    """(pure, tested) The owner's own website from the profile's `blog`
+    field, as a normalized root URL — or None when it is missing, a social or
+    code host, or a publisher. A company org with a site and no X handle is
+    still a company: this is what lets it become a lead instead of a name in
+    an appendix."""
+    blog = str(profile.get("blog") or "").strip()
+    if not blog:
+        return None
+    if company_domain(blog, "github.com") is None:
+        return None
+    return normalize_site_url(blog)
 
 
 class GitHubSource(DiscoverySource):
@@ -189,6 +206,24 @@ class GitHubSource(DiscoverySource):
                             name=profile.get("name") or login,
                             bio=bio,
                             website=owner["repo_url"],
+                            followers=profile.get("followers", 0),
+                            source="github",
+                            github_repo=owner["repo_url"],
+                            fetched_at=now,
+                        )
+                    )
+                elif (site := profile_to_site(profile)) and domain_slug(site):
+                    # No X handle, but a real site: key it by domain, exactly
+                    # as `scout add <domain>` would, so it is scoreable now
+                    # and merges onto the X handle if one ever turns up.
+                    accounts.append(
+                        Account(
+                            id=f"gh:{domain_slug(site)}",
+                            handle=domain_slug(site),
+                            name=profile.get("name") or login,
+                            bio=(bio or f"GitHub: {owner['repo_name']}")[:280],
+                            website=site,
+                            profile_url=site,
                             followers=profile.get("followers", 0),
                             source="github",
                             github_repo=owner["repo_url"],

@@ -423,6 +423,12 @@ class Settings(BaseSettings):
     # companies continuously watched inside a ~$1 envelope.
     scan_refresh_per_day: int = 3
     refresh_min_age_days: int = 7
+    # Unlinked-lead resolver (`scout resolve`): how many headlines and posts
+    # with no company key get a live lookup per day. Each costs at most one
+    # small web-search call plus the same research `scout add` runs, inside
+    # the daily envelope — the cap keeps a busy news day from spending
+    # tomorrow's classification budget on today's coverage.
+    scan_resolve_per_day: int = 3
 
     # GitHub discovery (optional; unauthenticated works at lower rate limits)
     github_token: str | None = None
