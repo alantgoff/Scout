@@ -405,6 +405,10 @@ def _discovery_sources(
         from scout.ingest.sec_src import SECSource
 
         sources.append(SECSource(settings, store))
+    if "yc" in names:
+        from scout.ingest.yc_src import YCSource
+
+        sources.append(YCSource(settings, store))
     return sources
 
 
@@ -2888,7 +2892,7 @@ def budget() -> None:
 
 
 _X_STRATEGIES = {"lists", "searches", "bio", "graph"}
-_DISCOVERY_STRATEGIES = {"github", "hn", "arxiv", "rss", "sec"}
+_DISCOVERY_STRATEGIES = {"github", "hn", "arxiv", "rss", "sec", "yc"}
 
 
 @app.command("source")

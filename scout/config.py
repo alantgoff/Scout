@@ -218,8 +218,10 @@ STAGE_DISCOVERY_SOURCES: dict[str, set[str]] = {
     # post and the press. It reaches back into stealth: a stealth raise IS
     # a Form D, and nothing else public says so.
     "stealth": {"github", "arxiv", "sec"},
-    "launched": {"github", "hn", "rss", "sec"},
-    "scaling": {"hn", "rss", "sec"},
+    # YC's directory lists a batch from the day it starts, website and
+    # one-liner included: launched by definition, seed by definition.
+    "launched": {"github", "hn", "rss", "sec", "yc"},
+    "scaling": {"hn", "rss", "sec", "yc"},
 }
 
 # Bio search & watchlist graph-hop are early-stage instruments.
@@ -454,6 +456,10 @@ class Settings(BaseSettings):
     # Filings above this total (sold, else offered) are not seed-stage and
     # are dropped before they can reach the resolver.
     sec_max_offering_usd: int = 15_000_000
+    # YC directory (yc discovery source): how many of the most recent batches
+    # to read each run. Two covers the current batch and the one just before
+    # it — the companies still raising seed rounds.
+    yc_batches: int = 2
 
     # Pipeline knobs
     max_accounts: int = 500  # cap accounts ingested per run

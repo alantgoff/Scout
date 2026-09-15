@@ -115,6 +115,7 @@ Hacker News         + thesis fit
 arXiv papers
 RSS / Atom feeds
 SEC Form D filings
+YC directory
 investor follows
 ```
 
@@ -129,6 +130,9 @@ D within 15 days — issuer, amount sold, first-sale date, named officers — so
 the `sec` source reads new filings daily: one that names a company already
 tracked attaches to it (feed, digest, card, and a real round date for the
 backtest); a startup-shaped one nobody has heard of goes to the resolver.
+YC's directory (a public static mirror, rebuilt daily) supplies every
+new-batch company with its domain and one-liner — launched and seed-funded
+by definition, on-thesis ones become leads the day the batch starts.
 Each lead is then scored on three components:
 
 - **Quality** — a readiness scorecard (B2B or B2C rubric), criteria scored 1–3

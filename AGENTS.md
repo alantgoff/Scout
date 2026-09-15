@@ -281,6 +281,15 @@ scout/
                     UnlinkedLeads keyed on the article URL. Off-thesis
                     entries are dropped in parse_entries (heuristics.
                     matches_any) before they can spend classification budget.
+  ingest/yc_src.py  YC directory discovery — the latest YC_BATCHES batches
+                    from the yc-oss static mirror (meta.json → batches/
+                    <slug>.json, falling back to companies/all.json). A
+                    record carries a website and a one-liner, so on-thesis
+                    (heuristics.matches_any) active companies become
+                    domain-keyed Accounts at no cost ("YC S26" in the bio
+                    is citable funding evidence; nothing else is inferred
+                    from membership); acquired/public/inactive are skipped;
+                    a record with no company site is an UnlinkedLead.
   ingest/sec_src.py SEC Form D discovery — the government record of every
                     US private raise (issuer, amount sold, first-sale date,
                     officers by name). Reads the EDGAR daily form index
@@ -420,7 +429,8 @@ scout/
                     not the publisher root) + candidate_company_links /
                     pick_company_domain (outbound domains, matched on the
                     headline's first distinctive word; None over a guess).
-tests/              pytest, no network — test_sec (index/XML parsers on
+tests/              pytest, no network — test_yc (batch discovery shapes,
+                    what a record may become, fallback), test_sec (index/XML parsers on
                     recorded shapes, the fund gates, name-join, stubbed
                     end-to-end discover), test_identity (domain→handle,
                     rename_handle across every table, reconcile, merge),
