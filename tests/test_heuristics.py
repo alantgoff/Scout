@@ -263,9 +263,25 @@ def test_run_heuristics_empty_tweets_returns_all_signals() -> None:
         "bio_change",
         "builder_evidence",
         "github_evidence",
+        "star_velocity",
         "source_corroboration",
     }
     assert disqualified is False
+
+
+def test_star_velocity_needs_a_baseline_and_saturates() -> None:
+    """The enrichment field is the input: no history → 0 by construction,
+    half the full-credit gain → 0.5, anything past full credit → 1.0."""
+    unseen = make_account(github_repo="https://github.com/a/b")
+    assert get_signal(run_heuristics(unseen, [], THESIS)[0], "star_velocity").value == 0.0
+    half = make_account(github_repo="https://github.com/a/b", star_velocity=50)
+    signal = get_signal(run_heuristics(half, [], THESIS)[0], "star_velocity")
+    assert signal.value == 0.5
+    assert "+50 stars in 7d" in signal.detail and "github.com/a/b" in signal.detail
+    surge = make_account(star_velocity=1000)
+    assert get_signal(run_heuristics(surge, [], THESIS)[0], "star_velocity").value == 1.0
+    lost = make_account(star_velocity=-20)  # a repo losing stars is not momentum
+    assert get_signal(run_heuristics(lost, [], THESIS)[0], "star_velocity").value == 0.0
 
 
 def test_source_corroboration_counts_distinct_sources() -> None:

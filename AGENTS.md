@@ -392,6 +392,8 @@ scout/
     github_src.py   GitHub discovery (repo search → owner → X-handle bridge;
                     an owner with no handle but a real site (profile `blog`,
                     via web.company_domain) becomes a domain-keyed Account).
+                    Every run snapshots each repo's stars (free — already in
+                    the search response) for the star_velocity signal.
     hn_src.py       Hacker News (Algolia) discovery. A Show HN whose story
                     URL is the company's own site becomes a domain-keyed
                     Account; hiring-thread people and launches linking to a
@@ -407,7 +409,7 @@ scout/
                     is the correct outcome rather than a guess.
     linkedin_src.py Stub (NotImplementedError) — LinkedIn automation is a dead end.
   signals/
-    heuristics.py   10 deterministic signals + run_heuristics + intent_appeared.
+    heuristics.py   11 deterministic signals + run_heuristics + intent_appeared.
     llm.py          Claude classification, GROUNDED: site text in the dossier,
                     EVIDENCE_RULES appended to every prompt (even custom ones),
                     unknown-escape, batches of CLASSIFY_BATCH_SIZE (5). Plus the
@@ -429,7 +431,8 @@ scout/
                     not the publisher root) + candidate_company_links /
                     pick_company_domain (outbound domains, matched on the
                     headline's first distinctive word; None over a guess).
-tests/              pytest, no network — test_yc (batch discovery shapes,
+tests/              pytest, no network — test_star_velocity (snapshot deltas,
+                    enrichment, the hindsight window count), test_yc (batch discovery shapes,
                     what a record may become, fallback), test_sec (index/XML parsers on
                     recorded shapes, the fund gates, name-join, stubbed
                     end-to-end discover), test_identity (domain→handle,
@@ -577,6 +580,7 @@ found on X AND in a feed corroborates itself):
 | launch_traction | recent launch-y tweet with engagement/followers > floor |
 | builder_evidence | github/personal-site link in bio |
 | github_evidence | discovered via a recent starred repo (source=="github") |
+| star_velocity | stars the discovery repo gained over `signal_params.star_velocity_window_days` (full credit at `star_velocity_full`); enrichment from the GitHub source's daily snapshots (store.record_repo_stars / star_deltas), 0 until a baseline exists; reconstructed at a cutoff in hindsight from stargazer timestamps (count_stars) |
 | source_corroboration | 2+ distinct discovery strategies surfaced the account (full credit at 3) |
 
 `signal_params` (traction floor/saturation/window, convergence threshold, stage

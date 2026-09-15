@@ -446,6 +446,7 @@ class Store:
             # persist stale values.
             row.pop("recent_followed_by", None)
             row.pop("bio_changed", None)
+            row.pop("star_velocity", None)
             rows.append(row)
         self.db["accounts"].upsert_all(rows, pk="id", alter=True)
 
@@ -471,6 +472,7 @@ class Store:
         # Drop stale enrichment columns from pre-v2 rows; recomputed per run.
         row.pop("recent_followed_by", None)
         row.pop("bio_changed", None)
+        row.pop("star_velocity", None)
         return Account.model_validate(row)
 
     def recent_discovered_accounts(self, days: int = 7) -> list[Account]:
@@ -494,6 +496,7 @@ class Store:
             row["sources"] = json.loads(row.get("sources") or "[]")
             row.pop("recent_followed_by", None)
             row.pop("bio_changed", None)
+            row.pop("star_velocity", None)
             accounts.append(Account.model_validate(row))
         return accounts
 
@@ -1847,6 +1850,48 @@ class Store:
              "resolved_at": datetime.now(timezone.utc).isoformat()},
             pk=("source", "ref"), alter=True,
         )
+
+    # ------------------------------------------------------------- repo stars
+
+    def record_repo_stars(self, snapshots: list[tuple[str, int]]) -> None:
+        """Append today's star count per discovery repo — the baseline the
+        star_velocity signal reads on later runs. Free: the counts come from
+        the search response the GitHub source already paid for."""
+        if not snapshots:
+            return
+        now = datetime.now(timezone.utc).isoformat()
+        self.db["repo_stars"].insert_all([
+            {"repo_url": url.rstrip("/"), "stars": int(stars or 0), "seen_at": now}
+            for url, stars in snapshots if url
+        ])
+
+    def star_deltas(self, days: int = 7) -> dict[str, int]:
+        """repo_url → stars gained over the window, one query for every repo.
+
+        Baseline is the newest snapshot at or before the window start; with
+        no history that old, the oldest snapshot inside the window — a
+        partial window, honest about being short. One snapshot alone is no
+        velocity, so a repo's first sighting is 0 by construction.
+        """
+        if not self.db["repo_stars"].exists():
+            return {}
+        now = datetime.now(timezone.utc)
+        cutoff = (now - timedelta(days=days)).isoformat()
+        lookback = (now - timedelta(days=days * 4)).isoformat()
+        by_repo: dict[str, list[tuple[str, int]]] = {}
+        for row in self.db["repo_stars"].rows_where(
+                "seen_at >= ?", [lookback], order_by="repo_url, seen_at"):
+            by_repo.setdefault(row["repo_url"], []).append((row["seen_at"], row["stars"]))
+        out: dict[str, int] = {}
+        for url, snaps in by_repo.items():
+            if len(snaps) < 2:
+                continue
+            latest = snaps[-1]
+            before = [snap for snap in snaps if snap[0] <= cutoff]
+            baseline = before[-1] if before else snaps[0]
+            if baseline is not latest:
+                out[url] = latest[1] - baseline[1]
+        return out
 
     # ------------------------------------------------------------ SEC filings
 

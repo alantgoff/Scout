@@ -66,6 +66,11 @@ class Account(BaseModel):
     # adapter (Account carries no store).
     lab_move: str = ""
     github_repo: str | None = None  # evidence repo URL when discovered via GitHub
+    github_stars: int = 0  # that repo's stars when the source last saw it
+    # Enrichment (cli._enrich_accounts, never persisted): stars the discovery
+    # repo gained over signal_params.star_velocity_window_days, from the
+    # daily snapshots the GitHub source records. 0 until a baseline exists.
+    star_velocity: int = 0
     fetched_at: datetime | None = None
 
     @property

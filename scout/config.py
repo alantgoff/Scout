@@ -236,6 +236,11 @@ class SignalParams(BaseModel):
     traction_saturation: float = 0.25  # ratio at which launch_traction = 1.0
     traction_window_days: int = 30  # how recent a launch tweet must be
     convergence_full_credit: int = 2  # recent watcher follows for value 1.0
+    # star_velocity: stars the discovery repo gained over the window for
+    # full credit. 100 in a week is a launch that landed; the baseline is
+    # the daily snapshot history, so it needs scheduled runs to exist.
+    star_velocity_full: int = 100
+    star_velocity_window_days: int = 7
     stage_mismatch_multiplier: float = 0.5  # score × this when stage off-target
     # Final-score blend: base = Σ(weight × component) / Σ(weights of PRESENT
     # components), then the multiplier chain. Components: company QUALITY

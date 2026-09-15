@@ -370,8 +370,21 @@ async def hn_evidence(
     return list(seen.values()), errors
 
 
+def count_stars(
+    starred_times: list[datetime], cutoff: datetime, window_days: int = 7,
+) -> tuple[int, int]:
+    """(pure, tested) (stars before the cutoff, stars gained in the
+    `window_days` before it) from stargazer timestamps — the same two
+    numbers production reads from live counts and daily snapshots."""
+    start = cutoff - timedelta(days=window_days)
+    before = sum(1 for when in starred_times if when < cutoff)
+    recent = sum(1 for when in starred_times if start <= when < cutoff)
+    return before, recent
+
+
 async def github_repo_at(
-    client: httpx.AsyncClient, full_name: str, cutoff: datetime, token: str = ""
+    client: httpx.AsyncClient, full_name: str, cutoff: datetime, token: str = "",
+    window_days: int = 7,
 ) -> tuple[dict | None, str]:
     """A repo as it stood at the cutoff, and any error encountered.
 
@@ -401,7 +414,8 @@ async def github_repo_at(
     if created >= cutoff:
         return None, ""  # did not exist at the cutoff — a real exclusion
 
-    stars, exact = 0, True
+    starred_times: list[datetime] = []
+    exact = True
     star_headers = {**headers, "Accept": "application/vnd.github.star+json"}
     for page in range(1, _STAR_PAGES_MAX + 1):
         try:
@@ -425,13 +439,13 @@ async def github_repo_at(
                 when = datetime.fromisoformat(str(starred).replace("Z", "+00:00"))
             except ValueError:
                 continue
-            if when < cutoff:
-                stars += 1
+            starred_times.append(when)
         if len(batch) < _STARS_PER_PAGE:
             break
         if page == _STAR_PAGES_MAX:
             exact = False
 
+    stars, recent = count_stars(starred_times, cutoff, window_days)
     return {
         "full_name": full_name,
         "created_at": created_raw,
@@ -440,6 +454,9 @@ async def github_repo_at(
         "language": repo.get("language") or "",
         "homepage": repo.get("homepage") or "",
         "stars_at_cutoff": stars,
+        # Stars gained in the window BEFORE the cutoff — the star_velocity
+        # signal as it would have read on that day.
+        "stars_week_before": recent,
         "stars_exact": exact,
         "stars_now": repo.get("stargazers_count") or 0,
     }, ""
@@ -589,6 +606,8 @@ def evidence_to_account(evidence: Evidence, blinded: bool = False) -> Account:
         followers=evidence.followers,
         source="hindsight",
         created_at=evidence.as_of,
+        star_velocity=sum(int(r.get("stars_week_before") or 0)
+                          for r in evidence.github_repos),
     )
 
 

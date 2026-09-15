@@ -31,7 +31,7 @@ Grouped = tuple[Lead, LedgerEntry | None, list[Lead]]  # primary, entry, seconda
 # (heuristics-only mode): any of these firing marks the account founder-like.
 FOUNDER_EVIDENCE_SIGNALS = {
     "bio_intent", "departure_signal", "bio_change", "launch_traction",
-    "builder_evidence", "github_evidence",
+    "builder_evidence", "github_evidence", "star_velocity",
 }
 
 

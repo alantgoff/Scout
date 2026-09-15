@@ -108,7 +108,7 @@ taste profile, and firm-wide defaults.
 
 ```
 DISCOVER            SCORE                      DECIDE
-X search queries    10 deterministic signals    Longlist / Shortlist / Pass
+X search queries    11 deterministic signals    Longlist / Shortlist / Pass
 bio search       →  + Claude classification  → Memo
 GitHub topics       + adversarial audit        Outreach
 Hacker News         + thesis fit
@@ -139,7 +139,9 @@ Each lead is then scored on three components:
   from cited evidence only, rolled up 0–100
 - **Fit** — how squarely the *product* matches your thesis, 0–1
 - **Signal** — momentum: investor follow-graph convergence, bio changes,
-  departure language, launch traction, and a change of published affiliation
+  departure language, launch traction, GitHub star velocity (stars the
+  discovery repo gained this week — the launch that landed), and a change of
+  published affiliation
   — a researcher whose next paper carries a different lab has usually left
   months before any bio says so
 

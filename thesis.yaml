@@ -66,6 +66,7 @@ weights:
   launch_traction: 10.0
   builder_evidence: 5.0
   github_evidence: 5.0
+  star_velocity: 10.0
   source_corroboration: 5.0
 quality_weights:
   team: 20.0

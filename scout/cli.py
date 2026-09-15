@@ -379,6 +379,14 @@ def _enrich_accounts(
             move = moved_map.get(normalize_author(account.name))
             if move:
                 account.lab_move = f"{move['from']} → {move['to']}"
+    # Star velocity: the discovery repo's growth over the signal window,
+    # from the snapshots the GitHub source records each run. One batched
+    # query; a repo seen once has no baseline and stays 0.
+    deltas = store.star_deltas(thesis.signal_params.star_velocity_window_days)
+    if deltas:
+        for account in accounts:
+            if account.github_repo:
+                account.star_velocity = max(deltas.get(account.github_repo.rstrip("/"), 0), 0)
 
 
 def _discovery_sources(

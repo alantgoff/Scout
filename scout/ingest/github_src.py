@@ -11,8 +11,10 @@ Rate limits: the Search API is the real throttle (~30 req/min authenticated,
 ~10/min anonymous) — we sleep between search calls and cap pages, so a run
 stays well under it. GITHUB_TOKEN (free PAT) is optional but recommended.
 
-Star-velocity diffing (re-poll stars and alert on spikes) is a future hook —
-it needs scheduled runs to build a baseline.
+Every run also snapshots each discovery repo's star count (store.
+record_repo_stars, free — it is in the search response) so the daily runs
+build the baseline the star_velocity signal reads: stars gained over the
+signal window, the launch moment for a technical founder.
 """
 
 from __future__ import annotations
@@ -164,6 +166,10 @@ class GitHubSource(DiscoverySource):
                 for owner in parse_repo_owners(data):
                     owners.setdefault(owner["login"].lower(), owner)
                 await asyncio.sleep(_SEARCH_PAUSE_S)
+            # Today's star counts, from the responses already in hand: the
+            # baseline the star_velocity signal reads on later runs.
+            self.store.record_repo_stars(
+                [(o["repo_url"], o["stars"]) for o in owners.values()])
 
             semaphore = asyncio.Semaphore(_PROFILE_CONCURRENCY)
 
@@ -209,6 +215,7 @@ class GitHubSource(DiscoverySource):
                             followers=profile.get("followers", 0),
                             source="github",
                             github_repo=owner["repo_url"],
+                            github_stars=owner["stars"],
                             fetched_at=now,
                         )
                     )
@@ -227,6 +234,7 @@ class GitHubSource(DiscoverySource):
                             followers=profile.get("followers", 0),
                             source="github",
                             github_repo=owner["repo_url"],
+                            github_stars=owner["stars"],
                             fetched_at=now,
                         )
                     )

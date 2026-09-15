@@ -179,6 +179,25 @@ def _github_evidence(account: Account) -> Signal:
     return Signal(name="github_evidence", value=0.0)
 
 
+def _star_velocity(account: Account, thesis: Thesis) -> Signal:
+    """Stars the discovery repo gained over the signal window — a technical
+    founder's launch moment, in the one place it is expensive to fake.
+    `star_velocity` is enrichment from store history (cli._enrich_accounts
+    over the GitHub source's daily snapshots), so a repo's first sighting
+    scores 0 by construction. Saturates at signal_params.star_velocity_full."""
+    gained = max(int(account.star_velocity or 0), 0)
+    if not gained:
+        return Signal(name="star_velocity", value=0.0)
+    full = max(thesis.signal_params.star_velocity_full, 1)
+    window = thesis.signal_params.star_velocity_window_days
+    return Signal(
+        name="star_velocity",
+        value=min(gained / full, 1.0),
+        detail=f"+{gained} stars in {window}d"
+               + (f" ({account.github_repo})" if account.github_repo else ""),
+    )
+
+
 def _source_corroboration(account: Account) -> Signal:
     """Independent discovery strategies agreeing on the same account.
 
@@ -285,6 +304,7 @@ def run_heuristics(
         _bio_change(account),
         _builder_evidence(account),
         _github_evidence(account),
+        _star_velocity(account, thesis),
         _source_corroboration(account),
     ]
     # Word-boundary matched, like every other bio signal above. A bare

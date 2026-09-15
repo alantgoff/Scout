@@ -159,6 +159,7 @@ SIGNAL_HELP = {
     "launch_traction": "Recent tweet with launch language and high engagement/followers",
     "builder_evidence": "GitHub or personal-site link in the bio",
     "github_evidence": "Discovered via a recent, starred GitHub repo in your thesis topics",
+    "star_velocity": "Stars the discovery repo gained over the signal window — a launch that landed (needs daily runs for the baseline)",
     "source_corroboration": "Independently surfaced by 2+ discovery strategies (search + GitHub + graph…)",
 }
 
@@ -4338,6 +4339,13 @@ if nav == "Thesis":
             with q2:
                 tw = st.number_input("Traction window (days)", 1, 180, int(params.traction_window_days))
                 cf = st.number_input("Convergence full-credit follows", 1, 10, int(params.convergence_full_credit))
+                sv = st.number_input("Star velocity: stars gained for full credit", 1, 5000,
+                                     int(params.star_velocity_full),
+                                     help="star_velocity reaches 1.0 when the discovery repo "
+                                          "gains this many stars in the window below. The "
+                                          "baseline comes from daily run snapshots.")
+                svw = st.number_input("Star velocity window (days)", 1, 60,
+                                      int(params.star_velocity_window_days))
             with q3:
                 sm = st.number_input("Off-target stage multiplier", 0.0, 1.0, float(params.stage_mismatch_multiplier), 0.05)
                 um = st.number_input("Ungrounded multiplier", 0.0, 1.0,
@@ -4373,6 +4381,7 @@ if nav == "Thesis":
                     "signal_params": SignalParams(
                         traction_floor=tf, traction_saturation=ts,
                         traction_window_days=int(tw), convergence_full_credit=int(cf),
+                        star_velocity_full=int(sv), star_velocity_window_days=int(svw),
                         stage_mismatch_multiplier=sm,
                         score_weight_quality=wq, score_weight_fit=wf,
                         score_weight_signals=ws,
