@@ -211,12 +211,15 @@ STAGE_DISCOVERY_SOURCES: dict[str, set[str]] = {
     # there is a company to find, which is exactly the idea/stealth window
     # and useless by the time a company is scaling.
     "idea": {"arxiv"},
-    "stealth": {"github", "arxiv"},
     # RSS is a post-launch instrument: launch feeds and funding coverage
     # only carry a company once it has something to announce, which is
     # exactly why it is useless for idea/stealth and valuable after.
-    "launched": {"github", "hn", "rss"},
-    "scaling": {"hn", "rss"},
+    # A Form D is filed within 15 days of the first sale — before the launch
+    # post and the press. It reaches back into stealth: a stealth raise IS
+    # a Form D, and nothing else public says so.
+    "stealth": {"github", "arxiv", "sec"},
+    "launched": {"github", "hn", "rss", "sec"},
+    "scaling": {"hn", "rss", "sec"},
 }
 
 # Bio search & watchlist graph-hop are early-stage instruments.
@@ -326,6 +329,11 @@ class Thesis(BaseModel):
         return any(stage in STAGE_BIO_GRAPH for stage in self.target_stages)
 
 
+DEFAULT_SEC_INDUSTRIES = [
+    "Other Technology", "Computers", "Telecommunications", "Business Services",
+]
+
+
 class Seeds(BaseModel):
     """Seed strategies (seeds.yaml).
 
@@ -352,6 +360,11 @@ class Seeds(BaseModel):
     # Product Hunt), funding coverage, portfolio announcements, company
     # blogs. Free and keyless, so this is the cheapest channel to widen.
     rss_feeds: list[str] = Field(default_factory=list)
+    # Form D industry groups worth resolving (the form's own vocabulary:
+    # "Other Technology", "Computers", "Telecommunications", "Business
+    # Services", "Manufacturing", "Biotechnology", …). Thesis-specific — a
+    # health-care thesis wants different groups — so it lives with the seeds.
+    sec_industries: list[str] = Field(default_factory=lambda: list(DEFAULT_SEC_INDUSTRIES))
 
     @property
     def all_searches(self) -> list[tuple[str, str]]:
@@ -432,6 +445,15 @@ class Settings(BaseSettings):
 
     # GitHub discovery (optional; unauthenticated works at lower rate limits)
     github_token: str | None = None
+
+    # SEC EDGAR (Form D discovery). SEC's fair-access policy asks every
+    # automated reader to identify itself with a descriptive User-Agent that
+    # includes a contact — set SEC_USER_AGENT to "<firm> <email>" in .env.
+    # Requests over 10/s are throttled; the source stays well under.
+    sec_user_agent: str = "scout/0.1 (+https://github.com/alantgoff/Scout)"
+    # Filings above this total (sold, else offered) are not seed-stage and
+    # are dropped before they can reach the resolver.
+    sec_max_offering_usd: int = 15_000_000
 
     # Pipeline knobs
     max_accounts: int = 500  # cap accounts ingested per run

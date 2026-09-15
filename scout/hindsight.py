@@ -1048,6 +1048,30 @@ def outcome_from_auto(row: dict) -> Outcome:
     )
 
 
+def outcome_from_filing(row: dict, *, domain: str = "") -> Outcome | None:
+    """One SEC Form D matched to a tracked company → an Outcome with a REAL
+    date: the date of first sale the issuer swore to, else the filing date.
+    The first outcomes source that knows when the round actually happened
+    rather than when a refresh noticed. round_stage stays "" — the filing
+    states an amount, not a round name, and this file does not guess.
+    None when the filing carries no usable date."""
+    when = (row.get("first_sale") or row.get("filed_at") or "")[:10]
+    try:
+        round_date = datetime.fromisoformat(when).replace(tzinfo=timezone.utc)
+    except ValueError:
+        return None
+    amount = row.get("amount_sold") or row.get("amount_offered")
+    handle = (row.get("matched_handle") or "").strip()
+    return Outcome(
+        company=row.get("issuer") or handle or "unknown issuer",
+        round_date=round_date,
+        amount=f"${int(amount):,}" if amount else "",
+        domain=domain,
+        x_handles=[handle] if handle else [],
+        note=f"SEC Form D — {row.get('url', '')}",
+    )
+
+
 def merge_outcomes(
     curated: list[Outcome], auto: list[Outcome]
 ) -> list[Outcome]:

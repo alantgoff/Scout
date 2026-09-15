@@ -1759,6 +1759,7 @@ def research_company(
     settings: Settings,
     *,
     site_text: str = "",
+    extra_context: str = "",
     on_event=None,
     store=None,
 ) -> tuple[CompanyProfile, dict]:
@@ -1767,7 +1768,9 @@ def research_company(
     `site_text` is the crawled site bundle (web.bundle_text) when the caller
     has one — a head start, not a substitute: the agent still searches for the
     things a website never says about itself, above all whether the company is
-    still independent.
+    still independent. `extra_context` is records already on file about this
+    company (an SEC Form D, a headline) — evidence the agent should cite where
+    it answers a question, above all as funding_evidence.
 
     Returns (profile, meta) where meta is {"searches", "fetches", "sources",
     "researched"}. `researched` is False when no Anthropic key is configured —
@@ -1793,6 +1796,13 @@ def research_company(
             "\nNothing could be crawled from this domain — it may be JS-only, "
             "blocking bots, parked, or dead. Establish from search whether "
             "there is a company here at all.\n"
+        )
+    if extra_context.strip():
+        context += (
+            "\nRecords already on file for this company. Cite them where they "
+            "answer a question — a government filing is the strongest "
+            "funding_evidence there is:\n"
+            f"{extra_context.strip()[:2000]}\n"
         )
 
     client = _client(settings, RESEARCH_TIMEOUT_S)

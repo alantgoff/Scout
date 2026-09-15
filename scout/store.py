@@ -1800,23 +1800,33 @@ class Store:
         return UnlinkedLead.model_validate(data)
 
     def unresolved_leads(self, *, days: int = 30, limit: int = 50,
-                         sources: tuple[str, ...] = ("rss", "hn")) -> list[UnlinkedLead]:
-        """Unlinked leads the resolver has not yet worked, newest first.
+                         sources: tuple[str, ...] = ("rss", "hn", "sec")) -> list[UnlinkedLead]:
+        """Unlinked leads the resolver has not yet worked, interleaved by
+        source (newest first within each) so no one source starves the
+        others: an SEC filing day would otherwise fill the whole daily
+        allowance before a single headline was looked at.
 
-        Only sources whose entries describe a COMPANY: RSS headlines and HN
-        posts. GitHub owners with no site are people, and paying to research
-        a person by their login is the wrong spend.
+        Only sources whose entries describe a COMPANY: RSS headlines, HN
+        posts, Form D issuers. GitHub owners with no site are people, and
+        paying to research a person by their login is the wrong spend.
         """
         if not self.db["unlinked_leads"].exists() or not sources:
             return []
         cutoff = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat()
-        where = "found_at >= ? and source in (%s)" % ",".join("?" * len(sources))
+        where = "found_at >= ? and source = ?"
         if "resolved_at" in self.db["unlinked_leads"].columns_dict:
             where += " and (resolved_at is null or resolved_at = '')"
-        rows = self.db["unlinked_leads"].rows_where(
-            where, [cutoff, *sources], order_by="found_at desc", limit=limit
-        )
-        return [self._unlinked_from_row(r) for r in rows]
+        per_source = [
+            [self._unlinked_from_row(r) for r in self.db["unlinked_leads"].rows_where(
+                where, [cutoff, source], order_by="found_at desc", limit=limit)]
+            for source in sources
+        ]
+        out: list[UnlinkedLead] = []
+        for i in range(max((len(rows) for rows in per_source), default=0)):
+            for rows in per_source:
+                if i < len(rows):
+                    out.append(rows[i])
+        return out[:limit]
 
     def note_lead_resolved(self, handle: str, *, source: str, headline: str,
                            url: str, score: float | None) -> None:
@@ -1837,6 +1847,143 @@ class Store:
              "resolved_at": datetime.now(timezone.utc).isoformat()},
             pk=("source", "ref"), alter=True,
         )
+
+    # ------------------------------------------------------------ SEC filings
+
+    def sec_days_pending(self, lookback_days: int = 5, now: datetime | None = None) -> list:
+        """Calendar days in the lookback window not yet ingested, oldest
+        first. Non-business days get marked with 0 filings when the index
+        404s, so the window heals after a weekend or a missed run and never
+        re-reads a day."""
+        now = now or datetime.now(timezone.utc)
+        done: set[str] = set()
+        if self.db["sec_days"].exists():
+            done = {r["day"] for r in self.db["sec_days"].rows}
+        days = []
+        # Yesterday back: today's index is written after the close of the
+        # business day, so reading it at 06:00 UTC would mark it done empty.
+        for back in range(lookback_days, 0, -1):
+            day = (now - timedelta(days=back)).date()
+            if day.isoformat() not in done:
+                days.append(day)
+        return days
+
+    def mark_sec_day(self, day: str, n_filings: int) -> None:
+        self.db["sec_days"].upsert(
+            {"day": day, "n_filings": n_filings,
+             "read_at": datetime.now(timezone.utc).isoformat()},
+            pk="day",
+        )
+
+    def record_filings(self, rows: list[dict]) -> None:
+        """Startup-shaped Form Ds, keyed by accession. Officers travel as
+        JSON; an amendment is its own accession and its own row."""
+        if not rows:
+            return
+        stored = []
+        for row in rows:
+            copy = dict(row)
+            copy["officers"] = json.dumps(copy.get("officers") or [])
+            stored.append(copy)
+        self.db["sec_filings"].upsert_all(stored, pk="accession", alter=True)
+
+    @staticmethod
+    def _decode_filing(row) -> dict:
+        data = dict(row)
+        data["officers"] = json.loads(data.get("officers") or "[]")
+        return data
+
+    def filings_for_cik(self, cik: str) -> list[dict]:
+        if not self.db["sec_filings"].exists() or not cik:
+            return []
+        return [self._decode_filing(r) for r in self.db["sec_filings"].rows_where(
+            "cik = ?", [cik], order_by="filed_at desc")]
+
+    def filings_for(self, handle: str) -> list[dict]:
+        """Every filing matched to one tracked company, newest first."""
+        if not self.db["sec_filings"].exists():
+            return []
+        return [self._decode_filing(r) for r in self.db["sec_filings"].rows_where(
+            "matched_handle = ?", [handle.lstrip("@").lower()], order_by="filed_at desc")]
+
+    def matched_filings(self) -> list[dict]:
+        """Every filing attached to a tracked company — the hindsight
+        backtest's outcomes with a real first-sale date."""
+        if not self.db["sec_filings"].exists():
+            return []
+        return [self._decode_filing(r) for r in self.db["sec_filings"].rows_where(
+            "matched_handle is not null and matched_handle != ''",
+            order_by="filed_at desc")]
+
+    def filings_by_handle(self) -> dict[str, list[dict]]:
+        """Matched filings grouped by tracked handle, newest first — one
+        query for every card on a page."""
+        grouped: dict[str, list[dict]] = {}
+        for row in self.matched_filings():
+            grouped.setdefault(row["matched_handle"], []).append(row)
+        return grouped
+
+    def recent_filings(self, days: int = 30) -> list[dict]:
+        if not self.db["sec_filings"].exists():
+            return []
+        cutoff = (datetime.now(timezone.utc) - timedelta(days=days)).date().isoformat()
+        return [self._decode_filing(r) for r in self.db["sec_filings"].rows_where(
+            "filed_at >= ?", [cutoff], order_by="filed_at desc")]
+
+    def set_filing_match(self, accession: str, handle: str) -> None:
+        self.db["sec_filings"].upsert(
+            {"accession": accession, "matched_handle": handle.lstrip("@").lower()},
+            pk="accession", alter=True,
+        )
+
+    def note_filing_matched(self, handle: str, filing: dict) -> None:
+        """A Form D landed on a company the firm tracks: activity spine →
+        digest alert and the company's card. Idempotent per accession so a
+        re-read of the same day cannot announce the same filing twice."""
+        key = handle.lstrip("@").lower()
+        accession = filing.get("accession") or ""
+        if accession and self.db["events"].exists():
+            seen = self.db["events"].rows_where(
+                "verb = 'filing_matched' and handle = ? and payload_json like ?",
+                [key, f'%"{accession}"%'], limit=1)
+            if list(seen):
+                return
+        self._append_event(
+            "filing_matched", handle=key, actor=self.actor or "agent:sec",
+            payload={
+                "accession": accession,
+                "issuer": filing.get("issuer", ""),
+                "amount_sold": filing.get("amount_sold") or 0,
+                "amount_offered": filing.get("amount_offered"),
+                "first_sale": filing.get("first_sale", ""),
+                "officers": list(filing.get("officers") or [])[:4],
+                "url": filing.get("url", ""),
+                "amendment": bool(filing.get("is_amendment")),
+            },
+        )
+
+    def company_name_index(self) -> dict[str, str]:
+        """normalized company name → tracked handle, one pass over the ledger
+        and the accounts cache. The join side of the Form D issuer match."""
+        from scout.companies import normalize_company_name
+
+        index: dict[str, str] = {}
+
+        def add(name: str | None, handle: str) -> None:
+            key = normalize_company_name(name)
+            if len(key) > 2 and key not in index:
+                index[key] = handle
+
+        for entry in self.load_lead_ledger(include_demo=False):
+            lead = entry.lead
+            if lead.llm is not None and lead.llm.company_name:
+                add(lead.llm.company_name, lead.account.handle)
+            add(lead.account.name, lead.account.handle)
+        if self.db["accounts"].exists():
+            for row in self.db["accounts"].rows_where(
+                    "name is not null and name != ''", select="handle, name"):
+                add(row["name"], row["handle"])
+        return index
 
     # ------------------------------------------------------- deal-flow pipeline
 

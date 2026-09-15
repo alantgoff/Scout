@@ -81,6 +81,26 @@ def display_name(lead: Lead) -> str:
     return (lead.account.name or f"@{lead.account.handle}").strip()
 
 
+# Legal suffixes that never distinguish one company from another. Dropped
+# from the END of a name only — "Company" inside a name stays.
+_LEGAL_SUFFIXES = {
+    "inc", "incorporated", "llc", "ltd", "limited", "corp", "corporation",
+    "co", "company", "plc", "pbc", "lp", "llp", "gmbh", "sas", "sa", "ag",
+    "bv", "oy", "ab", "pte", "pty", "srl", "sl",
+}
+
+
+def normalize_company_name(name: str | None) -> str:
+    """Lowercased alphanumerics with trailing legal suffixes dropped, so
+    "Acme Robotics, Inc." and "acme robotics" share one key. The join key
+    between an SEC filing's issuer name and a tracked company — exact
+    match only, which is why it strips suffixes but never words."""
+    words = re.sub(r"[^a-z0-9]+", " ", (name or "").lower()).split()
+    while words and words[-1] in _LEGAL_SUFFIXES:
+        words.pop()
+    return "".join(words)
+
+
 def company_key(lead: Lead) -> str | None:
     """Normalized grouping key for the startup behind a lead (None = unknown).
 

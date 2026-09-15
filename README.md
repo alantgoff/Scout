@@ -114,6 +114,7 @@ GitHub topics       + adversarial audit        Outreach
 Hacker News         + thesis fit
 arXiv papers
 RSS / Atom feeds
+SEC Form D filings
 investor follows
 ```
 
@@ -123,7 +124,12 @@ whatever key it arrived under (an X handle from search, a domain from a feed
 or a Show HN, a GitHub org), so a company seen three ways is one lead with
 three corroborating sources, not three leads. Signals with no company key at
 all — a funding headline on a publisher's site — are resolved into leads the
-same morning (`scout resolve`). Each lead is then scored on three components:
+same morning (`scout resolve`). And every US private raise files an SEC Form
+D within 15 days — issuer, amount sold, first-sale date, named officers — so
+the `sec` source reads new filings daily: one that names a company already
+tracked attaches to it (feed, digest, card, and a real round date for the
+backtest); a startup-shaped one nobody has heard of goes to the resolver.
+Each lead is then scored on three components:
 
 - **Quality** — a readiness scorecard (B2B or B2C rubric), criteria scored 1–3
   from cited evidence only, rolled up 0–100
@@ -213,7 +219,7 @@ add <domain>   Add ONE company by domain; the system fills in the rest.
 
 resolve      Turn the signals discovery could not key to a company — a
              funding headline on a publisher's site, a Show HN linking to a
-             demo video — into scored leads. Free move first (the article's
+             demo video, an SEC Form D issuer — into scored leads. Free move first (the article's
              own outbound links, matched against the name), then one small
              web-search call; then the SAME path `add <domain>` takes. A
              headline about a company already tracked lands on that row and

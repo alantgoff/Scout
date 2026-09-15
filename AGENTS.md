@@ -162,8 +162,9 @@ scout/
                     headline cannot reopen a lead already worked).
   store.py          SQLite (sqlite-utils) — cache, dedupe, TTL, budget ledger,
                     follow-edge/bio snapshots, unlinked leads (+ unresolved_leads
-                    / mark_resolved), identity (handle_for_domain,
-                    rename_handle), deal-flow pipeline,
+                    / mark_resolved), SEC filings (sec_filings/sec_days,
+                    company_name_index, note_filing_matched), identity
+                    (handle_for_domain, rename_handle), deal-flow pipeline,
                     llm_verdicts cache, score_overrides, and the user-owned
                     startup data layer: startup_columns (schema: select/
                     multiselect/text/number/checkbox, options, ai_fill flag,
@@ -280,6 +281,28 @@ scout/
                     UnlinkedLeads keyed on the article URL. Off-thesis
                     entries are dropped in parse_entries (heuristics.
                     matches_any) before they can spend classification budget.
+  ingest/sec_src.py SEC Form D discovery — the government record of every
+                    US private raise (issuer, amount sold, first-sale date,
+                    officers by name). Reads the EDGAR daily form index
+                    (one file per business day; 404 = weekend, marked read
+                    empty) and primary_doc.xml per filing, under SEC's
+                    fair-access rules (SEC_USER_AGENT with contact, ≤10
+                    req/s). Most Form Ds are funds: is_startup_filing is the
+                    gate (pooled-fund flags, vehicle-shaped names dropped
+                    BEFORE any XML fetch, seeds.sec_industries,
+                    SEC_MAX_OFFERING_USD, over-five-years incorporations).
+                    A kept filing whose issuer name-joins a tracked company
+                    (companies.normalize_company_name; exact key, legal
+                    suffixes stripped) attaches to that row: sec_filings.
+                    matched_handle, a filing_matched event (digest alert,
+                    card chip), research context for the next refresh/
+                    resolve (research_company extra_context → the agent
+                    cites it as funding_evidence), and a hindsight Outcome
+                    with the REAL first-sale date (outcome_from_filing).
+                    An unmatched new issuer becomes an UnlinkedLead for
+                    `scout resolve`; store.unresolved_leads interleaves
+                    sources so a filing day cannot starve headlines. No
+                    stage label is ever inferred from an amount.
   graph.py          The knowledge graph, pure: typed evidence-carrying
                     edges (investor/person/lab/watcher/company) derived from
                     fields the pipeline already sourced — funding_investors,
@@ -303,12 +326,15 @@ scout/
                     message shape tests without network; post_slack swallows
                     its own failures — a Slack outage must never break a
                     triage click.
-  hindsight.py      The backtest. Outcomes now come from TWO sources:
-                    hand-curated outcomes.yaml and the auto-captured rounds
+  hindsight.py      The backtest. Outcomes come from THREE sources:
+                    hand-curated outcomes.yaml, the auto-captured rounds
                     `scout refresh` writes to store.outcomes the moment a
                     tracked company's newly-cited round lands
-                    (outcome_from_auto / merge_outcomes; YAML wins key
-                    collisions — it carries the real announce date). Reconstructs public evidence as it stood on
+                    (outcome_from_auto; detection date), and SEC Form Ds
+                    matched to tracked companies (outcome_from_filing; the
+                    sworn first-sale date — the one automated source that
+                    knows when the round happened). merge_outcomes: YAML
+                    wins key collisions. Reconstructs public evidence as it stood on
                     a past date (HN Algolia archive + GitHub starring
                     TIMESTAMPS, never today's counts), scores it with the
                     SAME pipeline production uses, and compares against
@@ -394,7 +420,9 @@ scout/
                     not the publisher root) + candidate_company_links /
                     pick_company_domain (outbound domains, matched on the
                     headline's first distinctive word; None over a guess).
-tests/              pytest, no network — test_identity (domain→handle,
+tests/              pytest, no network — test_sec (index/XML parsers on
+                    recorded shapes, the fund gates, name-join, stubbed
+                    end-to-end discover), test_identity (domain→handle,
                     rename_handle across every table, reconcile, merge),
                     test_resolve (free-before-paid, once-only stamps,
                     check-before-call budget, tracked-company overlay),

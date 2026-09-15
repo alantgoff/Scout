@@ -401,6 +401,10 @@ def _discovery_sources(
         from scout.ingest.rss_src import RSSSource
 
         sources.append(RSSSource(settings, store))
+    if "sec" in names:
+        from scout.ingest.sec_src import SECSource
+
+        sources.append(SECSource(settings, store))
     return sources
 
 
@@ -1200,6 +1204,16 @@ def _parse_add_target(target: str) -> tuple[str, str | None, str | None]:
     return slug, website, website
 
 
+def _filing_context(store: Store, handle: str) -> str:
+    """SEC Form Ds matched to this company, as research context lines."""
+    rows = store.filings_for(handle)
+    if not rows:
+        return ""
+    from scout.ingest.sec_src import filing_lines
+
+    return "SEC Form D filings on file:\n" + filing_lines(rows[:3])
+
+
 class _NoCompany(Exception):
     """Research established there is no company behind the domain."""
 
@@ -1220,6 +1234,7 @@ def _company_lead(
     do_classify: bool = True,
     force: bool = False,
     rekey_to_found_handle: bool = True,
+    extra_context: str = "",
 ) -> tuple[Lead, Account, agents.CompanyProfile, dict]:
     """A domain (or handle) → a Lead judged by the same code as a discovered one.
 
@@ -1261,9 +1276,14 @@ def _company_lead(
     if do_research and website:
         console.print("Researching the company...")
         try:
+            # Filings already matched to this handle ride along as context:
+            # the agent cites a government record over a press line.
+            on_file = "\n".join(bit for bit in (
+                extra_context, _filing_context(store, handle)) if bit)
             profile, research_meta = agents.research_company(
                 website, settings, store=store,
                 site_text=web.bundle_text(pages, settings.web_text_max_chars),
+                extra_context=on_file,
                 on_event=lambda kind, detail: console.print(
                     f"  [dim]{kind}: {detail[:90]}[/dim]"),
             )
@@ -1729,6 +1749,7 @@ def refresh(
         try:
             profile, meta = agents.research_company(
                 domain, settings, store=store,
+                extra_context=_filing_context(store, handle),
                 on_event=lambda kind, detail: console.print(
                     f"  [dim]{kind}: {detail[:90]}[/dim]"),
             )
@@ -1781,6 +1802,17 @@ def _is_person_signal(item: UnlinkedLead) -> bool:
     if host not in (None, "news.ycombinator.com"):
         return False
     return not item.bio.lower().startswith("show hn")
+
+
+def _attach_filing(store: Store, filing_url: str, handle: str) -> None:
+    """The Form D an unlinked lead came from now belongs to a real row."""
+    if not store.db["sec_filings"].exists():
+        return
+    for row in store.db["sec_filings"].rows_where("url = ?", [filing_url], limit=1):
+        store.set_filing_match(row["accession"], handle)
+        matched = [f for f in store.filings_for(handle) if f["accession"] == row["accession"]]
+        if matched:
+            store.note_filing_matched(handle, matched[0])
 
 
 @app.command()
@@ -1897,6 +1929,7 @@ def resolve(
                 handle, website, profile_url, store=store, settings=settings,
                 thesis=thesis, note=f"{headline} — via {item.source}",
                 source=item.source, rekey_to_found_handle=rekey,
+                extra_context=(f"{item.bio} — {item.url}" if item.source == "sec" else ""),
             )
         except _NoCompany as exc:
             console.print(f"  [dim]no company at {domain}: {exc}[/dim]")
@@ -1913,6 +1946,8 @@ def resolve(
                 prior.llm.funding_stage or "unknown",
             ))
         created.append(lead)
+        if item.source == "sec":
+            _attach_filing(store, item.ref, account.handle)
         store.mark_resolved(item.source, item.ref, f"bridged:@{account.handle}")
         store.note_lead_resolved(account.handle, source=item.source, headline=headline,
                                  url=item.url, score=lead.score)
@@ -2595,6 +2630,17 @@ def hindsight(
     # the dataset. Curated YAML wins key collisions (it usually carries the
     # real announce date; the auto row only knows when the refresh noticed).
     auto = [hs.outcome_from_auto(row) for row in store.auto_outcomes()]
+    # Matched Form Ds: the one outcomes source with a real first-sale date.
+    for row in store.matched_filings():
+        tracked = store.latest_lead(row["matched_handle"])
+        domain = ""
+        if tracked is not None:
+            domain = (urlparse(
+                (tracked.llm.company_url if tracked.llm else None)
+                or tracked.account.website or "").hostname or "").removeprefix("www.")
+        outcome = hs.outcome_from_filing(row, domain=domain)
+        if outcome is not None:
+            auto.append(outcome)
     if auto:
         before = len(outcomes)
         outcomes = hs.merge_outcomes(outcomes, auto)
@@ -2842,7 +2888,7 @@ def budget() -> None:
 
 
 _X_STRATEGIES = {"lists", "searches", "bio", "graph"}
-_DISCOVERY_STRATEGIES = {"github", "hn", "arxiv"}
+_DISCOVERY_STRATEGIES = {"github", "hn", "arxiv", "rss", "sec"}
 
 
 @app.command("source")

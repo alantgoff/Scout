@@ -1339,6 +1339,7 @@ def _load_filtered_ledger(
 # still showing the new status immediately.
 pipeline = store.all_pipeline()
 overrides = store.all_overrides()
+filings_on_file = store.filings_by_handle()  # SEC Form Ds matched to tracked rows
 attrs_by_handle = store.all_attrs()
 votes_by_handle = store.all_votes()
 comment_counts = store.all_comment_counts()
@@ -2258,6 +2259,16 @@ def _lead_card(
         chips.append((STATUS_LABELS.get(status, status), "status"))
     if overrides.get(handle_key):
         chips.append(("Adjusted", "accent"))
+    if filed := filings_on_file.get(handle_key):
+        # A government record of a raise: the one funding chip that is not
+        # a model's reading of a bio.
+        from scout.ingest.sec_src import money
+
+        latest = filed[0]
+        amount = latest.get("amount_sold") or latest.get("amount_offered")
+        chips.append(("🏛 Form D" + (f" {money(amount)}" if amount else "")
+                      + (f" · {latest['first_sale']}" if latest.get("first_sale") else ""),
+                      "accent"))
     if entry and entry.is_new:
         chips.append(("New", "accent"))
     if entry and entry.score_delta is not None and abs(entry.score_delta) >= 1:
@@ -4086,11 +4097,21 @@ if nav == "Thesis":
                      "leads; entries linking to an ARTICLE about one are kept "
                      "as unlinked leads rather than filed under the publisher.",
             )
+            sec_industries = st.text_area(
+                "SEC Form D industries", _to_lines(seeds.sec_industries), height=90,
+                help="Every US private raise files a Form D within 15 days. The "
+                     "sec source keeps filings in these industry groups (the "
+                     "form's own vocabulary: Other Technology, Computers, "
+                     "Telecommunications, Business Services, Manufacturing, "
+                     "Biotechnology…), attaches ones that match a tracked "
+                     "company, and hands new issuers to `scout resolve`.",
+            )
             if st.form_submit_button("Save watchlist", type="primary"):
                 save_seeds(seeds.model_copy(update={
                     "watchlist": _from_lines(watchlist), "tastemakers": [],
                     "github_topics": _from_lines(github_topics),
                     "rss_feeds": _from_lines(rss_feeds),
+                    "sec_industries": _from_lines(sec_industries),
                     "lists": _from_lines(lists)}), SEEDS_PATH)
                 st.success("Saved."); st.rerun()
 
@@ -4377,7 +4398,7 @@ if nav == "Thesis":
 DB_TABLE_ORDER = [
     "leads", "accounts", "tweets", "llm_verdicts", "pipeline",
     "startup_columns", "startup_attrs", "score_overrides", "websites", "runs",
-    "unlinked_leads", "follow_edges", "follow_meta", "bio_snapshots",
+    "unlinked_leads", "sec_filings", "follow_edges", "follow_meta", "bio_snapshots",
     "searches", "xapi_usage", "scan", "scan_history",
 ]
 DB_TABLE_HELP = {
@@ -4394,6 +4415,9 @@ DB_TABLE_HELP = {
     "unlinked_leads": "GitHub/HN/RSS signals with no company key yet; "
                       "`scout resolve` works through them and stamps each "
                       "with what it became.",
+    "sec_filings": "Startup-shaped SEC Form Ds: issuer, amount sold, first "
+                    "sale, officers; matched_handle when it landed on a "
+                    "tracked company.",
     "follow_edges": "Investor follow-graph snapshots (the smart-money signals).",
     "follow_meta": "Per-watcher snapshot baselines.",
     "bio_snapshots": "Bio history behind the bio_change signal.",
@@ -5096,6 +5120,12 @@ _VERB_TEXT = {
     "handle_merged": lambda p: (
         f"merged @{p.get('from', '')} into this company"
         + (f" ({p['rows']} rows)" if p.get("rows") else "")
+    ),
+    "filing_matched": lambda p: (
+        "filed an SEC Form D" + (" amendment" if p.get("amendment") else "")
+        + (f" — ${p['amount_sold']:,} sold" if p.get("amount_sold") else
+           (f" — ${p['amount_offered']:,} offered" if p.get("amount_offered") else ""))
+        + (f", first sale {p['first_sale']}" if p.get("first_sale") else "")
     ),
     "lead_resolved": lambda p: (
         f"resolved from {p.get('source', 'a signal')}"

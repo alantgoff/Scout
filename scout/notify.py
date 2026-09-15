@@ -183,13 +183,28 @@ def digest_data(store: Store, since: datetime, window: str = "daily") -> dict:
 
     alerts: list[dict] = []
     for event in events:
-        if (event.verb not in ("company_status_changed", "funding_round_detected")
+        if (event.verb not in ("company_status_changed", "funding_round_detected",
+                               "filing_matched")
                 or not event.handle):
             continue
         lead = next((e.lead for e in ledger
                      if e.lead.account.handle.lower() == event.handle), None)
         payload = event.payload or {}
-        if event.verb == "funding_round_detected":
+        if event.verb == "filing_matched":
+            # A government record of a raise on a company the firm tracks.
+            sold = payload.get("amount_sold") or 0
+            offered = payload.get("amount_offered")
+            label = "🏛 SEC Form D" + (" amendment" if payload.get("amendment") else "")
+            if sold:
+                label += f" · ${sold:,} sold"
+            elif offered:
+                label += f" · ${offered:,} offered"
+            note = " · ".join(bit for bit in (
+                f"first sale {payload['first_sale']}" if payload.get("first_sale") else "",
+                "officers: " + "; ".join(payload.get("officers") or [])
+                if payload.get("officers") else "",
+            ) if bit)
+        elif event.verb == "funding_round_detected":
             from scout.models import FUNDING_STAGE_LABELS
 
             label = "💰 raised " + FUNDING_STAGE_LABELS.get(

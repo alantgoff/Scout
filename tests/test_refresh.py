@@ -78,7 +78,7 @@ def _stub_research(monkeypatch, profiles: dict[str, CompanyProfile]):
 
     calls: list[str] = []
 
-    def fake(domain, settings, *, site_text="", on_event=None, store=None):
+    def fake(domain, settings, *, site_text="", on_event=None, store=None, **_kw):
         calls.append(domain)
         profile = profiles.get(domain, CompanyProfile())
         if store is not None:

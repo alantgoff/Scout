@@ -70,6 +70,15 @@ rss_feeds: []
 #  - https://www.ycombinator.com/launches/rss
 #  - https://techcrunch.com/category/startups/feed/
 #  - https://news.ycombinator.com/rss
+# SEC Form D industry groups the sec source keeps (the form's own vocabulary).
+# Every US private raise files one; these decide which issuers are worth the
+# resolver's time. Robotics hardware often files under Manufacturing.
+sec_industries:
+- Other Technology
+- Computers
+- Telecommunications
+- Business Services
+- Manufacturing
 # arXiv categories swept for on-thesis papers. These are the earliest place a
 # technical founder appears — often a year before a repo or a stealth bio.
 # Which affiliations count as a frontier lab is signal mechanics and lives in
