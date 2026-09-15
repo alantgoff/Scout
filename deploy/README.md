@@ -99,3 +99,21 @@ still open the upgraded file.
   `sqlite3 /var/lib/scout/scout.db ".backup /var/lib/scout/backups/scout-$(date +\%a).db"`
 - Restore drill: `litestream restore -o /tmp/restored.db <replica-url>` then
   point a local `DB_PATH` at it and check the Startups page renders.
+
+## 6. The phone app (optional) — Vercel or GitHub Pages
+
+`scout publish` renders a read-only, installable phone app of the deal flow
+into `docs/` — lead data only, never notes, votes, spend or secrets — and the
+worker runs it at 07:45 every morning (`publish --auto`) after the digest.
+
+- **Vercel (recommended — it takes a password).** `npm i -g vercel`, then
+  once, as the `scout` user: `cd /opt/scout/docs && vercel link`. Put a
+  `VERCEL_TOKEN` in `scout.env` so the worker can deploy headlessly, and set
+  `DIGEST_PASSWORD` in the Vercel project's environment variables — the
+  bundled Edge Middleware enforces HTTP Basic auth on every request except the
+  manifest and icon. Unset = open.
+- **GitHub Pages.** Set `DIGEST_REPO` to a public repo; `publish --push`
+  commits `docs/` there. Public by construction — `noindex` only.
+
+Both can be on at once; `--auto` uses whatever is configured.
+

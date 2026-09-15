@@ -16,6 +16,12 @@ real installable app that still opens on a plane. Everything is one
 self-contained index.html — server-rendered cards (testable as strings),
 no build step, no JS dependencies.
 
+The output directory is deployable as-is to GitHub Pages OR Vercel: the
+Vercel files (vercel.json, middleware.js, robots.txt) are inert on Pages
+and, on Vercel, add the one thing Pages cannot — a real password on a deal
+flow digest (Edge Middleware, Basic auth from a DIGEST_PASSWORD env var;
+open until it is set). `scout publish --vercel` deploys it.
+
 The privacy boundary is the module's contract: lead data, verdicts,
 pipeline STATUS and briefs go public; notes, votes, comments, spend and
 config never do. The page stays <meta name="robots" content="noindex">.
@@ -665,21 +671,32 @@ _MANIFEST = """{
 """
 
 # Network-first with cache fallback: a fresh publish lands on the next online
-# open, and a plane/tunnel serves the last one instead of a dinosaur.
-_SW_JS = """const CACHE = "scout-digest-v1";
+# open, and a plane/tunnel serves the last one instead of a dinosaur. The
+# cache name carries the publish stamp so a new deploy's activate step
+# evicts every older cache, and only OK responses are cached — behind an
+# auth gate, caching a 401 would make "offline" mean "locked out".
+_SW_JS = """const CACHE = "scout-digest-__STAMP__";
 const SHELL = ["./", "index.html", "icon.png", "manifest.webmanifest"];
 self.addEventListener("install", (e) => {
-  e.waitUntil(caches.open(CACHE).then((c) => c.addAll(SHELL)));
+  e.waitUntil(caches.open(CACHE).then((c) => c.addAll(SHELL)).catch(() => {}));
   self.skipWaiting();
 });
-self.addEventListener("activate", (e) => e.waitUntil(self.clients.claim()));
+self.addEventListener("activate", (e) => {
+  e.waitUntil(
+    caches.keys().then((keys) => Promise.all(
+      keys.filter((k) => k !== CACHE).map((k) => caches.delete(k))
+    )).then(() => self.clients.claim())
+  );
+});
 self.addEventListener("fetch", (e) => {
   if (e.request.method !== "GET") return;
   e.respondWith(
     fetch(e.request)
       .then((resp) => {
-        const copy = resp.clone();
-        caches.open(CACHE).then((c) => c.put(e.request, copy));
+        if (resp.ok) {
+          const copy = resp.clone();
+          caches.open(CACHE).then((c) => c.put(e.request, copy));
+        }
         return resp;
       })
       .catch(() => caches.match(e.request, { ignoreSearch: true }))
@@ -687,17 +704,102 @@ self.addEventListener("fetch", (e) => {
 });
 """
 
+# Vercel project config for the output directory. Static site, no build:
+# never indexed, HTML and the service worker always revalidated (a publish
+# must land on the next open), the icon cached for a week.
+_VERCEL_JSON = """{
+  "$schema": "https://openapi.vercel.sh/vercel.json",
+  "cleanUrls": true,
+  "trailingSlash": false,
+  "headers": [
+    {
+      "source": "/(.*)",
+      "headers": [
+        { "key": "X-Robots-Tag", "value": "noindex, nofollow, noarchive" },
+        { "key": "X-Content-Type-Options", "value": "nosniff" },
+        { "key": "Referrer-Policy", "value": "no-referrer" }
+      ]
+    },
+    {
+      "source": "/(index.html|sw.js|)",
+      "headers": [{ "key": "Cache-Control", "value": "public, max-age=0, must-revalidate" }]
+    },
+    {
+      "source": "/icon.png",
+      "headers": [{ "key": "Cache-Control", "value": "public, max-age=604800" }]
+    }
+  ]
+}
+"""
 
-def build_digest(store: Store, thesis: Thesis, out_dir: Path) -> Path:
+# Vercel Edge Middleware: HTTP Basic auth on everything except the manifest
+# and icon (the browser fetches those without credentials, and "Add to Home
+# Screen" needs them). The password is the DIGEST_PASSWORD env var set in
+# the Vercel project — nothing here holds a secret, so the file is safe to
+# publish. Unset = open, the bootstrap state; set it before sharing a URL.
+_MIDDLEWARE_JS = """export const config = {
+  matcher: ["/((?!manifest\\.webmanifest|icon\\.png).*)"],
+};
+
+function timingSafeEqual(a, b) {
+  if (a.length !== b.length) return false;
+  let diff = 0;
+  for (let i = 0; i < a.length; i++) diff |= a.charCodeAt(i) ^ b.charCodeAt(i);
+  return diff === 0;
+}
+
+export default function middleware(request) {
+  const expected = process.env.DIGEST_PASSWORD || "";
+  if (!expected) return;  // no password configured yet: open
+  const header = request.headers.get("authorization") || "";
+  const [scheme, encoded] = header.split(" ");
+  if (scheme === "Basic" && encoded) {
+    let decoded = "";
+    try { decoded = atob(encoded); } catch (_) { decoded = ""; }
+    const password = decoded.slice(decoded.indexOf(":") + 1);
+    if (timingSafeEqual(password, expected)) return;
+  }
+  return new Response(
+    "<!doctype html><meta name=viewport content=width=device-width>"
+    + "<title>Scout</title><p style=font-family:system-ui;padding:2rem>"
+    + "Scout deal flow — sign in with the shared password.</p>",
+    {
+      status: 401,
+      headers: {
+        "WWW-Authenticate": 'Basic realm="Scout digest", charset="UTF-8"',
+        "Content-Type": "text/html; charset=utf-8",
+        "Cache-Control": "no-store",
+      },
+    }
+  );
+}
+"""
+
+_ROBOTS_TXT = "User-agent: *\nDisallow: /\n"
+
+# The output directory is its own git checkout (the digest repo); the Vercel
+# CLI's link file must not ride along in it.
+_OUT_GITIGNORE = ".vercel/\n"
+
+
+def build_digest(store: Store, thesis: Thesis, out_dir: Path,
+                 *, stamp: str | None = None) -> Path:
     """Render the app into out_dir: index.html + manifest + service worker
-    + icon. Returns the index path."""
+    + icon, plus the Vercel files (inert on GitHub Pages). `stamp` names
+    the service-worker cache for this publish; a new stamp evicts the old
+    cache on the next open. Returns the index path."""
     context = digest_context(store, thesis)
     out_dir.mkdir(parents=True, exist_ok=True)
+    stamp = stamp or datetime.now(timezone.utc).strftime("%Y%m%d%H%M%S")
     path = out_dir / "index.html"
     path.write_text(render_page(context, thesis), encoding="utf-8")
     (out_dir / "manifest.webmanifest").write_text(_MANIFEST, encoding="utf-8")
-    (out_dir / "sw.js").write_text(_SW_JS, encoding="utf-8")
+    (out_dir / "sw.js").write_text(_SW_JS.replace("__STAMP__", stamp), encoding="utf-8")
     (out_dir / "icon.png").write_bytes(_icon_png())
+    (out_dir / "vercel.json").write_text(_VERCEL_JSON, encoding="utf-8")
+    (out_dir / "middleware.js").write_text(_MIDDLEWARE_JS, encoding="utf-8")
+    (out_dir / "robots.txt").write_text(_ROBOTS_TXT, encoding="utf-8")
+    (out_dir / ".gitignore").write_text(_OUT_GITIGNORE, encoding="utf-8")
     return path
 
 

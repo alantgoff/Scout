@@ -4,6 +4,11 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import json
+
+from typer.testing import CliRunner
+
+from scout.cli import app
 from scout.config import Thesis
 from scout.models import Account, Lead, LLMVerdict, Signal
 from scout.publish import build_digest, _icon_png
@@ -215,3 +220,94 @@ def test_private_judgments_never_publish(tmp_path: Path) -> None:
                         tmp_path / "docs").read_text(encoding="utf-8")
     assert "PRIVATE-NOTE-do-not-publish" not in page
     assert "7.77" not in page and "spend" not in page.lower()
+
+
+# --- Vercel: the same output directory, deployable with a password ------------
+
+runner = CliRunner()
+THESIS_PATH = Path(__file__).resolve().parent.parent / "thesis.yaml"
+
+
+def test_vercel_files_are_written_and_gate_only_the_page(tmp_path: Path) -> None:
+    store = seeded_store(tmp_path)
+    out = build_digest(store, Thesis(thesis="t"), tmp_path / "docs", stamp="20260915120000")
+    docs = out.parent
+
+    config = json.loads((docs / "vercel.json").read_text(encoding="utf-8"))
+    headers = {h["key"]: h["value"] for rule in config["headers"] for h in rule["headers"]}
+    assert headers["X-Robots-Tag"].startswith("noindex")
+    revalidated = next(r for r in config["headers"] if "index.html" in r["source"])
+    assert "must-revalidate" in revalidated["headers"][0]["value"]
+
+    middleware = (docs / "middleware.js").read_text(encoding="utf-8")
+    assert "export default function middleware" in middleware
+    assert "DIGEST_PASSWORD" in middleware and "WWW-Authenticate" in middleware
+    # The manifest and icon are fetched without credentials by the browser;
+    # gating them would break "Add to Home Screen".
+    assert "manifest" in middleware and "icon" in middleware
+    assert "if (!expected) return;" in middleware  # unset = open, never a lockout
+
+    assert (docs / "robots.txt").read_text(encoding="utf-8").strip().endswith("Disallow: /")
+    assert ".vercel/" in (docs / ".gitignore").read_text(encoding="utf-8")
+
+    sw = (docs / "sw.js").read_text(encoding="utf-8")
+    assert 'CACHE = "scout-digest-20260915120000"' in sw  # a new publish, a new cache
+    assert "caches.delete" in sw                          # old caches evicted on activate
+    assert "resp.ok" in sw                                # a 401 is never cached as the app
+
+    # No file in the output carries a secret — the password lives in Vercel.
+    for path in docs.iterdir():
+        if path.is_file():
+            assert "DIGEST_PASSWORD=" not in path.read_bytes().decode("utf-8", "ignore")
+
+
+def _publish(tmp_path: Path, *args: str):
+    return runner.invoke(
+        app, ["publish", *args, "--thesis", str(THESIS_PATH)],
+        env={"DB_PATH": str(tmp_path / "scout.db"), "DIGEST_REPO": "", "VERCEL_TOKEN": ""},
+    )
+
+
+def test_publish_auto_renders_only_when_no_host_is_configured(tmp_path: Path, monkeypatch) -> None:
+    """The worker's daily form must never fail for want of a host."""
+    monkeypatch.chdir(tmp_path)
+    Store(tmp_path / "scout.db")
+    result = _publish(tmp_path, "--auto")
+    assert result.exit_code == 0, result.output
+    assert "No deploy target configured" in result.output
+    assert (tmp_path / "docs" / "middleware.js").exists()
+
+
+def test_publish_vercel_without_the_cli_fails_loudly(tmp_path: Path, monkeypatch) -> None:
+    import shutil
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(shutil, "which", lambda name, *a, **kw: None)
+    Store(tmp_path / "scout.db")
+    result = _publish(tmp_path, "--vercel")
+    assert result.exit_code == 1
+    assert "Vercel CLI not found" in result.output
+
+
+def test_publish_vercel_deploys_a_linked_project_and_auto_finds_it(tmp_path: Path, monkeypatch) -> None:
+    from scout import cli
+
+    monkeypatch.chdir(tmp_path)
+    Store(tmp_path / "scout.db")
+    calls: list[Path] = []
+    monkeypatch.setattr(cli, "_deploy_to_vercel",
+                        lambda docs, settings: calls.append(docs) or "https://scout-digest.vercel.app")
+
+    result = _publish(tmp_path, "--vercel")
+    assert result.exit_code == 0, result.output
+    assert "scout-digest.vercel.app" in result.output
+    assert "DIGEST_PASSWORD" in result.output  # the reminder that the password lives in Vercel
+    assert calls == [Path("docs")]
+
+    # --auto deploys once docs/ is linked (`vercel link` writes .vercel/project.json).
+    (tmp_path / "docs" / ".vercel").mkdir()
+    (tmp_path / "docs" / ".vercel" / "project.json").write_text("{}")
+    result = _publish(tmp_path, "--auto")
+    assert result.exit_code == 0, result.output
+    assert len(calls) == 2 and "No deploy target" not in result.output
+

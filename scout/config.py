@@ -466,6 +466,12 @@ class Settings(BaseSettings):
     # it — the companies still raising seed rounds.
     yc_batches: int = 2
 
+    # Vercel (the phone app's other host). A token lets the worker deploy
+    # headlessly (`scout publish --vercel`); interactive use needs only a
+    # one-time `vercel link` inside docs/. The digest password is NOT here:
+    # it is the DIGEST_PASSWORD env var of the Vercel project.
+    vercel_token: str | None = None
+
     # Pipeline knobs
     max_accounts: int = 500  # cap accounts ingested per run
     ttl_days: int = 7  # skip accounts scored within the last N days

@@ -212,6 +212,18 @@ def handle_resolve(store: Store, settings: Settings, job: dict) -> dict:
     return {"log_path": str(log_path)}
 
 
+def handle_publish(store: Store, settings: Settings, job: dict) -> dict:
+    """Render the phone app and deploy it wherever the box is configured
+    to (GitHub Pages via DIGEST_REPO, Vercel via a linked project or
+    VERCEL_TOKEN) — `scout publish --auto`. Nothing configured just
+    renders docs/, so this never fails for want of a host."""
+    code, log_path, tail = _run_cli(["publish", "--auto"], settings, "publish",
+                                    job.get("requested_by", "system:scout"))
+    if code != 0:
+        raise RuntimeError(f"phone app publish exited {code}\n{tail}")
+    return {"log_path": str(log_path)}
+
+
 def handle_verify(store: Store, settings: Settings, job: dict) -> dict:
     code, log_path, tail = _run_cli(["verify"], settings, "verify",
                                     job.get("requested_by", "system:scout"))
@@ -227,6 +239,7 @@ HANDLERS = {
     jobs_mod.KIND_VERIFY: handle_verify,
     jobs_mod.KIND_REFRESH: handle_refresh,
     jobs_mod.KIND_RESOLVE: handle_resolve,
+    jobs_mod.KIND_PUBLISH: handle_publish,
 }
 
 
@@ -330,8 +343,9 @@ def bootstrap_schedules(store: Store, actor: str = "system:scout") -> list[int]:
 
     Chosen for a firm that wants Scout to be a standing process rather than
     a tool someone remembers to open: source every morning, resolve what the
-    run could not key, refresh the tracked list, then digest — so the
-    summary describes work that has finished.
+    run could not key, refresh the tracked list, digest, then publish the
+    phone app — so the summary and the deployed app describe work that has
+    finished.
     Idempotent — existing schedules of the same kind are left alone.
     """
     existing = {s["kind"] for s in store.schedules()}
@@ -367,5 +381,12 @@ def bootstrap_schedules(store: Store, actor: str = "system:scout") -> list[int]:
             "Morning digest", jobs_mod.KIND_DIGEST,
             jobs_mod.ScheduleSpec(daily_at="07:30", tz="UTC"),
             {"window": "daily"}, actor=actor,
+        ))
+    if jobs_mod.KIND_PUBLISH not in existing:
+        # Last: the deployed phone app reflects everything the morning did.
+        created.append(store.upsert_schedule(
+            "Phone app publish", jobs_mod.KIND_PUBLISH,
+            jobs_mod.ScheduleSpec(daily_at="07:45", tz="UTC"),
+            {}, actor=actor,
         ))
     return created

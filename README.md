@@ -248,11 +248,14 @@ graph        The knowledge graph: cross-links derived from evidence the
              portfolio-in-database, labs by founder alumni, acquirers,
              watchers) or `scout graph <name>` for one node's connections
              and the companies it shares a backer with.
-publish      Render docs/ as a read-only phone app for GitHub Pages —
-             Startups (search/sort/filters), Funnel, Graph, Alerts, offline
-             via a service worker. Lead data only; never notes, votes,
-             spend, secrets or config.
-  --push                   commit docs/ and push to DIGEST_REPO
+publish      Render docs/ as a read-only phone app — Startups (search/sort/
+             filters), Funnel, Graph, Alerts, offline via a service worker.
+             Lead data only; never notes, votes, spend, secrets or config.
+             The worker runs it every morning at 07:45 (--auto).
+  --push                   commit docs/ and push to DIGEST_REPO (GitHub Pages)
+  --vercel                 deploy docs/ to Vercel — password-protected via
+                           the bundled middleware (DIGEST_PASSWORD)
+  --auto                   push and/or deploy wherever configured
 budget       Today's spend envelope + Claude and X API ledgers
 demo         $0 offline end-to-end test
 ui           Launch the workspace
@@ -264,7 +267,8 @@ migrate      Adopt a single-user database into the multi-member schema
 worker       Run the background worker: schedules fire, queued jobs execute
   --bootstrap              create the default daily schedules: sourcing run
                            (06:00), unlinked-lead resolve (06:30), tracked
-                           refresh (06:45), digest (07:30)
+                           refresh (06:45), digest (07:30), phone app
+                           publish (07:45)
   --once                   drain the queue and exit (for cron)
 jobs         Queue state · --enqueue <kind> · --cancel <id>
 schedule     --list · --add <kind> --at 06:00 --weekdays --tz Europe/London
@@ -303,6 +307,31 @@ scout worker                            # run them (systemd unit in deploy/)
 litestream for continuous backup to object storage. One small VM is enough;
 SQLite in WAL mode handles a firm's concurrency comfortably, and the database
 is a single file you can copy.
+
+### The phone app on Vercel
+
+The workspace (Streamlit, the worker, SQLite) is a long-running process and
+belongs on that VM. The **phone app** `scout publish` renders is static, and
+Vercel is the better host for it than GitHub Pages: a custom domain, and —
+the part that matters for a deal-flow digest — a password. `scout publish`
+writes the Vercel files into `docs/` alongside the app (`vercel.json`,
+`middleware.js`, `robots.txt`; inert on Pages), so:
+
+```bash
+npm i -g vercel
+scout publish                 # render docs/
+cd docs && vercel link        # once: create/attach the Vercel project
+cd .. && scout publish --vercel
+```
+
+Then in the Vercel project → Settings → Environment Variables set
+`DIGEST_PASSWORD`. Until it is set the app is open; once set, every request
+except the manifest and icon needs the password (HTTP Basic auth, in the
+Edge Middleware — the files are never served without it). For the worker
+to deploy every morning, set `VERCEL_TOKEN` in `scout.env`; `publish --auto`
+deploys to whatever is configured and only renders when nothing is.
+Alternatively connect the `DIGEST_REPO` checkout to Vercel's Git integration
+(framework: Other, no build command) and `--push` deploys by itself.
 
 To run the backtest, describe the companies you want to test against in an
 outcomes file — see [`outcomes.example.yaml`](outcomes.example.yaml). It needs

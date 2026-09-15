@@ -28,8 +28,10 @@ KIND_DIGEST = "digest"
 KIND_VERIFY = "verify"
 KIND_REFRESH = "refresh_tracked"
 KIND_RESOLVE = "resolve_unlinked"
+KIND_PUBLISH = "publish_digest"
 
-JOB_KINDS = {KIND_RUN, KIND_MEMO, KIND_DIGEST, KIND_VERIFY, KIND_REFRESH, KIND_RESOLVE}
+JOB_KINDS = {KIND_RUN, KIND_MEMO, KIND_DIGEST, KIND_VERIFY, KIND_REFRESH, KIND_RESOLVE,
+             KIND_PUBLISH}
 
 JOB_LABELS = {
     KIND_RUN: "Sourcing run",
@@ -38,6 +40,7 @@ JOB_LABELS = {
     KIND_VERIFY: "Verification",
     KIND_REFRESH: "Tracked refresh",
     KIND_RESOLVE: "Unlinked-lead resolve",
+    KIND_PUBLISH: "Phone app publish",
 }
 
 # Terminal states never re-enter the queue.

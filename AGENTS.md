@@ -232,8 +232,9 @@ scout/
                     Long jobs run as SUBPROCESSES so a scraper segfault kills
                     a child, not the scheduler. bootstrap_schedules seeds the
                     daily rhythm: run 06:00 → unlinked-lead resolve 06:30 →
-                    tracked refresh 06:45 → digest 07:30, every day, bounded
-                    by DAILY_SPEND_CAP_USD.
+                    tracked refresh 06:45 → digest 07:30 → phone app
+                    publish 07:45, every day, bounded by
+                    DAILY_SPEND_CAP_USD.
   insights.py       Triage insights (shortlist-vs-pass contrast for the
                     weight agent) + the QUERY-YIELD scoreboard: query_hits
                     attribution (recorded by both adapters) joined to the
@@ -254,7 +255,7 @@ scout/
                     session_state["feed_q"] + nav_target. _empty_state() is
                     the one empty-state shape: what is empty AND the next
                     step.
-  publish.py        The GitHub Pages app: `scout publish` renders docs/ as
+  publish.py        The phone app (GitHub Pages OR Vercel): `scout publish` renders docs/ as
                     a self-contained read-only PWA — four hash-routed views
                     (Startups with client-side search/sort/filters off
                     data-* attributes, Funnel by FUNNEL_STAGES, Graph via
@@ -263,7 +264,20 @@ scout/
                     worker for offline. Privacy contract: leads, verdicts,
                     statuses and briefs publish; notes, votes, comments,
                     spend and config never do. digest_context gathers every
-                    store read; render_page is pure given it.
+                    store read; render_page is pure given it. build_digest
+                    also writes the Vercel files — vercel.json (noindex,
+                    revalidate HTML/sw, cache the icon), middleware.js
+                    (Edge Middleware: HTTP Basic auth from the project's
+                    DIGEST_PASSWORD env var, manifest+icon exempt so "Add
+                    to Home Screen" works; no secret in the file), robots
+                    .txt, a .gitignore for the CLI's .vercel/ link — inert
+                    on Pages. The service-worker cache is named per publish
+                    stamp and purged on activate; only OK responses are
+                    cached (behind auth, a cached 401 would lock offline
+                    users out). cli: `publish --push` (Pages) / `--vercel`
+                    (CLI deploy; needs `vercel link` in docs/ or
+                    VERCEL_TOKEN) / `--auto` (the worker's daily form:
+                    whatever is configured, else render only).
   ingest/rss_src.py RSS/Atom discovery — free, keyless, no rate limits; the
                     channel the X query bank cannot reach (launch feeds,
                     funding coverage, portfolio notes, company blogs). The

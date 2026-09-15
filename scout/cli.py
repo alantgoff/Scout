@@ -3319,21 +3319,74 @@ def strategy(
 # --------------------------------------------------------------------- publish
 
 
+def _vercel_linked(docs: Path, settings: Settings) -> bool:
+    """Whether `scout publish --vercel` has somewhere to deploy: a project
+    linked in docs/ (`vercel link`, one-time) or a token for a headless
+    deploy from the worker."""
+    return (docs / ".vercel" / "project.json").exists() or bool(settings.vercel_token)
+
+
+def _deploy_to_vercel(docs: Path, settings: Settings) -> str:
+    """Deploy the rendered directory as a static Vercel production
+    deployment; returns the URL. The CLI does the work — no build, the
+    files are the site — so the requirements are the CLI itself and a
+    linked project (or VERCEL_TOKEN)."""
+    import shutil
+    import subprocess as sp
+
+    if shutil.which("vercel") is None:
+        raise RuntimeError(
+            "Vercel CLI not found — `npm i -g vercel`, then run `vercel link` "
+            "once inside docs/ (or set VERCEL_TOKEN for headless deploys)."
+        )
+    if not _vercel_linked(docs, settings):
+        raise RuntimeError(
+            "docs/ is not linked to a Vercel project — run `vercel link` inside "
+            "docs/ once (or set VERCEL_TOKEN in .env)."
+        )
+    args = ["vercel", "deploy", "--prod", "--yes"]
+    if settings.vercel_token:
+        args += ["--token", settings.vercel_token]
+    result = sp.run(args, cwd=str(docs), capture_output=True, text=True)
+    if result.returncode != 0:
+        raise RuntimeError((result.stderr or result.stdout).strip()[-800:])
+    lines = [line.strip() for line in result.stdout.splitlines() if line.strip()]
+    return lines[-1] if lines else "(no URL reported)"
+
+
 @app.command()
 def publish(
     push: Annotated[
         bool,
         typer.Option("--push", help="Commit docs/ and push — updates GitHub Pages."),
     ] = False,
+    vercel: Annotated[
+        bool,
+        typer.Option("--vercel", help="Deploy docs/ to Vercel (production) with "
+                     "the Vercel CLI — needs `vercel link` once in docs/, or "
+                     "VERCEL_TOKEN."),
+    ] = False,
+    auto: Annotated[
+        bool,
+        typer.Option("--auto", help="The scheduled form: push and/or deploy "
+                     "wherever configured (DIGEST_REPO, a linked Vercel project); "
+                     "just render when nothing is."),
+    ] = False,
     thesis_path: Annotated[Path, typer.Option("--thesis")] = Path("thesis.yaml"),
 ) -> None:
-    """Render the phone app (docs/) for GitHub Pages.
+    """Render the phone app (docs/) and, optionally, deploy it.
 
     A read-only, installable snapshot of the deal flow — four views behind
     a tab bar: Startups (search, sort, filters), Funnel (pipeline by
     status), Graph (the knowledge-graph canvas), Alerts (acquisitions,
     arrivals, movers) — plus a manifest and service worker so it opens
     offline. Lead data only — never notes, votes, spend, secrets or config.
+
+    Two hosts, same output: --push commits docs/ to DIGEST_REPO for GitHub
+    Pages; --vercel deploys it to Vercel, where the bundled middleware puts
+    a password on it (set DIGEST_PASSWORD in the Vercel project). The
+    worker runs `publish --auto` every morning after the digest, so the
+    deployed app is never older than today's run.
     """
     import subprocess as sp
 
@@ -3345,9 +3398,28 @@ def publish(
     docs = Path("docs")
     path = build_digest(store, thesis, docs)
     console.print(f"Digest written: [bold]{path}[/bold]")
-    if not push:
-        console.print("[dim]Re-run with --push to publish it to GitHub Pages.[/dim]")
+    if auto:
+        push = bool(settings.digest_repo)
+        vercel = _vercel_linked(docs, settings)
+        if not push and not vercel:
+            console.print("[dim]No deploy target configured (DIGEST_REPO or a "
+                          "linked Vercel project) — rendered only.[/dim]")
+            return
+    if not push and not vercel:
+        console.print("[dim]Re-run with --push (GitHub Pages) or --vercel to "
+                      "deploy it.[/dim]")
         return
+    if vercel:
+        try:
+            url = _deploy_to_vercel(docs, settings)
+        except RuntimeError as exc:
+            console.print(f"[red]Vercel deploy failed:[/red] {exc}")
+            raise typer.Exit(1) from None
+        console.print(f"Deployed to Vercel — [bold]{url}[/bold] [dim](the password "
+                      "is the DIGEST_PASSWORD env var in the Vercel project; "
+                      "unset = open)[/dim]")
+        if not push:
+            return
     if not settings.digest_repo:
         console.print(
             "[red]DIGEST_REPO is not set in .env[/red] — point it at a PUBLIC "
