@@ -73,7 +73,7 @@ time.
 ## 2. Run it / test it — always via `./scout-cli` or `uv run`
 
 ```bash
-uv run pytest -q                 # ~445 tests, ~25s, no network (incl. AppTest UI smoke tests)
+uv run pytest -q                 # ~630 tests, ~40s, no network (incl. AppTest UI smoke tests)
 ./scout-cli demo                 # $0 offline end-to-end run on sample founders — best smoke test
 ./scout-cli source --strategy github,hn   # free live discovery, no scoring
 ./scout-cli ui                   # Streamlit workspace on :8501
@@ -375,12 +375,9 @@ scout/
                     signals); company_key/group_by_company fold accounts
                     sharing a company into one entry (primary = highest score).
   demo_data.py      8 synthetic sample founders for `scout demo` (obviously fake handles).
-  publish.py        Phone digest: renders the ledger to docs/index.html (mobile
-                    page for GitHub Pages in the separate public DIGEST_REPO
-                    checkout); `scout publish [--push]`.
-  ui.py             Streamlit app, NINE pages: Thesis / Startups (Feed +
+  ui.py             Streamlit app, TEN pages: Thesis / Startups (Feed +
                     Database) / Longlist / Shortlist / Memos / Activity /
-                    Evidence / Automation / Settings. Session-state nav
+                    Graph / Evidence / Automation / Settings. Session-state nav
                     (nav_target routes across pages — the card Memo button lands
                     on Memos and auto-generates); Slack deep links arrive as
                     ?s=<handle>&p=<page> and are translated into that same
@@ -388,11 +385,11 @@ scout/
                     row-select; per-card Q/F/S score breakout + Adjust-scoring
                     popover; Memos page with in-place editing, version history
                     and .md/.pdf export. Headline design language. ~5200 lines.
-                    Heavy reads (latest leads, ledger, pipeline, overrides,
-                    attrs, stale handles, votes, comment counts, users) load
-                    through st.cache_data keyed on the DB file stamp
-                    (_db_stamp) — Streamlit reruns the whole script per click,
-                    and re-parsing every stored lead's JSON dominated latency;
+                    The ledger and graph edges load through st.cache_data
+                    keyed on store.ledger_stamp() (content, not file mtime —
+                    see the first ui.py entry above); judgment state is read
+                    fresh. Streamlit reruns the whole script per click, and
+                    re-parsing every stored lead's JSON dominated latency;
                     provenance backfills are session-gated
                     (st.session_state["thesis_synced"]). The backtest's
                     per-signal statistics are cached separately
@@ -481,9 +478,9 @@ conftest.py         sys.path shim for pytest.
 .streamlit/config.toml   Headless config for the UI.
 ```
 
-Future-hook stubs that are intentionally unbuilt: `linkedin_src.py`, star-velocity
-diffing in `github_src.py`. (`--watch` in `cli.run` is no longer one of them —
-it was removed rather than left as a lie, and now points at `scout worker`.)
+Future-hook stubs that are intentionally unbuilt: `linkedin_src.py`. (Star
+velocity is built — see the signals table in §5. `--watch` in `cli.run` was
+removed rather than left as a lie, and now points at `scout worker`.)
 
 ---
 
@@ -498,7 +495,7 @@ GitHubSource.discover ──────────┤─►  merge (by handle)
 HackerNewsSource.discover ──────┘                              │  (store history:
                                                                │   bio_change, recent_followed_by)
       ▼
-run_heuristics(account, tweets, thesis)  →  9 Signals + disqualified?
+run_heuristics(account, tweets, thesis)  →  11 Signals + disqualified?
       ▼   (gate: ≥1 signal hit; ranked by pre-score, capped at LLM_MAX_CANDIDATES)
 classify(candidates, thesis, settings, store)  →  {handle: LLMVerdict}
       (cache-first via llm_verdicts fingerprint; batches run concurrently)
@@ -576,9 +573,9 @@ product evidence); the classifier prompt renders both rubrics from
 `rubric.prompt_block()` via the `{scorecard}` placeholder, so prompt and
 math can never drift.
 
-The 9 signals (heuristics.py). Three read enrichment fields set by the pipeline
+The 11 signals (heuristics.py). Five read enrichment fields set by the pipeline
 from store history, not by adapters — `recent_followed_by`, `bio_changed`,
-`github_repo`; `source_corroboration` reads `Account.sources`, filled by
+`github_repo`, `lab_move`, `star_velocity`; `source_corroboration` reads `Account.sources`, filled by
 `cli._merge_accounts`, the twscrape adapter's internal dedupe, and
 `cli._reconcile_identities` (which unions the stored row's sources onto a
 sighting that lands on an already-tracked handle — the first time a company
@@ -594,6 +591,7 @@ found on X AND in a feed corroborates itself):
 | launch_traction | recent launch-y tweet with engagement/followers > floor |
 | builder_evidence | github/personal-site link in bio |
 | github_evidence | discovered via a recent starred repo (source=="github") |
+| lab_departure | the person's PUBLISHED affiliation moved (`lab_move`, from arXiv paper history via `store.authors_who_moved`) — the departure_signal event observed at the source, usually months earlier |
 | star_velocity | stars the discovery repo gained over `signal_params.star_velocity_window_days` (full credit at `star_velocity_full`); enrichment from the GitHub source's daily snapshots (store.record_repo_stars / star_deltas), 0 until a baseline exists; reconstructed at a cutoff in hindsight from stargazer timestamps (count_stars) |
 | source_corroboration | 2+ distinct discovery strategies surfaced the account (full credit at 3) |
 
@@ -626,7 +624,13 @@ in the DB keep the model's numbers; overrides live only in their own table.
 | searches | per-query TTL cache (xapi mode: repeat runs free) |
 | follow_edges, follow_meta | investor follow-graph snapshots + per-watcher baseline |
 | bio_snapshots | bio history for bio_change detection |
-| unlinked_leads | github/hn founders with no X handle (manual lookup) |
+| unlinked_leads | github/hn/rss/sec/yc signals with no company key yet, pk (source, ref); `scout resolve` works rss/hn/sec ones once each and stamps `resolved_at`/`resolution` (never written by a source upsert) |
+| sec_filings, sec_days | startup-shaped Form Ds (pk accession; officers JSON; `matched_handle` when name-joined to a tracked company) + which EDGAR index days were read (404 days marked empty, so the lookback heals) |
+| repo_stars | append-only (repo_url, stars, seen_at) snapshots from each GitHub discovery run — the star_velocity baseline (`star_deltas`) |
+| outcomes | rounds auto-captured by `refresh`/`resolve` when a newly cited round lands (one per handle+round; emits `funding_round_detected`) — the backtest's automated positives |
+| query_hits | append-only (query, handle) attribution: which search surfaced whom — the query-yield scoreboard's input |
+| edges | the knowledge graph, DERIVED: fully rebuilt from the ledger on every save (`rebuild_graph`), so a corrected verdict retracts what it implied |
+| llm_usage | Claude spend ledger (tokens, searches, cost per agent) — with xapi_usage, the input to `spend_today_usd` and the daily envelope |
 | pipeline | deal-flow state: status, notes, outreach, channel, brief (the investment memo) + brief_at / brief_edited_at / brief_meta_json (depth, sources, searches, honesty flags) |
 | score_overrides | the investor's manual scoring per handle (scorecard sections 0–100 / legacy quality dims / fit / pinned score + note) — applied at load by `score.apply_override` |
 | startup_columns | the Database CRM's user-owned column schema: key, label, type (select/multiselect/text/number/checkbox), options_json, builtin, ai_fill, position. Seeded ONCE by `ensure_default_columns` (table existence suppresses re-seeding, so deleting a builtin sticks) |
@@ -1024,8 +1028,9 @@ capability that could mislead, add its limitation there in the same commit.
 
 - The whole script re-executes on **every interaction**. Anything expensive
   must go through `st.cache_data` keyed on something that actually changes
-  (`_db_stamp()` for store reads, the immutable report JSON for backtest
-  statistics). A 480ms computation called twice per render is a full second
+  (`store.ledger_stamp()` — content, never the DB file mtime, which every
+  triage click bumps — for store reads; the immutable report JSON for
+  backtest statistics). A 480ms computation called twice per render is a full second
   of latency per click.
 - `st.column_config.NumberColumn(format="%.0f%%")` expects the value
   **already scaled to 0–100**, not a 0–1 fraction.

@@ -706,11 +706,11 @@ self.addEventListener("fetch", (e) => {
 
 # Vercel project config for the output directory. Static site, no build:
 # never indexed, HTML and the service worker always revalidated (a publish
-# must land on the next open), the icon cached for a week.
+# must land on the next open), the icon cached for a week. No cleanUrls: it
+# 308s /index.html, which the service worker pre-caches, and serving a
+# redirected response to a navigation is an offline failure in Chrome.
 _VERCEL_JSON = """{
   "$schema": "https://openapi.vercel.sh/vercel.json",
-  "cleanUrls": true,
-  "trailingSlash": false,
   "headers": [
     {
       "source": "/(.*)",
@@ -732,13 +732,15 @@ _VERCEL_JSON = """{
 }
 """
 
-# Vercel Edge Middleware: HTTP Basic auth on everything except the manifest
-# and icon (the browser fetches those without credentials, and "Add to Home
-# Screen" needs them). The password is the DIGEST_PASSWORD env var set in
-# the Vercel project — nothing here holds a secret, so the file is safe to
+# Vercel Routing Middleware: HTTP Basic auth on everything except the
+# manifest and icon (the browser fetches those without credentials, and "Add
+# to Home Screen" needs them). The password is the DIGEST_PASSWORD env var set
+# in the Vercel project — nothing here holds a secret, so the file is safe to
 # publish. Unset = open, the bootstrap state; set it before sharing a URL.
+# Node.js runtime: Vercel has deprecated "edge" for middleware.
 _MIDDLEWARE_JS = """export const config = {
-  matcher: ["/((?!manifest\\.webmanifest|icon\\.png).*)"],
+  runtime: "nodejs",
+  matcher: ["/((?!manifest\\\\.webmanifest|icon\\\\.png).*)"],
 };
 
 function timingSafeEqual(a, b) {
@@ -754,8 +756,14 @@ export default function middleware(request) {
   const header = request.headers.get("authorization") || "";
   const [scheme, encoded] = header.split(" ");
   if (scheme === "Basic" && encoded) {
+    // atob yields one char per BYTE; the challenge says charset="UTF-8",
+    // so browsers send UTF-8 — decode it, or a non-ASCII password never
+    // matches and everyone is locked out.
     let decoded = "";
-    try { decoded = atob(encoded); } catch (_) { decoded = ""; }
+    try {
+      decoded = new TextDecoder().decode(
+        Uint8Array.from(atob(encoded), (c) => c.charCodeAt(0)));
+    } catch (_) { decoded = ""; }
     const password = decoded.slice(decoded.indexOf(":") + 1);
     if (timingSafeEqual(password, expected)) return;
   }
@@ -776,6 +784,15 @@ export default function middleware(request) {
 """
 
 _ROBOTS_TXT = "User-agent: *\nDisallow: /\n"
+
+# middleware.js is an ES module; without this Vercel compiles it to CommonJS
+# and says so on every deploy. No dependencies, no build script — the
+# directory stays a static site.
+_PACKAGE_JSON = """{
+  "private": true,
+  "type": "module"
+}
+"""
 
 # The output directory is its own git checkout (the digest repo); the Vercel
 # CLI's link file must not ride along in it.
@@ -799,6 +816,7 @@ def build_digest(store: Store, thesis: Thesis, out_dir: Path,
     (out_dir / "vercel.json").write_text(_VERCEL_JSON, encoding="utf-8")
     (out_dir / "middleware.js").write_text(_MIDDLEWARE_JS, encoding="utf-8")
     (out_dir / "robots.txt").write_text(_ROBOTS_TXT, encoding="utf-8")
+    (out_dir / "package.json").write_text(_PACKAGE_JSON, encoding="utf-8")
     (out_dir / ".gitignore").write_text(_OUT_GITIGNORE, encoding="utf-8")
     return path
 

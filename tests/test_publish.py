@@ -239,7 +239,11 @@ def test_vercel_files_are_written_and_gate_only_the_page(tmp_path: Path) -> None
     revalidated = next(r for r in config["headers"] if "index.html" in r["source"])
     assert "must-revalidate" in revalidated["headers"][0]["value"]
 
+    assert "cleanUrls" not in config  # it 308s index.html, which the sw pre-caches
+    assert json.loads((docs / "package.json").read_text())["type"] == "module"
+
     middleware = (docs / "middleware.js").read_text(encoding="utf-8")
+    assert 'runtime: "nodejs"' in middleware  # "edge" is deprecated for middleware
     assert "export default function middleware" in middleware
     assert "DIGEST_PASSWORD" in middleware and "WWW-Authenticate" in middleware
     # The manifest and icon are fetched without credentials by the browser;
@@ -310,4 +314,57 @@ def test_publish_vercel_deploys_a_linked_project_and_auto_finds_it(tmp_path: Pat
     result = _publish(tmp_path, "--auto")
     assert result.exit_code == 0, result.output
     assert len(calls) == 2 and "No deploy target" not in result.output
+
+
+_NODE_HARNESS = """
+import middleware, { config } from "./mw.mjs";
+const b64 = (s) => Buffer.from(s, "utf8").toString("base64");
+const run = async (pw, auth) => {
+  if (pw === null) delete process.env.DIGEST_PASSWORD; else process.env.DIGEST_PASSWORD = pw;
+  const res = await middleware(new Request("https://x.test/",
+    { headers: auth ? { authorization: auth } : {} }));
+  return res === undefined ? "pass" : res.status;
+};
+const re = new RegExp("^" + config.matcher[0] + "$");
+console.log(JSON.stringify({
+  open: await run(null, null),
+  noHeader: await run("hunter2", null),
+  wrong: await run("hunter2", "Basic " + b64("u:nope")),
+  right: await run("hunter2", "Basic " + b64("partner:hunter2")),
+  colon: await run("a:b", "Basic " + b64("u:a:b")),
+  unicode: await run("p\u00e4ssw\u00f6rd", "Basic " + b64("u:p\u00e4ssw\u00f6rd")),
+  garbage: await run("hunter2", "Basic !!!"),
+  bearer: await run("hunter2", "Bearer hunter2"),
+  gated: ["/", "/index.html", "/sw.js", "/iconXpng"].map((p) => re.test(p)),
+  exempt: ["/manifest.webmanifest", "/icon.png"].map((p) => re.test(p)),
+}));
+"""
+
+
+def test_middleware_behaves_under_node(tmp_path: Path) -> None:
+    """Run the generated middleware, not just read it. String checks passed
+    while a non-ASCII password could never match (atob yields bytes, the
+    browser sends UTF-8) and unescaped dots in the matcher exempted any
+    path shaped like icon?png. Skipped where node is absent."""
+    import shutil
+    import subprocess
+
+    import pytest
+
+    if shutil.which("node") is None:
+        pytest.skip("node not installed")
+    out = build_digest(seeded_store(tmp_path), Thesis(thesis="t"), tmp_path / "docs")
+    shutil.copy(out.parent / "middleware.js", tmp_path / "mw.mjs")
+    (tmp_path / "harness.mjs").write_text(_NODE_HARNESS, encoding="utf-8")
+    run = subprocess.run(["node", "harness.mjs"], cwd=tmp_path,
+                         capture_output=True, text=True, timeout=60)
+    assert run.returncode == 0, run.stderr
+    got = json.loads(run.stdout)
+    assert got["open"] == "pass"            # no password configured: never a lockout
+    assert got["noHeader"] == 401 and got["wrong"] == 401
+    assert got["right"] == "pass" and got["colon"] == "pass"
+    assert got["unicode"] == "pass"
+    assert got["garbage"] == 401 and got["bearer"] == 401
+    assert got["gated"] == [True, True, True, True]
+    assert got["exempt"] == [False, False]
 
