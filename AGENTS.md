@@ -77,6 +77,7 @@ uv run pytest -q                 # ~630 tests, ~40s, no network (incl. AppTest U
 ./scout-cli demo                 # $0 offline end-to-end run on sample founders — best smoke test
 ./scout-cli source --strategy github,hn   # free live discovery, no scoring
 ./scout-cli ui                   # Streamlit workspace on :8501
+./scout-cli doctor               # readiness: keys, seeds, worker, per-source reachability
 ./start                          # user-facing launcher: sync → seed-if-empty → serve → open browser
 
 # multiplayer / background
@@ -224,6 +225,19 @@ scout/
   memos.py          Headless memo generation, lifted out of ui.py so the
                     worker can write memos overnight. The UI keeps its live
                     deep-research narration and shares everything below it.
+  doctor.py         `scout doctor` + the Settings page's Readiness panel.
+                    Checks graded against ONE outcome — will the daily scan
+                    produce classified leads: fail = it won't (no/invalid
+                    Anthropic key, unwritable DB, thesis doesn't load, no
+                    source can run), warn = degraded (no X cookies, SEC
+                    User-Agent without a contact email, example watchlist,
+                    no worker/schedules), info = optional. Every non-ok
+                    line carries its fix. config_checks is cheap (a COUNT,
+                    never a ledger parse — the UI reruns it per click);
+                    network_checks takes an injected probe and hits the
+                    exact calls a run makes (GitHub SEARCH, not /rate_limit
+                    — some networks allow one and block the other; SEC with
+                    the real User-Agent). Spends nothing.
   jobs.py           Pure background-work logic: job kinds, deterministic
                     backoff, and ScheduleSpec/next_occurrence — deliberately
                     NOT cron ("weekdays at 07:00 Europe/London" is what

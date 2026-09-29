@@ -6047,11 +6047,33 @@ if nav == "Settings":
                       "re-runs reuse Claude verdicts"), unsafe_allow_html=True)
     st.write("")
 
-    k1, k2, k3 = st.columns(3)
-    cookie_ok = bool(settings.tw_cookies and Path(settings.tw_cookies).exists())
-    k1.markdown(("✓ " if cookie_ok else "○ ") + "twscrape cookies")
-    k2.markdown(("✓ " if settings.x_bearer_token else "○ ") + "X API token")
-    k3.markdown(("✓ " if settings.anthropic_api_key else "○ ") + "Anthropic key")
+    # Readiness — the same checks as `scout doctor`, graded against one
+    # outcome: will the daily scan produce classified leads. Config checks
+    # are cheap and run every render; the network probes (a few seconds)
+    # only on request, and their result is kept for the session.
+    from scout import doctor as doctor_mod
+
+    _checks = doctor_mod.config_checks(settings, thesis, seeds, store)
+    _checks += st.session_state.get("doctor_network", [])
+    _ready, _summary = doctor_mod.verdict(_checks)
+    _marks = {"ok": "✓", "warn": "!", "fail": "✗", "info": "·"}
+    with st.expander(("✓ " if _ready else "✗ ") + "Readiness — " + _summary,
+                     expanded=not _ready):
+        _rows = []
+        for _c in _checks:
+            _rows.append(
+                f'<div class="subtle"><b>{_marks[_c.status]} {_e(_c.name)}</b> — '
+                f'{_e(_c.detail)}'
+                + (f'<br>&nbsp;&nbsp;→ {_e(_c.fix)}'
+                   if _c.fix and _c.status != "ok" else "")
+                + "</div>")
+        st.markdown("".join(_rows), unsafe_allow_html=True)
+        if st.button("Check network access to every source", key="doctor_net_btn"):
+            with st.spinner("Probing the hosts this config would use…"):
+                st.session_state["doctor_network"] = doctor_mod.network_checks(
+                    settings, thesis, seeds)
+            st.rerun()
+        st.caption("Same checks from a terminal: `scout doctor`.")
     st.markdown('<div class="subtle">Secrets are configured on the server '
                 '(<code>/etc/scout/scout.env</code>, or <code>.env</code> for local '
                 'use) and are never editable here. The shared defaults below apply '

@@ -158,6 +158,10 @@ def test_ui_renders_without_exceptions(tmp_path, monkeypatch) -> None:
     at.run()
     assert not at.exception
     assert "X API spend" in _page_text(at)
+    # The readiness panel: the same grading as `scout doctor`. The smoke
+    # env has no Anthropic key, so it must say what blocks and how to fix it.
+    assert "ANTHROPIC_API_KEY" in _page_text(at)
+    assert any(b.key == "doctor_net_btn" for b in at.button)
 
 
 def test_longlist_and_shortlist_render_cards_with_leads(tmp_path, monkeypatch) -> None:

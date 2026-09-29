@@ -2909,6 +2909,74 @@ def migrate(
 
 
 @app.command()
+def doctor(
+    offline: Annotated[
+        bool, typer.Option("--offline", help="Skip the network probes.")
+    ] = False,
+    thesis_path: Annotated[
+        Path, typer.Option("--thesis", help="Path to thesis.yaml.")
+    ] = Path("thesis.yaml"),
+    seeds_path: Annotated[
+        Path, typer.Option("--seeds", help="Path to seeds.yaml.")
+    ] = Path("seeds.yaml"),
+    thesis_id: Annotated[
+        str, typer.Option("--thesis-id", help="Check a specific thesis "
+                                              "(default: the firm's).")
+    ] = "",
+) -> None:
+    """Is this installation ready to source? Every part, and the fix.
+
+    Keys, X cookies, the thesis and seeds, the database, the worker and its
+    schedules, then a probe of every host the current config would use —
+    from THIS machine, with THIS config (SEC gets the real User-Agent,
+    GitHub the real token). Judged against one outcome: will the daily
+    scan produce classified leads. Spends nothing: the Anthropic probe is
+    the free models endpoint and Slack is never posted to.
+
+    Exits 1 when something blocks the scan, so scripts and deploys can
+    gate on it.
+    """
+    from scout import doctor as dr
+
+    settings = Settings()
+    store = _open_store(settings)
+    thesis: Thesis | None = None
+    thesis_error = ""
+    try:
+        thesis = _resolve_thesis_or_exit(store, thesis_path, thesis_id)
+    except typer.Exit:
+        thesis_error = f"{thesis_path} did not load"
+    seeds = _resolve_seeds(store, seeds_path, thesis_id)
+
+    checks = dr.config_checks(settings, thesis, seeds, store, thesis_error=thesis_error)
+    if not offline:
+        with console.status("Probing the hosts this config would use..."):
+            checks += dr.network_checks(settings, thesis, seeds)
+
+    marks = {"ok": "[green]✓[/green]", "warn": "[yellow]![/yellow]",
+             "fail": "[red]✗[/red]", "info": "[dim]·[/dim]"}
+    table = Table(box=box.SIMPLE, show_header=False, pad_edge=False)
+    table.add_column("", width=1)
+    table.add_column("check", style="bold", no_wrap=True)
+    table.add_column("detail", overflow="fold")
+    area = None
+    for check in checks:
+        if check.area != area:
+            area = check.area
+            table.add_row("", f"[dim]{area.upper()}[/dim]", "")
+        detail = check.detail
+        if check.fix and check.status in ("warn", "fail", "info"):
+            detail += f"\n[dim]→ {check.fix}[/dim]"
+        table.add_row(marks[check.status], check.name, detail)
+    console.print(table)
+    ready, summary = dr.verdict(checks)
+    console.print(f"[bold {'green' if ready else 'red'}]{summary}[/]"
+                  + ("" if not offline else " [dim](network not checked)[/dim]"))
+    if not ready:
+        raise typer.Exit(1)
+
+
+@app.command()
 def budget() -> None:
     """Both spend ledgers: today's envelope, Claude to date, X API vs its cap."""
     settings = Settings()

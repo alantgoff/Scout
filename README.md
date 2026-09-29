@@ -262,6 +262,13 @@ publish      Render docs/ as a read-only phone app — Startups (search/sort/
                            the bundled middleware (DIGEST_PASSWORD)
   --auto                   push and/or deploy wherever configured
 budget       Today's spend envelope + Claude and X API ledgers
+doctor       Is this installation ready to source? Keys, X cookies, thesis
+             and seeds, database, worker and schedules, then a probe of every
+             host the config would use — from this machine, with the real
+             SEC User-Agent and GitHub token. Every problem comes with its
+             fix; exits 1 when something blocks the daily scan. Spends
+             nothing. Also on the Settings page.
+  --offline                skip the network probes
 demo         $0 offline end-to-end test
 ui           Launch the workspace
 
@@ -303,6 +310,7 @@ Google, vote and comment on the same startups, and a worker sources on a
 schedule so momentum signals get caught while they are still fresh.
 
 ```bash
+scout doctor                            # is it ready? what to fix, in order
 scout migrate --owner you@firm.com      # adopt an existing single-user database
 scout worker --bootstrap --once         # create the default schedules
 scout worker                            # run them (systemd unit in deploy/)
