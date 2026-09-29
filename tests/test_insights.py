@@ -132,3 +132,73 @@ def test_query_yield_scores_and_flags_dead_queries() -> None:
     assert "Bpifrance (2 tracked companies)" in block
     # Nothing measured → empty, never a block of zeros.
     assert performance_block([], None) == ""
+
+
+# --- source attribution ------------------------------------------------------------
+
+
+def _src_entry(handle: str, source: str, sources: list[str] | None = None) -> LedgerEntry:
+    return LedgerEntry(lead=Lead(account=Account(
+        id=handle, handle=handle, source=source, sources=sources or [])))
+
+
+def test_source_yield_counts_every_source_and_what_only_it_found() -> None:
+    from scout.insights import source_yield
+
+    ledger = [
+        _src_entry("acme", "yc", ["yc", "search:launch"]),  # triaged, two sources
+        _src_entry("beta", "sec", ["sec"]),                 # triaged, SEC only
+        _src_entry("gamma", "rss", ["rss"]),                # passed
+        _src_entry("delta", "search:hiring"),               # legacy row: no sources list
+    ]
+    pipeline = {"acme": {"status": "shortlisted"}, "beta": {"status": "longlisted"},
+                "gamma": {"status": "passed"}}
+    rows = {y.source: y for y in source_yield(ledger, pipeline)}
+
+    # "search:launch" and "search:hiring" are one source: X search.
+    assert rows["search"].label == "X search"
+    assert (rows["search"].scored, rows["search"].triaged) == (2, 1)
+    assert rows["search"].unique_triaged == 0 and rows["search"].redundant
+    assert (rows["yc"].triaged, rows["yc"].unique_triaged) == (1, 0)
+    assert (rows["sec"].triaged, rows["sec"].unique_triaged) == (1, 1)
+    assert not rows["sec"].redundant
+    assert (rows["rss"].passed, rows["rss"].triaged) == (1, 0)
+    assert rows["sec"].hit_rate == 1.0 and rows["rss"].hit_rate == 0.0
+    # Best earners first.
+    assert [y.source for y in source_yield(ledger, pipeline)][0] == "sec"
+
+
+def test_source_yield_flags_dead_sources_only_on_a_real_sample() -> None:
+    from scout.insights import source_yield
+
+    few = [_src_entry(f"h{i}", "github", ["github"]) for i in range(5)]
+    many = [_src_entry(f"g{i}", "hn", ["hn"]) for i in range(25)]
+    manual = [_src_entry(f"m{i}", "manual", ["manual"]) for i in range(25)]
+    rows = {y.source: y for y in source_yield(few + many + manual, {})}
+    assert not rows["github"].dead      # 5 scored is no evidence
+    assert rows["hn"].dead              # 25 scored, none triaged
+    assert not rows["manual"].dead      # a person adding companies is not a channel to prune
+
+
+def test_demo_and_hindsight_rows_are_not_sources() -> None:
+    from scout.insights import source_yield
+
+    rows = source_yield([_src_entry("d", "demo", ["demo"]),
+                         _src_entry("h", "hindsight")], {})
+    assert rows == []
+
+
+def test_performance_block_reports_source_yield_only_when_measured() -> None:
+    from scout.insights import SourceYield, performance_block
+
+    earner = SourceYield(source="sec", label="SEC Form D", scored=4, triaged=2,
+                         passed=0, unique_triaged=2)
+    dead = SourceYield(source="hn", label="Hacker News", scored=30, triaged=0,
+                       passed=3, unique_triaged=0)
+    quiet = SourceYield(source="yc", label="YC directory", scored=3, triaged=0,
+                        passed=0, unique_triaged=0)
+    block = performance_block([], None, sources=[earner, dead, quiet])
+    assert "SEC Form D: 4 scored, 2 triaged (2 found by nothing else)" in block
+    assert "Hacker News" in block and "nothing triaged" in block
+    assert "YC directory" not in block  # unmeasured: silence, not a verdict
+    assert performance_block([], None, sources=[quiet]) == ""

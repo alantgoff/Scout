@@ -117,6 +117,7 @@ from scout.insights import (
     model_disagreements,
     performance_block_for,
     query_yield,
+    source_yield,
     stats_prompt,
     triage_stats,
 )
@@ -4075,6 +4076,27 @@ if nav == "Thesis":
                 st.success("Saved."); st.rerun()
 
     with st.expander("Watchlist & discovery — follow-graph, GitHub, lists"):
+        # Source yield first: which channels have produced companies the
+        # firm triaged, and which triaged companies ONLY that channel found —
+        # the number that says whether switching a source off loses anything.
+        _src = [y for y in source_yield(ledger, pipeline) if y.scored]
+        if _src:
+            _src_lines = []
+            for _y in _src[:10]:
+                _mark = "✗" if _y.dead else ("✓" if _y.triaged else "·")
+                _note = (" — nothing triaged yet" if _y.dead else
+                         " — all also found elsewhere" if _y.redundant else "")
+                _src_lines.append(
+                    f'<div class="subtle">{_mark} <b>{_e(_y.label)}</b> — '
+                    f'{_y.scored} scored, <b>{_y.triaged} triaged</b> '
+                    f'({_y.hit_rate:.0%}), {_y.unique_triaged} found only here'
+                    f'{_note}</div>')
+            st.markdown("**Source yield** — measured over every run",
+                        help="Per discovery source: companies scored, triaged "
+                             "(longlisted or further), and triaged companies no "
+                             "other source found. `scout yield` in a terminal; "
+                             "the strategy agent sees this too.")
+            st.markdown("".join(_src_lines), unsafe_allow_html=True)
         # Graph-derived leads: connectors already touching 2+ tracked
         # companies. Names, not handles — the graph never guesses handles;
         # find the person's X account (or let the strategy agent propose

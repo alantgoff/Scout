@@ -349,6 +349,87 @@ def query_yield(
     return rows
 
 
+# --- source attribution ---------------------------------------------------------
+# Which discovery SOURCES produce companies the firm triages. With seven of
+# them (four X strategies plus GitHub, HN, arXiv, RSS, SEC, YC) the question
+# "is this source earning its keep" needs an answer per source, and the
+# number that decides whether to switch one off is not how much it found —
+# it is how many triaged companies NOTHING ELSE found.
+
+SOURCE_LABELS = {
+    "search": "X search", "list": "X lists", "bio_search": "X bio search",
+    "graph": "X follow graph", "github": "GitHub", "hn": "Hacker News",
+    "arxiv": "arXiv", "rss": "RSS", "sec": "SEC Form D", "yc": "YC directory",
+    "manual": "Added by hand",
+}
+_NOT_DISCOVERY = {"demo", "hindsight", ""}
+
+
+def source_key(source: str) -> str:
+    """"search:launch" → "search": the category is query-level detail,
+    already measured by query_yield."""
+    return (source or "").split(":", 1)[0]
+
+
+@dataclass
+class SourceYield:
+    """One discovery source's lifetime scoreboard, per scored company."""
+
+    source: str
+    label: str
+    scored: int  # companies in the ledger this source surfaced
+    triaged: int  # … longlisted or further
+    passed: int
+    unique_triaged: int  # triaged companies no OTHER source surfaced
+
+    @property
+    def hit_rate(self) -> float:
+        return self.triaged / self.scored if self.scored else 0.0
+
+    @property
+    def dead(self) -> bool:
+        """A real sample, nothing triaged. Same floor logic as QueryYield,
+        higher bar: a source surfaces in bulk."""
+        return self.scored >= 20 and self.triaged == 0 and self.source != "manual"
+
+    @property
+    def redundant(self) -> bool:
+        """Earns, but only on companies another source also found — switching
+        it off would lose no triaged company (so far)."""
+        return self.triaged > 0 and self.unique_triaged == 0
+
+
+def source_yield(ledger: list, pipeline: dict[str, dict]) -> list[SourceYield]:
+    """(pure, tested) Ledger entries + pipeline → one row per source, best
+    earners first. A company counts for every source that surfaced it
+    (Account.sources, which the merge and identity steps fill); rows
+    without `sources` fall back to `source`."""
+    per_company: dict[str, tuple[set[str], str]] = {}
+    for entry in ledger:
+        account = entry.lead.account
+        keys = {source_key(s) for s in (account.sources or [account.source])}
+        keys -= _NOT_DISCOVERY
+        if not keys:
+            continue
+        handle = account.handle.lower()
+        status = (pipeline.get(handle) or {}).get("status") or "new"
+        per_company[handle] = (keys, status)
+    tallies: dict[str, dict[str, int]] = {}
+    for keys, status in per_company.values():
+        triaged = status in POSITIVE_STATUSES
+        for key in keys:
+            t = tallies.setdefault(key, {"scored": 0, "triaged": 0, "passed": 0,
+                                         "unique_triaged": 0})
+            t["scored"] += 1
+            t["triaged"] += triaged
+            t["passed"] += status == "passed"
+            t["unique_triaged"] += triaged and len(keys) == 1
+    rows = [SourceYield(source=key, label=SOURCE_LABELS.get(key, key), **t)
+            for key, t in tallies.items()]
+    rows.sort(key=lambda r: (-r.triaged, -r.hit_rate, -r.scored, r.source))
+    return rows
+
+
 def performance_block_for(store) -> str:
     """The strategy agent's briefing, straight from a Store — the one-call
     wrapper the CLI and UI share. Empty string when nothing is measured."""
@@ -356,24 +437,28 @@ def performance_block_for(store) -> str:
 
     hits = store.query_hits()
     edges = store.all_graph_edges()
-    if not hits and not edges:
+    if not hits and not edges and not store.db["leads"].exists():
         return ""
-    ledger_handles = {
-        e.lead.account.handle.lower() for e in store.load_lead_ledger()
-    }
-    yields = query_yield(hits, ledger_handles, store.all_pipeline())
+    ledger = store.load_lead_ledger()
+    pipeline = store.all_pipeline()
+    ledger_handles = {e.lead.account.handle.lower() for e in ledger}
+    yields = query_yield(hits, ledger_handles, pipeline)
+    sources = source_yield(ledger, pipeline)
     try:
         from scout.config import load_seeds
 
         watchers = load_seeds().watchers
     except Exception:  # seeds file missing/unreadable — suggestions still work
         watchers = []
-    return performance_block(yields, watchlist_candidates(edges, watchers))
+    return performance_block(yields, watchlist_candidates(edges, watchers),
+                             sources=sources)
 
 
 def performance_block(
     yields: list[QueryYield],
     watchlist_candidates: list[tuple[str, int]] | None = None,
+    *,
+    sources: list[SourceYield] | None = None,
 ) -> str:
     """The strategy agent's performance briefing — measured yield per query
     plus graph-derived watchlist leads, compact enough to sit in the prompt.
@@ -391,6 +476,17 @@ def performance_block(
                      "(drop or replace these):")
         lines += [f"- [{y.category}] {y.query!r}: {y.surfaced} surfaced, 0 triaged"
                   for y in dead[:10]]
+    measured = [y for y in (sources or []) if y.triaged or y.dead]
+    if measured:
+        lines.append("Discovery sources by measured yield (weight seeds toward the "
+                     "earners — github_topics, rss_feeds, sec_industries, the X "
+                     "query bank):")
+        for y in measured[:10]:
+            note = (" — nothing triaged, weaken or retarget it" if y.dead else
+                    " — every triaged company also came from another source"
+                    if y.redundant else "")
+            lines.append(f"- {y.label}: {y.scored} scored, {y.triaged} triaged "
+                         f"({y.unique_triaged} found by nothing else){note}")
     if watchlist_candidates:
         lines.append(
             "Investors/labs connected to 2+ companies already in the database "

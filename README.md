@@ -262,6 +262,10 @@ publish      Render docs/ as a read-only phone app — Startups (search/sort/
                            the bundled middleware (DIGEST_PASSWORD)
   --auto                   push and/or deploy wherever configured
 budget       Today's spend envelope + Claude and X API ledgers
+yield        Which discovery sources and X queries produce companies you
+             triage: per source, companies scored, triaged, and triaged
+             companies NO other source found — what switching it off would
+             lose. Also on the Thesis page; the strategy agent reads it.
 doctor       Is this installation ready to source? Keys, X cookies, thesis
              and seeds, database, worker and schedules, then a probe of every
              host the config would use — from this machine, with the real

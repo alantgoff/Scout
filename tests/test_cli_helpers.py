@@ -107,6 +107,21 @@ def test_rank_candidates_keeps_paid_signalless_search_leads() -> None:
     assert skipped == 1
 
 
+def test_rank_candidates_keeps_signalless_leads_from_the_free_query_bank_too() -> None:
+    """twscrape tags its search hits "search:<category>", the paid adapter
+    plain "search". Matching only the latter dropped every signal-less
+    company account the free query bank found."""
+    thesis = Thesis(weights={"bio_intent": 20.0})
+    leads = []
+    for source in ("search", "search:launch", "search:hiring", "list", "github"):
+        lead = make_lead(source.replace(":", "_"))
+        lead.account.source = source
+        leads.append(lead)
+    ranked, _ = _rank_candidates(leads, thesis, cap=10)
+    assert sorted(x.account.source for x in ranked) == [
+        "search", "search:hiring", "search:launch"]
+
+
 # --- _fetch_tweets ----------------------------------------------------------------
 
 

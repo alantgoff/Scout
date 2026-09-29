@@ -497,11 +497,15 @@ def _rank_candidates(
         return -score_breakdown(lead, thesis)[0][1]
 
     with_signals = sorted((x for x in leads if x.signals_hit), key=pre_score)
-    paid_signalless = sorted(
-        (x for x in leads if not x.signals_hit and x.account.source == "search"),
+    # The paid adapter tags "search"; twscrape tags "search:<category>".
+    # Matching only the former silently dropped the free query bank's
+    # signal-less company accounts — the exact case this tier exists for.
+    search_signalless = sorted(
+        (x for x in leads
+         if not x.signals_hit and x.account.source.split(":", 1)[0] == "search"),
         key=pre_score,
     )
-    ordered = with_signals + paid_signalless
+    ordered = with_signals + search_signalless
     return ordered[:cap], max(len(ordered) - cap, 0)
 
 
@@ -2906,6 +2910,54 @@ def migrate(
         f"imported [bold]{counts['votes']}[/bold] triage decisions as votes."
     )
     console.print("[dim]Safe to re-run; nothing is overwritten.[/dim]")
+
+
+@app.command("yield")
+def yield_cmd() -> None:
+    """Which discovery sources and X queries produce companies you triage.
+
+    Per source: companies scored, triaged (longlisted or further), passed,
+    and — the number that decides whether to switch a source off — how
+    many triaged companies NO other source found. Then the X query bank,
+    query by query. Both are measured over every run and triage decision
+    in the database; the strategy agent reads the same numbers.
+    """
+    from scout.insights import query_yield, source_yield
+
+    settings = Settings()
+    store = _open_store(settings)
+    ledger = store.load_lead_ledger()
+    pipeline = store.all_pipeline()
+    sources = source_yield(ledger, pipeline)
+    if not sources:
+        console.print("[dim]Nothing scored yet — run `scout run` first.[/dim]")
+        return
+
+    table = Table(title="Discovery sources", box=box.SIMPLE)
+    for col, just in (("source", "left"), ("scored", "right"), ("triaged", "right"),
+                      ("hit rate", "right"), ("only here", "right"),
+                      ("passed", "right"), ("", "left")):
+        table.add_column(col, justify=just, no_wrap=col == "source")
+    for y in sources:
+        verdict = ("[red]nothing triaged[/red]" if y.dead else
+                   "[yellow]all also found elsewhere[/yellow]" if y.redundant else "")
+        table.add_row(y.label, str(y.scored), str(y.triaged), f"{y.hit_rate:.0%}",
+                      str(y.unique_triaged), str(y.passed), verdict)
+    console.print(table)
+    console.print("[dim]only here = triaged companies no other source surfaced — "
+                  "what you would lose by switching the source off.[/dim]")
+
+    queries = query_yield(store.query_hits(),
+                          {e.lead.account.handle.lower() for e in ledger}, pipeline)
+    if queries:
+        qt = Table(title="X query bank", box=box.SIMPLE)
+        for col, just in (("query", "left"), ("category", "left"),
+                          ("surfaced", "right"), ("triaged", "right"), ("", "left")):
+            qt.add_column(col, justify=just, overflow="fold")
+        for q in queries[:25]:
+            qt.add_row(q.query, q.category, str(q.surfaced), str(q.triaged),
+                       "[red]dead[/red]" if q.dead else "")
+        console.print(qt)
 
 
 @app.command()

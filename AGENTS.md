@@ -259,7 +259,16 @@ scout/
                     ledger and pipeline → which queries produce triaged
                     companies vs burn the time budget. performance_block(_for)
                     renders it (with graph.watchlist_candidates) into the
-                    strategy agent's prompt and the Thesis page.
+                    strategy agent's prompt and the Thesis page. SOURCE
+                    yield (source_yield / SourceYield) does the same per
+                    discovery source over Account.sources: scored,
+                    triaged, and unique_triaged — triaged companies no
+                    other source found, the number that decides whether a
+                    source can be switched off (`redundant` = earns only on
+                    companies found elsewhere; `dead` = 20+ scored, none
+                    triaged). source_key folds twscrape's
+                    "search:<category>" into "search". `scout yield`, the
+                    Thesis page, and performance_block.
   ui.py             The Streamlit workspace. TWO cache tiers, and the split
                     matters: _load_workspace holds only the EXPENSIVE reads
                     (ledger window query + re-parsing every stored lead's
