@@ -195,7 +195,12 @@ without it, heuristics-only), `TW_COOKIES` (free X scraping),
 
 ```
 run          Full pipeline → out/leads_*.csv + report_*.md
-  --source twscrape|xapi   free scraping (default) or the paid X API
+  --source twscrape|xapi|free
+                           X scraping (default), the paid X API, or no X at
+                           all. Without TW_COOKIES (or if X fails mid-run) the
+                           default falls back to the free sources — GitHub,
+                           HN, RSS, SEC, YC, arXiv — so the daily run still
+                           sources. Only an explicit --source xapi fails hard.
   --max-accounts N · --min-score N · --ttl-days N
 
 reclassify   Re-score without discovery — no X spend, cache-first

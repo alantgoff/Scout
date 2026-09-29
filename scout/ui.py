@@ -3915,12 +3915,14 @@ if nav == "Thesis":
 
     # --- Run --------------------------------------------------------------------
     st.markdown('<div class="section-title">Run discovery</div>'
-                '<div class="section-sub">Free sources (X scraping, GitHub, Hacker News) unless you '
-                'pick the paid X API. Runs are incremental — recently scored accounts are skipped.</div>',
+                '<div class="section-sub">X scraping plus the free sources (GitHub, Hacker News, '
+                'RSS, SEC Form D, YC) unless you pick the paid X API or leave X out. Runs are '
+                'incremental — recently scored accounts are skipped.</div>',
                 unsafe_allow_html=True)
     r1, r2, r3, r4 = st.columns([1.4, 1, 1, 1])
     with r1:
-        source = st.segmented_control("Source", ["twscrape (free)", "xapi (paid)"],
+        source = st.segmented_control("Source",
+                                      ["twscrape (free)", "no X", "xapi (paid)"],
                                       default="twscrape (free)")
     with r2:
         max_accounts = st.number_input("Max accounts", 10, 2000, settings.max_accounts, step=10)
@@ -3929,6 +3931,12 @@ if nav == "Thesis":
     with r4:
         ttl = st.number_input("Skip if scored < N days", 0, 90, settings.ttl_days)
     paid_run = "xapi" in (source or "")
+    run_source = "xapi" if paid_run else ("free" if source == "no X" else "twscrape")
+    if run_source == "twscrape" and not (
+            settings.tw_cookies and Path(settings.tw_cookies).exists()):
+        st.markdown('<div class="subtle">X isn\'t connected (no <code>TW_COOKIES</code>) — '
+                    'this run will use the free sources only.</div>',
+                    unsafe_allow_html=True)
     scan_active = ((store.current_scan() or {}).get("status") == "running")
     run_ready = not scan_active
 
@@ -3961,12 +3969,12 @@ if nav == "Thesis":
         )
     run_col, preview_col, reclass_col, _sp = st.columns([1, 1.75, 1.75, 1.5])
     if run_col.button("Run scout", type="primary", disabled=not run_ready):
-        _launch_scan(["run", "--source", "xapi" if paid_run else "twscrape",
+        _launch_scan(["run", "--source", run_source,
                       "--max-accounts", str(int(max_accounts)),
                       "--min-score", str(int(min_score_run)), "--ttl-days", str(int(ttl))],
                      "run",
                      job_kind=jobs_mod.KIND_RUN,
-                     payload={"source": "xapi" if paid_run else "twscrape",
+                     payload={"source": run_source,
                               "max_accounts": int(max_accounts),
                               "min_score": int(min_score_run)})
     if preview_col.button("Preview discovery (free, no scoring)", disabled=scan_active):

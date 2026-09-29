@@ -90,6 +90,10 @@ def _open_store(settings: Settings, actor: str = "system:cli") -> Store:
 class Source(str, Enum):
     twscrape = "twscrape"
     xapi = "xapi"
+    # No X at all: the free discovery sources (GitHub, HN, RSS, SEC, YC,
+    # arXiv) and the classifier. What `run` falls back to when X cookies are
+    # missing, so a machine without them still sources every morning.
+    free = "free"
 
 
 class ExportFormat(str, Enum):
@@ -103,6 +107,9 @@ class ExportFormat(str, Enum):
 
 def _build_adapter(source: Source, settings: Settings, store: Store) -> SourceAdapter:
     # Imported lazily so one adapter's missing extras never break the other path.
+    if source is Source.free:
+        raise RuntimeError("the free sources cannot fetch X accounts — use "
+                           "--source twscrape (cookies) or xapi (paid).")
     if source is Source.xapi:
         from scout.ingest.xapi_src import XApiSource
 
@@ -482,6 +489,9 @@ def _rank_candidates(
     already encoded the thesis; dropping it before classification spends
     that money for nothing. Discovery-sourced (github/hn) leads without a
     signal stay excluded — those arrive in bulk and cost nothing to skip.
+    (Domain-keyed companies from RSS/YC/HN/GitHub are never in that group:
+    any company website fires builder_evidence, so they rank as
+    signal-bearing.)
     """
     def pre_score(lead: Lead) -> float:
         return -score_breakdown(lead, thesis)[0][1]
@@ -712,7 +722,7 @@ def _reconcile_identities(accounts: list[Account], store: Store) -> list[Account
 
 
 def _run_pipeline(
-    adapter: SourceAdapter,
+    adapter: SourceAdapter | None,
     source: Source,
     settings: Settings,
     thesis: Thesis,
@@ -735,31 +745,44 @@ def _run_pipeline(
     # One wall-clock budget spans the whole network phase (discovery legs
     # first, then tweet fetching gets whatever remains).
     network_deadline = time.monotonic() + settings.sourcing_time_budget_s
-    store.scan_update("discovering", f"X {source.value} + github/hn legs",
+    store.scan_update("discovering",
+                      "free sources only (no X)" if source is Source.free
+                      else f"X {source.value} + free discovery legs",
                       total=settings.sourcing_time_budget_s, unit="s")
+    accounts: list[Account] = []
     with console.status(f"Fetching accounts via {source.value}..."):
-        if source is Source.twscrape:
-            strategies = {"lists", "searches"} | (
-                {"bio", "graph"} if thesis.bio_graph_active else set()
-            )
-            accounts = asyncio.run(
-                adapter.fetch_accounts(
-                    seeds,
-                    max_accounts=max_accounts,
-                    strategies=strategies,
-                    search_categories=thesis.active_search_categories,
-                    recent_follow_days=settings.recent_follow_days,
-                    time_budget_s=settings.sourcing_time_budget_s,
+        try:
+            if source is Source.twscrape:
+                strategies = {"lists", "searches"} | (
+                    {"bio", "graph"} if thesis.bio_graph_active else set()
                 )
-            )
-        else:
-            accounts = asyncio.run(
-                adapter.fetch_accounts(
-                    seeds,
-                    max_accounts=max_accounts,
-                    search_categories=thesis.active_search_categories,
+                accounts = asyncio.run(
+                    adapter.fetch_accounts(
+                        seeds,
+                        max_accounts=max_accounts,
+                        strategies=strategies,
+                        search_categories=thesis.active_search_categories,
+                        recent_follow_days=settings.recent_follow_days,
+                        time_budget_s=settings.sourcing_time_budget_s,
+                    )
                 )
-            )
+            elif source is Source.xapi:
+                accounts = asyncio.run(
+                    adapter.fetch_accounts(
+                        seeds,
+                        max_accounts=max_accounts,
+                        search_categories=thesis.active_search_categories,
+                    )
+                )
+        except BudgetExceededError:
+            raise  # the spend cap is a stop, not a degraded run
+        except Exception as exc:  # noqa: BLE001
+            # Expired cookies, a locked account, an X outage: the free legs
+            # below do not depend on X and must not die with it (the same
+            # posture `scout source` has always had).
+            console.print(f"[yellow]X discovery failed ({type(exc).__name__}: "
+                          f"{exc}) — continuing with the free sources.[/yellow]")
+            accounts = []
 
     # Free supplementary discovery, filtered by target stages — it costs
     # nothing; tweet fetching stays subject to the xapi bio gate below.
@@ -814,6 +837,12 @@ def _run_pipeline(
         to_fetch = kept
 
     tweets_by_handle: dict[str, list[Tweet]] = {}
+    if source is Source.free:
+        # No X client: whatever an earlier run cached is all there is.
+        tweets_by_handle = {
+            a.handle: store.get_tweets(a.id, settings.tweets_per_account) for a in kept
+        }
+        to_fetch = []
     if to_fetch:
         # Strongest bio signals first — if the time budget cuts the phase
         # short, the timelines that matter most are already in.
@@ -939,7 +968,9 @@ def _run_pipeline(
 @app.command()
 def run(
     source: Annotated[
-        Source, typer.Option(help="Data source: twscrape (free) or xapi (paid).")
+        Source, typer.Option(help="X source: twscrape (free scraping; falls back "
+                             "to `free` without cookies), xapi (paid), or free "
+                             "(no X — GitHub, HN, RSS, SEC, YC, arXiv only).")
     ] = Source.twscrape,
     max_accounts: Annotated[
         int | None, typer.Option(help="Cap accounts ingested per run (default: settings).")
@@ -992,7 +1023,25 @@ def run(
     store.scan_start("run", os.getpid(), phases=run_phases)
     ok = False
     try:
-        adapter = _build_adapter(source, settings, store)
+        adapter: SourceAdapter | None = None
+        if source is Source.twscrape:
+            try:
+                adapter = _build_adapter(source, settings, store)
+            except RuntimeError as exc:
+                # No (usable) cookies. Failing here used to take every free
+                # source down with X — the scheduled 06:00 run sourced
+                # nothing, every day, on any machine without cookies.
+                console.print(
+                    f"[bold yellow]X is not connected[/] ({exc})\n"
+                    "[yellow]Running the free sources only — GitHub, HN, RSS, "
+                    "SEC, YC, arXiv. Set TW_COOKIES to add X discovery; "
+                    "`scout doctor` checks the whole setup.[/yellow]"
+                )
+                source = Source.free
+        elif source is Source.xapi:
+            # Explicitly asked for the paid API: a missing token is an error,
+            # never a quiet downgrade.
+            adapter = _build_adapter(source, settings, store)
         _run_pipeline(
             adapter,
             source,

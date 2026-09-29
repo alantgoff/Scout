@@ -107,7 +107,10 @@ class TwscrapeSource(SourceAdapter):
         self.store = store
         self.api = API()
         self._ready = False
-        if settings.tw_cookies is None or not settings.tw_cookies.exists():
+        # is_file, not exists: a directory "exists", and reading it as a
+        # cookies file raised IsADirectoryError, which nothing upstream
+        # treats as "X is not connected".
+        if settings.tw_cookies is None or not settings.tw_cookies.is_file():
             raise RuntimeError(f"twscrape needs X session cookies. {_COOKIE_HELP}")
         self._cookies = _parse_cookies(
             settings.tw_cookies.read_text(encoding="utf-8")

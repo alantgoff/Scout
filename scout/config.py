@@ -11,7 +11,7 @@ import re
 from pathlib import Path
 
 import yaml
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from scout import rubric
@@ -499,6 +499,25 @@ class Settings(BaseSettings):
     # Paths
     db_path: Path = DEFAULT_DB_PATH
     out_dir: Path = Path("out")
+
+    # A blank line in .env (`TW_COOKIES=`) arrives as "", and Path("") is the
+    # current directory: it "exists", so twscrape tried to read a folder as a
+    # cookies file and died with IsADirectoryError instead of "not set". A
+    # blank path setting means unset — None, or the default for the paths
+    # that have one. Scoped to paths on purpose: tests rely on
+    # ANTHROPIC_API_KEY="" meaning "no key" rather than falling through to a
+    # real key in someone's .env.
+    @field_validator("tw_cookies", mode="before")
+    @classmethod
+    def _blank_path_is_unset(cls, value):
+        return None if isinstance(value, str) and not value.strip() else value
+
+    @field_validator("db_path", "out_dir", mode="before")
+    @classmethod
+    def _blank_path_is_default(cls, value, info):
+        if isinstance(value, str) and not value.strip():
+            return cls.model_fields[info.field_name].default
+        return value
 
     # Phone digest (`scout publish --push`): a PUBLIC repo that serves the
     # rendered docs/ page via GitHub Pages. Kept separate from the code repo

@@ -126,6 +126,10 @@ scout/
                     Pipeline helpers: _run_pipeline, _enrich_accounts,
                     _run_discovery, _merge_accounts (fills Account.sources),
                     _reconcile_identities (THE identity rule, see below),
+                    Source.free (no X: run falls back to it when twscrape
+                    can't start or X fails mid-fetch — the free legs never
+                    die with X; an explicit --source xapi still fails hard,
+                    and BudgetExceededError always propagates),
                     _fetch_tweets (parallel for free adapters),
                     _resolve_thesis_or_exit (explicit --thesis-id → workspace
                     default → file), _parse_add_target (handle / x.com URL /
@@ -727,6 +731,11 @@ silently widen its input set to all-time).
   (keywords, orgs, stages, weights, params, prompt) lives in the yaml.
 - **Tests never make live network calls.** Adapter tests hit pure parser
   functions on fixture JSON.
+- **A blank path setting means unset.** `TW_COOKIES=` arrives as "", and
+  `Path("")` is the cwd, which "exists". Path fields normalize blanks
+  (config.Settings validators); do NOT switch on pydantic's global
+  `env_ignore_empty` — tests set `ANTHROPIC_API_KEY=""` to mean "no key", and
+  ignoring empties would let them read a real key from a developer's .env.
 
 ### Multiplayer invariants (added when Scout became a two-partner tool)
 
