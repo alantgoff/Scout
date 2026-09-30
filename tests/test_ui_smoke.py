@@ -185,6 +185,45 @@ def test_longlist_and_shortlist_render_cards_with_leads(tmp_path, monkeypatch) -
     assert not at.exception, at.exception[0].message if at.exception else ""
 
 
+def test_warm_paths_show_on_the_card_and_the_network_form(tmp_path, monkeypatch) -> None:
+    """A longlisted company whose investor also backs a portfolio company
+    (status Allocated) carries a warm-path chip on its face and a Warm paths
+    block in Details; the Settings page has the network form."""
+    at = _app(tmp_path, monkeypatch)
+    store = Store(tmp_path / "smoke.db", actor="alan@firm.com")
+
+    def backed(handle: str, company: str) -> Lead:
+        return Lead(
+            account=Account(id=handle, handle=handle, name=company, source="search"),
+            llm=LLMVerdict(handle=handle, account_type="startup", company_name=company,
+                           funding_stage="seed", funding_investors=["Accel"],
+                           funding_evidence="TechCrunch, 2026-09", stage="launched",
+                           thesis_fit=0.7, confidence=0.9, grounding="website"),
+            score=55.0,
+        )
+
+    store.save_leads("20260930-100000-000000",
+                     [backed("portco", "PortCo"), backed("target", "TargetCo")])
+    store.set_pipeline("portco", status="won")
+    store.set_pipeline("target", status="longlisted")
+    store.rebuild_graph(store.load_lead_ledger())
+
+    at.session_state["nav"] = "Longlist"
+    at.run()
+    assert not at.exception, at.exception[0].message if at.exception else ""
+    text = _page_text(at)
+    # The scan list tags the row; the detail pane (first row is selected)
+    # spells the path out.
+    assert "🤝 Accel" in text
+    assert "Accel backs TargetCo — and co-invested with you in PortCo" in text
+
+    at.session_state["nav"] = "Settings"
+    at.run()
+    assert not at.exception, at.exception[0].message if at.exception else ""
+    assert "Your network" in _page_text(at)
+    assert "1</b> portfolio" in _page_text(at)
+
+
 def test_memo_button_routes_and_generates_named_by_startup(tmp_path, monkeypatch) -> None:
     """The card's Memo button routes to the Memos page (nav_target +
     memo_target) and writes the memo there on arrival — named after the

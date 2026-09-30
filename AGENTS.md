@@ -238,6 +238,23 @@ scout/
                     exact calls a run makes (GitHub SEARCH, not /rate_limit
                     — some networks allow one and block the other; SEC with
                     the real User-Agent). Spends nothing.
+  intros.py         Warm-intro paths. Network (network_from / network_for):
+                    portfolio = pipeline status "won", met = contacted/
+                    meeting/diligence, plus the firm's lists in settings
+                    `network_investors` / `network_people` ("Name",
+                    "@handle", "Name (@handle)"). warm_paths(edges, net) →
+                    company key → WarmPath list, strongest first: 3 =
+                    already_backed (firm on the cap table) / founder_known
+                    (founder you backed or listed); 2 = co_investor (backs a
+                    portfolio company too, or a listed fund) / founder you
+                    met; 1 = shared_lab / watcher (listed @handle follows
+                    it). Pure over graph edge rows, so aliases fold via
+                    graph.node_key; portfolio companies get no paths; a
+                    company never paths to itself. FIRM-PRIVATE: publish.py
+                    never sees it. `scout intros`, `scout network`, the
+                    detail pane, the list-row tag, the card, the "Warm
+                    paths" feed sort, Settings → Your network (any member
+                    may edit — nothing there moves spend).
   jobs.py           Pure background-work logic: job kinds, deterministic
                     backoff, and ScheduleSpec/next_occurrence — deliberately
                     NOT cron ("weekdays at 07:00 Europe/London" is what
@@ -965,10 +982,10 @@ silently widen its input set to all-time).
     (Results / Signals / Over time).
   - `run --watch` is GONE rather than left as a stub; scheduling is the worker.
   - **Not yet built:** CRM write-back (Affinity/Attio — deliberately deferred
-    until a firm names theirs), warm-intro paths from the `follow_edges` data
-    already collected, funnel/source-attribution analytics, and a self-host
-    (Docker Compose) bundle for firms that will not put dealflow on a
-    third-party server.
+    until a firm names theirs) and a self-host (Docker Compose) bundle for
+    firms that will not put dealflow on a third-party server. (Warm-intro
+    paths — scout/intros.py — and source attribution — insights.
+    source_yield — are built.)
 
 ---
 

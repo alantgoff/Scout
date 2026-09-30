@@ -2912,6 +2912,155 @@ def migrate(
     console.print("[dim]Safe to re-run; nothing is overwritten.[/dim]")
 
 
+def _warm_context(store: Store, thesis_path: Path):
+    """(ledger, pipeline, network, paths, company key → best ledger entry)."""
+    from scout import intros
+    from scout.graph import company_node
+
+    ledger = store.load_lead_ledger()
+    pipeline = store.all_pipeline()
+    if ledger and not store.all_graph_edges():
+        _rebuild_graph(store)
+    firm = _resolve_thesis_or_exit(store, thesis_path, "").firm_name or ""
+    net = intros.network_for(store, ledger, pipeline, firm_name=firm)
+    paths = intros.warm_paths(store.all_graph_edges(), net)
+    by_company: dict = {}
+    for entry in ledger:
+        key = company_node(entry.lead)[0]
+        if key not in by_company or entry.lead.score > by_company[key].lead.score:
+            by_company[key] = entry
+    return ledger, pipeline, net, paths, by_company
+
+
+@app.command()
+def network(
+    investors: Annotated[
+        str | None,
+        typer.Option("--investors", help="Funds and angels you have a relationship "
+                     "with, comma- or newline-separated. Replaces the list."),
+    ] = None,
+    people: Annotated[
+        str | None,
+        typer.Option("--people", help="People who would make an intro — advisors, "
+                     "founders you know, partners' friends. 'Name', '@handle', or "
+                     "'Name (@handle)'. Replaces the list."),
+    ] = None,
+    thesis_path: Annotated[Path, typer.Option("--thesis")] = Path("thesis.yaml"),
+) -> None:
+    """Who the firm knows — the other end of every warm-intro path.
+
+    Most of it is derived: portfolio companies (status Allocated), the
+    companies you are talking to (contacted / meeting / diligence), and
+    every investor cited on a portfolio company (your co-investors). The
+    two lists here cover what Scout cannot see. Firm-private: never
+    published.
+    """
+    from scout.intros import parse_list
+
+    settings = Settings()
+    store = _open_store(settings)
+    if investors is not None:
+        store.set_setting("network_investors", "\n".join(parse_list(investors)))
+    if people is not None:
+        store.set_setting("network_people", "\n".join(parse_list(people)))
+    _ledger, _pipeline, net, _paths, _by = _warm_context(store, thesis_path)
+
+    def show(title: str, items) -> None:
+        items = sorted(items)
+        console.print(f"[bold]{title}[/bold] ({len(items)})"
+                      + (f": {', '.join(items[:12])}" + (" …" if len(items) > 12 else "")
+                         if items else " [dim]— none[/dim]"))
+
+    show("Portfolio (Allocated)", net.portfolio.values())
+    show("In conversation (contacted / meeting / diligence)", net.met.values())
+    show("Funds you listed", net.investors.values())
+    show("People you listed", list(net.people.values()) + list(net.handles.values()))
+    if net.empty:
+        console.print("[dim]Empty — mark portfolio companies Allocated in the "
+                      "pipeline, or add lists: scout network --investors 'Accel, "
+                      "Index' --people 'Jane Doe (@jane)'.[/dim]")
+
+
+@app.command()
+def intros(
+    company: Annotated[
+        str | None,
+        typer.Argument(help="A company name or handle. Omit to rank every "
+                            "company by its warmest path."),
+    ] = None,
+    thesis_path: Annotated[Path, typer.Option("--thesis")] = Path("thesis.yaml"),
+) -> None:
+    """Warm-intro paths: who in your network connects to a company.
+
+    Graded by who you would actually ask — 3: your firm already backs it,
+    or its founder is someone you backed or listed; 2: its investor
+    co-invested with you or is a fund you listed, or you have met its
+    founder on another deal; 1: a founder shares a lab with someone you
+    know, or a person you listed follows it on X. Every path is two cited
+    facts meeting in the knowledge graph; none is inferred.
+    """
+    from scout.graph import company_node, node_key
+    from scout.intros import warmth
+
+    settings = Settings()
+    store = _open_store(settings)
+    _ledger, pipeline, net, paths, by_company = _warm_context(store, thesis_path)
+    if net.empty and not net.firm_key:
+        console.print("[yellow]Your network is empty[/yellow] — see `scout network`.")
+        return
+    dots = {3: "[green]●●●[/green]", 2: "[yellow]●●○[/yellow]", 1: "[dim]●○○[/dim]"}
+
+    if company:
+        key = node_key(company)
+        if key not in by_company:
+            lead = store.latest_lead(company.lstrip("@"))
+            key = company_node(lead)[0] if lead is not None else key
+        if key not in by_company:
+            console.print(f"[red]No company matching {company!r}.[/red]")
+            raise typer.Exit(1)
+        name = display_name(by_company[key].lead)
+        if key in net.portfolio:
+            console.print(f"[green]{name} is in your portfolio.[/green]")
+            return
+        found = paths.get(key, [])
+        if not found:
+            console.print(f"No warm path to [bold]{name}[/bold] yet — nothing in "
+                          "your network touches its investors, founders or labs.")
+            return
+        console.print(f"[bold]{name}[/bold] — {len(found)} warm path"
+                      f"{'s' if len(found) != 1 else ''}:")
+        for path in found:
+            console.print(f"  {dots[path.strength]} {path.text}  [dim]→ ask "
+                          f"{path.via}[/dim]")
+            if path.evidence:
+                console.print(f"        [dim]evidence: {path.evidence[:120]}[/dim]")
+        return
+
+    rows = []
+    for key, found in paths.items():
+        entry = by_company.get(key)
+        if entry is None:
+            continue
+        status = (pipeline.get(entry.lead.account.handle.lower()) or {}).get("status") or "new"
+        if status == "passed":
+            continue
+        rows.append((warmth(found), entry.lead.score, key, entry, status, found))
+    if not rows:
+        console.print("No warm paths yet — nothing in your network touches a tracked "
+                      "company. `scout network` shows what the network holds.")
+        return
+    rows.sort(key=lambda r: (-r[0], -r[1]))
+    table = Table(title="Warm-intro paths", box=box.SIMPLE)
+    for col in ("", "company", "status", "score", "warmest path", "more"):
+        table.add_column(col, overflow="fold", no_wrap=col in ("", "company"))
+    for strength, score, _key, entry, status, found in rows[:25]:
+        table.add_row(dots[strength], display_name(entry.lead),
+                      STATUS_LABELS.get(status, status), f"{score:.0f}",
+                      found[0].text, f"+{len(found) - 1}" if len(found) > 1 else "")
+    console.print(table)
+    console.print("[dim]`scout intros <company>` for every path and its evidence.[/dim]")
+
+
 @app.command("yield")
 def yield_cmd() -> None:
     """Which discovery sources and X queries produce companies you triage.

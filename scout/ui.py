@@ -122,6 +122,7 @@ from scout.insights import (
     triage_stats,
 )
 from scout import jobs as jobs_mod
+from scout import intros as intros_mod
 from scout import notify
 from scout import theses as theses_mod
 from scout.models import (
@@ -214,6 +215,27 @@ def _empty_state(title: str, guidance: str) -> None:
         f'<div class="section-sub">{guidance}</div>',
         unsafe_allow_html=True,
     )
+
+
+def _warm_paths_of(lead: Lead) -> list:
+    from scout.graph import company_node
+
+    return WARM.get(company_node(lead)[0], [])
+
+
+def _warm_paths_html(lead: Lead) -> str:
+    """Who in the firm's network connects to this company, strongest first
+    (scout.intros). Before Connections on purpose: a route to the founders
+    outranks a fact about the graph. Empty when nothing connects."""
+    paths = _warm_paths_of(lead)
+    if not paths:
+        return ""
+    dots = {3: "●●●", 2: "●●○", 1: "●○○"}
+    items = "".join(
+        f'<div>{dots[x.strength]} {_e(x.text)} — <i>ask {_e(x.via)}</i></div>'
+        for x in paths[:4])
+    return (f'<div class="subtle" style="margin-top:6px">'
+            f'<b>Warm paths</b>{items}</div>')
 
 
 def _connections_html(lead: Lead) -> str:
@@ -1355,6 +1377,11 @@ _GRAPH_BY_DST: dict[str, list[dict]] = {}
 for _edge in GRAPH_EDGES:
     _GRAPH_BY_SRC.setdefault(_edge["src_key"], []).append(_edge)
     _GRAPH_BY_DST.setdefault(_edge["dst_key"], []).append(_edge)
+# Warm-intro paths: who in the firm's network connects to each company.
+# Pure dict work over the cached edges; the network itself is judgment
+# state (statuses, the firm's lists) and so is read fresh like pipeline.
+NETWORK = intros_mod.network_for(store, ledger, pipeline, firm_name=thesis.firm_name or "")
+WARM = intros_mod.warm_paths(GRAPH_EDGES, NETWORK)
 counts: dict[str, int] = {}
 for _row in pipeline.values():
     _status = _row.get("status") or "new"
@@ -2261,6 +2288,8 @@ def _lead_card(
         chips.append((STATUS_LABELS.get(status, status), "status"))
     if overrides.get(handle_key):
         chips.append(("Adjusted", "accent"))
+    if (_warm := _warm_paths_of(lead)) and _warm[0].strength >= 2:
+        chips.append((f"🤝 via {_warm[0].via}", "accent"))
     if filed := filings_on_file.get(handle_key):
         # A government record of a raise: the one funding chip that is not
         # a model's reading of a bio.
@@ -2447,6 +2476,8 @@ def _lead_card(
             if verdict and verdict.verification_note:
                 st.markdown(f'<div class="subtle" style="margin-top:6px">Audit — {_e(verdict.verification_note)}</div>',
                             unsafe_allow_html=True)
+            if warm := _warm_paths_html(lead):
+                st.markdown(warm, unsafe_allow_html=True)
             if connections := _connections_html(lead):
                 st.markdown(connections, unsafe_allow_html=True)
             if ov:
@@ -2550,6 +2581,12 @@ def _feed_row(lead: Lead, selected: bool) -> bool:
         tags.append(STATUS_LABELS.get(status, status))
     elif verdict and verdict.stage:
         tags.append(STAGE_LABEL.get(verdict.stage, verdict.stage))
+    # A strong warm path earns a tag in the scan list: "we can reach them"
+    # changes what gets opened first.
+    warm_paths = _warm_paths_of(lead)
+    if warm_paths and warm_paths[0].strength >= 2:
+        via = warm_paths[0].via
+        tags = tags[:3] + [f"🤝 {via if len(via) <= 18 else via[:17] + '…'}"]
     tag_html = "".join(f'<span class="frow-tag">{_e(t)}</span>' for t in tags[:4])
     # Partners' stances ride along in the scan list: a split is the thing you
     # most want to notice without opening anything.
@@ -2632,6 +2669,10 @@ def _detail_pane(lead: Lead) -> None:
         + '</div>',
         unsafe_allow_html=True,
     )
+    # How to reach them, right under the score: the first question after
+    # "is this interesting" is "who do we know". Empty when nothing connects.
+    if warm := _warm_paths_html(lead):
+        st.markdown(warm, unsafe_allow_html=True)
     # Your stance, above the funnel move: what YOU think is a separate
     # question from where the startup sits in the firm's pipeline, and it is
     # the one only you can answer.
@@ -2914,7 +2955,7 @@ def _render_startup_feed() -> None:
                                   placeholder="name, bio, sector, tags…")
             lift_sort = f"{thesis.firm_name or 'Value-add'} lift"
             sort_by = st.selectbox("Sort by", ["Score", "Quality", "Score change", "Thesis fit",
-                                               lift_sort, "Followers"])
+                                               lift_sort, "Warm paths", "Followers"])
             with st.popover(f"Filters · {n_active}" if n_active else "Filters",
                             use_container_width=True):
                 type_filter = st.multiselect("Type", ["founder", "startup", "other"],
@@ -3005,6 +3046,10 @@ def _render_startup_feed() -> None:
         elif sort_by == lift_sort:
             shown.sort(key=lambda p: -(p[0].llm.value_add_fit
                                        if p[0].llm and p[0].llm.value_add_fit is not None else -1))
+        elif sort_by == "Warm paths":
+            # Warmest route first, score breaking ties: who to reach this week.
+            shown.sort(key=lambda p: (-intros_mod.warmth(_warm_paths_of(p[0])),
+                                      -p[0].score))
         elif sort_by == "Followers":
             shown.sort(key=lambda p: -p[0].account.followers)
         elif sort_by == "Score change":
@@ -6125,6 +6170,42 @@ if nav == "Settings":
             store.set_setting("verdict_ttl_days", str(int(verdict_ttl_in)))
             st.session_state["toast"] = "Shared settings saved — applies to everyone."
             st.rerun()
+
+    # ---- your network: the other end of every warm-intro path. Editable by
+    # any member — relationship knowledge belongs to whoever has it, and
+    # (unlike the knobs above) nothing here can move spend.
+    st.markdown('<div class="section-title">Your network</div>'
+                '<div class="section-sub">Who you would ask for an intro. Portfolio '
+                'companies (Allocated), companies you are talking to, and their '
+                'co-investors come from the pipeline automatically; add what Scout '
+                'cannot see. Firm-private — never published.</div>',
+                unsafe_allow_html=True)
+    st.markdown(
+        f'<div class="subtle">Derived: <b>{len(NETWORK.portfolio)}</b> portfolio '
+        f'companies · <b>{len(NETWORK.met)}</b> in conversation · '
+        f'<b>{sum(1 for v in WARM.values() if intros_mod.warmth(v) >= 2)}</b> '
+        'companies with a strong warm path.</div>', unsafe_allow_html=True)
+    with st.form("network_form"):
+        n1, n2 = st.columns(2)
+        with n1:
+            net_investors = st.text_area(
+                "Funds & angels you know", store.get_setting("network_investors") or "",
+                height=120, help="One per line. Matched against the investors research "
+                                 "cites on each company's round.")
+        with n2:
+            net_people = st.text_area(
+                "People who'd make an intro", store.get_setting("network_people") or "",
+                height=120, help="One per line: 'Name', '@handle', or 'Name (@handle)'. "
+                                 "Names match founders and lab alumni; handles match "
+                                 "the watchlist's follow data.")
+        if st.form_submit_button("Save network", type="primary"):
+            store.set_setting("network_investors",
+                              "\n".join(intros_mod.parse_list(net_investors)))
+            store.set_setting("network_people",
+                              "\n".join(intros_mod.parse_list(net_people)))
+            st.session_state["toast"] = "Network saved — warm paths updated."
+            st.rerun()
+    st.write("")
 
     # ---- workspace: who's signed in, who's allowed in, member roles.
     st.write("")

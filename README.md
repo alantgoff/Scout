@@ -262,6 +262,21 @@ publish      Render docs/ as a read-only phone app — Startups (search/sort/
                            the bundled middleware (DIGEST_PASSWORD)
   --auto                   push and/or deploy wherever configured
 budget       Today's spend envelope + Claude and X API ledgers
+intros [company]   Warm-intro paths: who in your network connects to a
+             company. Graded by who you'd ask — ●●● your firm already backs
+             it, or its founder is someone you backed or know; ●●○ its
+             investor co-invested with you or is a fund you know, or you've
+             met its founder on another deal; ●○○ a founder shares a lab
+             with someone you know. Every path is two cited facts meeting
+             in the knowledge graph. No argument: every company, warmest
+             first. Also on each startup's detail pane and card, and as a
+             feed sort.
+network      Who the firm knows. Derived from the pipeline (portfolio =
+             Allocated, companies in conversation, and every co-investor on
+             a portfolio company) plus two lists for what Scout can't see.
+             Firm-private — never published.
+  --investors "Accel, Index"   funds and angels you know
+  --people "Jane Doe (@jane)"  people who'd make an intro
 yield        Which discovery sources and X queries produce companies you
              triage: per source, companies scored, triaged, and triaged
              companies NO other source found — what switching it off would
