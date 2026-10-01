@@ -386,6 +386,108 @@ def test_stealth_pedigree_founder_sinks_despite_team_score() -> None:
     assert final(lead, thesis) < 15
 
 
+# --- stealthy vs unevidenced -------------------------------------------------------
+#
+# Confidence measures how legible the account was, and a stealth company is
+# illegible by design. The fix is not a floor (that lifted the Raindrop case):
+# confidence keeps discounting the model's judgments and the account's own
+# words, but not facts OTHER parties produced; and the ungrounded penalty —
+# which exists for product claims — is waived only for a stealth verdict that
+# made no product claim AND has an independent observed change behind it.
+
+STEALTH_WEIGHTS = {"bio_intent": 20.0, "lab_departure": 20.0,
+                   "smart_money_convergence": 20.0, "smart_money_follow": 10.0,
+                   "departure_signal": 20.0}  # denominator 90
+
+
+def _stealth_lead(signals: list[str], **verdict) -> Lead:
+    base = dict(handle="s", account_type="founder", is_founder=True, stage="stealth",
+                grounding="none", quality={"team": 0.9},
+                quality_reasons={"team": "ex-DeepMind research lead"},
+                thesis_fit=0.7, confidence=0.5)
+    base.update(verdict)
+    return make_lead("s", signals=[Signal(name=n, value=1.0) for n in signals],
+                     llm=LLMVerdict(**base))
+
+
+def test_independent_signals_are_not_discounted_by_legibility() -> None:
+    thesis = make_thesis(weights=STEALTH_WEIGHTS)
+    lead = _stealth_lead(["bio_intent", "lab_departure", "smart_money_convergence"])
+    # signals = 100×60/90 = 66.7, of which independent = 100×40/90 = 44.4
+    # blend   = (0.45×90 + 0.35×70 + 0.20×66.7) / 1.0 = 78.3
+    # conf    = 0.5×78.3 + 0.5×(0.20×44.4) = 43.6; ungrounded waived.
+    blend = (0.45 * 90 + 0.35 * 70 + 0.20 * (100 * 60 / 90))
+    expected = 0.5 * blend + 0.5 * (0.20 * 100 * 40 / 90)
+    assert final(lead, thesis) == pytest.approx(expected)
+    steps = [d for d, _ in score_breakdown(lead, thesis)]
+    assert any("independent signals" in d and "unscaled" in d for d in steps)
+    assert any(d.startswith("ungrounded penalty waived") and "lab_departure" in d
+               for d in steps)
+    # Under the old math (everything × confidence, then × 0.6) it was ~23.
+    assert final(lead, thesis) > blend * 0.5 * 0.6 * 1.8
+
+
+def test_the_raindrop_case_does_not_qualify_for_the_waiver() -> None:
+    """Pedigree, self-written bio keywords, even a static follow: none of it
+    is an independent CHANGE, so the product-unverified penalty stands."""
+    thesis = make_thesis(weights=STEALTH_WEIGHTS)
+    lead = _stealth_lead(["bio_intent", "departure_signal", "smart_money_follow"],
+                         thesis_fit=0.2, confidence=0.3)
+    steps = [d for d, _ in score_breakdown(lead, thesis)]
+    assert any("product unverified" in d for d in steps)
+    assert not any("waived" in d for d in steps)
+    assert final(lead, thesis) < 15
+
+
+def test_a_stealth_verdict_that_claims_a_product_must_still_ground_it() -> None:
+    thesis = make_thesis(weights=STEALTH_WEIGHTS)
+    lead = _stealth_lead(["lab_departure", "smart_money_convergence"],
+                         product_summary="An agent-eval platform for banks")
+    steps = [d for d, _ in score_breakdown(lead, thesis)]
+    assert any("product unverified" in d for d in steps)
+    assert not any("waived" in d for d in steps)
+
+
+def test_the_waiver_is_for_stealth_only() -> None:
+    """A LAUNCHED company with no product claim is not 'in stealth' — its
+    missing product evidence is a gap, not a choice."""
+    thesis = make_thesis(weights=STEALTH_WEIGHTS)
+    lead = _stealth_lead(["lab_departure", "smart_money_convergence"], stage="launched")
+    assert any("product unverified" in d for d, _ in score_breakdown(lead, thesis))
+
+
+def test_evidenced_stealth_outranks_unevidenced_stealth_with_the_same_judgments() -> None:
+    thesis = make_thesis(weights=STEALTH_WEIGHTS)
+    evidenced = _stealth_lead(["bio_intent", "lab_departure"])
+    quiet = _stealth_lead(["bio_intent"])
+    assert final(evidenced, thesis) > final(quiet, thesis) * 1.5
+
+
+def test_leads_without_independent_signals_score_exactly_as_before() -> None:
+    thesis = make_thesis(weights={"bio_intent": 50.0, "launch_traction": 50.0})
+    lead = make_lead(
+        "l", signals=[Signal(name="bio_intent", value=1.0),
+                      Signal(name="launch_traction", value=0.5)],
+        llm=make_quality_verdict(thesis_fit=0.6, confidence=0.7),
+    )
+    steps = score_breakdown(lead, thesis)
+    blend = next(v for d, v in steps if d.startswith("blend"))
+    assert dict(steps)["× Claude confidence 0.70"] == pytest.approx(blend * 0.7)
+
+
+def test_independent_part_also_passes_through_a_signals_only_verdict() -> None:
+    """A legacy verdict with no blendable dimensions: signals ARE the base."""
+    thesis = make_thesis(weights={"bio_intent": 50.0, "smart_money_follow": 50.0})
+    lead = make_lead(
+        "legacy", signals=[Signal(name="bio_intent", value=1.0),
+                           Signal(name="smart_money_follow", value=1.0)],
+        llm=LLMVerdict(handle="legacy", account_type="founder", is_founder=True,
+                       stage="launched", grounding="website", confidence=0.4),
+    )
+    # base 100 = 50 self + 50 independent → 0.4×100 + 0.6×50 = 70
+    assert final(lead, thesis) == pytest.approx(70.0)
+
+
 # --- manual overrides -----------------------------------------------------------
 
 

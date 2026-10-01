@@ -388,11 +388,15 @@ and a few you correctly skipped.
 - **The follow-graph signal is twscrape-only** — via the official API it always
   scores 0, as engagement operators (`min_faves:`) are also unsupported there
   and get stripped.
-- **Confidence is biased against stealth.** Classifier confidence multiplies the
-  score, and stealth companies are inherently less legible (0.57 average vs
-  0.83–0.93) despite carrying the highest thesis fit. Flooring it was tried and
-  reverted — it also lifts companies whose product claims never traced to
-  evidence. Documented in `AGENTS.md` as an open thread.
+- **Stealth companies are less legible, and the score is built for it.**
+  Classifier confidence averages 0.57 on stealth companies against 0.83–0.93
+  on launched ones, despite the highest thesis fit. Confidence therefore
+  discounts only the model's own judgments and what an account says about
+  itself — not independent evidence such as an investor following or a
+  researcher's affiliation changing. A stealth company that makes no product
+  claim is spared the ungrounded penalty only when something independent has
+  changed around it; pedigree plus a bio keyword never qualifies. Thin
+  evidence still ranks low — it just isn't penalised twice.
 - **X API cost constants are unverified.** Spend figures derive from hardcoded
   per-read prices, never reconciled against X's actual rate card.
 - **Without `ANTHROPIC_API_KEY`** you get heuristics-only ranking: no

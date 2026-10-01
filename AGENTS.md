@@ -581,14 +581,24 @@ shortlist / pass, persisted in the `pipeline` table as statuses `longlisted` /
    could evidence. No verdict → signals only (demo unchanged). Fit outweighs
    quality deliberately: a well-built off-thesis company used to outrank an
    on-thesis one, which is backwards for thesis-driven sourcing.
-3. `× llm.confidence` when a verdict is attached. **Known bias, deliberately
-   not "fixed":** confidence measures how legible an account was, and stealth
-   companies are inherently less legible — in one run they averaged 0.57
-   against 0.83–0.93 for launched/scaling while carrying the HIGHEST mean
-   thesis fit. Flooring it was tried and reverted: it lifts every lead whose
-   product claim never traced to evidence, which is exactly the Raindrop
-   failure `test_stealth_pedigree_founder_sinks_despite_team_score` guards.
-   A real fix must separate "stealthy" from "unevidenced", not blur both.
+3. `× llm.confidence` when a verdict is attached — on the judged components
+   and the self-reported signals only: `score = c × base + (1 − c) ×
+   independent_part`, where `independent_part` is the share of the base
+   contributed by `score.INDEPENDENT_SIGNALS` (smart_money_follow/
+   convergence, lab_departure, github_evidence, star_velocity,
+   source_corroboration — what OTHER parties did or published). Why:
+   confidence measures how legible the ACCOUNT was, and stealth companies
+   are inherently less legible — in one run they averaged 0.57 against
+   0.83–0.93 for launched/scaling while carrying the HIGHEST mean thesis
+   fit. Discounting an investor's follow or a changed affiliation by that
+   is a category error. Flooring confidence was tried and reverted: it
+   lifts every lead whose product claim never traced to evidence, which is
+   exactly the Raindrop failure
+   `test_stealth_pedigree_founder_sinks_despite_team_score` guards. The
+   self-reported signals (bio_intent, departure_signal, bio_change,
+   builder_evidence, launch_traction) read the account's own words and stay
+   discounted. With no independent signal, this step is exactly
+   `× confidence`.
 4. `× 0.2` when `llm.is_founder` is false (kills corporate/commentator accounts).
 5. `× signal_params.stage_mismatch_multiplier` (0.3) when `llm.stage` ∉
    `target_stages` — an off-stage company must be ~3× better to rank
@@ -599,10 +609,25 @@ shortlist / pass, persisted in the `pipeline` table as statuses `longlisted` /
 7. `× signal_params.ungrounded_multiplier` (0.6) when the product claim never
    traced to evidence: audit says "unverifiable", or the lead was never
    audited AND `llm.grounding` ∈ {None, "none", "bio"}. Audit-confirmed/
-   corrected leads and evidence-grounded leads are exempt. NOTE: verdicts
-   below MIN_CONFIDENCE are no longer dropped — they attach and sink via the
-   confidence multiplier (dropping them used to RESTORE the full heuristic
-   score, rewarding speculation over honest unknowns).
+   corrected leads and evidence-grounded leads are exempt. **Waived** for an
+   honest stealth unknown: `llm.stage` ∈ {idea, stealth}, NO
+   `product_summary` (no claim was made, so none failed to ground), AND an
+   independent observed CHANGE (`score.STEALTH_EVIDENCE_SIGNALS`:
+   lab_departure, smart_money_convergence, source_corroboration). A static
+   follow does not qualify — notable people collect follows whether or not
+   they are building — and pedigree plus a bio keyword (Raindrop) never
+   does. This is the "stealthy vs unevidenced" split: the waiver needs
+   evidence that the quiet is stealth. NOTE: verdicts below MIN_CONFIDENCE
+   are no longer dropped — they attach and sink via the confidence
+   multiplier (dropping them used to RESTORE the full heuristic score,
+   rewarding speculation over honest unknowns).
+
+Stored leads keep the score they were saved with; a change to this math
+reaches them on their next sighting, or all at once via `scout reclassify
+--all --skip-verify` (cache-first: a verdict whose inputs are unchanged and
+inside `VERDICT_TTL_DAYS` costs nothing). The detail pane recomputes the
+breakdown live, so until then its last step can differ from the stored
+number.
 
 The scorecard rubrics (`scout/rubric.py`, derived from the V5 "Enterprise
 Readiness Evaluation Framework" spreadsheet, refined for sourcing-time
@@ -938,8 +963,11 @@ silently widen its input set to all-time).
     were dropped before Claude. One (@BiggerMax19, no bio, 0 followers)
     classified at fit 0.70. github/hn bulk discovery stays excluded.
 - **Known gaps / next threads:**
-  - The confidence-multiplier bias against stealth (see §5 step 3) is real and
-    unfixed. It needs a fix that distinguishes "stealthy" from "unevidenced".
+  - The confidence-multiplier bias against stealth (§5 steps 3 and 7) is
+    fixed by separating "stealthy" from "unevidenced", not by a floor. Note
+    that with `target_stages: [launched]` a stealth lead still takes the
+    deliberate ×0.3 stage-mismatch penalty — the fix matters most for
+    theses that target idea/stealth.
   - Per-thesis verdicts (one company scored under several theses at once, for
     routing to the right partner) are deliberately out of scope — it needs an
     `llm_verdicts` PK migration and multiplies Claude spend per thesis.

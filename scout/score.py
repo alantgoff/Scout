@@ -154,15 +154,39 @@ def quality_score(verdict: LLMVerdict | None, thesis: Thesis) -> float | None:
     return 100.0 * raw / denom
 
 
+# Signals that record what OTHER parties did or published: investors
+# following, an affiliation change in the published record, a repo others
+# starred, independent discovery sources agreeing. Model confidence measures
+# how legible the ACCOUNT was to the classifier — it discounts the model's
+# own judgments (quality, fit) and the account's description of itself, not
+# facts other people produced. The self-reported signals (bio_intent,
+# departure_signal, bio_change, builder_evidence, launch_traction) read the
+# account's own words and stay discounted: a pedigree founder with a bio
+# keyword is exactly the Raindrop case.
+INDEPENDENT_SIGNALS = frozenset({
+    "smart_money_follow", "smart_money_convergence", "lab_departure",
+    "github_evidence", "star_velocity", "source_corroboration",
+})
+# Observed CHANGES by others — evidence that a quiet company is quiet because
+# it is in stealth, not because nothing is there. A static follow is not on
+# the list: notable people collect follows whether or not they are building.
+STEALTH_EVIDENCE_SIGNALS = ("lab_departure", "smart_money_convergence",
+                            "source_corroboration")
+STEALTH_STAGES = ("idea", "stealth")
+
+
 def score_components(lead: Lead, thesis: Thesis) -> dict:
     """The blend inputs, each 0–100 or None when absent:
-    {'signals', 'quality', 'fit', 'signals_raw', 'signals_denom'}, plus
+    {'signals', 'quality', 'fit', 'signals_raw', 'signals_denom',
+    'signals_independent' (the INDEPENDENT_SIGNALS share of signals)}, plus
     'scorecard' — the (ScorecardResult, [SectionScore]) detail behind the
     quality component, or None for legacy/heuristics-only leads."""
     denom = sum(thesis.weights.values())
     for signal in lead.signals:
         signal.weight = thesis.weights.get(signal.name, 0.0)
     raw = sum(s.value * s.weight for s in lead.signals)
+    independent = sum(s.value * s.weight for s in lead.signals
+                      if s.name in INDEPENDENT_SIGNALS)
     verdict = lead.llm
     fit = None
     if verdict is not None and verdict.thesis_fit is not None:
@@ -175,6 +199,8 @@ def score_components(lead: Lead, thesis: Thesis) -> dict:
         "scorecard": scorecard,
         "signals_raw": raw,
         "signals_denom": denom,
+        # The part of `signals` that confidence does not discount.
+        "signals_independent": 100.0 * independent / denom if denom else 0.0,
     }
 
 
@@ -189,13 +215,18 @@ def score_leads(leads: list[Lead], thesis: Thesis) -> list[Lead]:
       fit     = 100 × llm.thesis_fit
       base    = Σ(score_weight_c × component_c) / Σ(weights of PRESENT
                 components)   — the 45/35/20 blend, renormalized
-      × confidence            when an LLM verdict is attached
+      × confidence            when an LLM verdict is attached — on the
+                              judged components and self-reported signals;
+                              INDEPENDENT_SIGNALS pass through unscaled
       × 0.2                   when the verdict says not-a-founder
       × stage multiplier      when the verdict's stage is off-target
       × value-add multiplier  (1-w) + w × value_add_fit — off by default
       × ungrounded multiplier when the product claim never traced to
                               evidence (audit "unverifiable", or unaudited
-                              with grounding none/bio)
+                              with grounding none/bio) — waived for an
+                              idea/stealth verdict with NO product claim and
+                              an independent observed change
+                              (STEALTH_EVIDENCE_SIGNALS)
     A lead with no verdict scores on signals alone (demo & heuristics-only).
     """
     for lead in leads:
@@ -309,20 +340,34 @@ def score_breakdown(
     ]
     present = [(w, value, tag) for w, value, tag in weighted if value is not None]
     wsum = sum(w for w, _v, _t in present)
+    independent = parts["signals_independent"]
     if parts["quality"] is None and parts["fit"] is None:
         # Verdict carries no blendable dimensions (legacy cache) — signals
         # remain the base, exactly like the pre-blend behavior.
         score = signals_score
+        independent_part = independent
     elif wsum <= 0:
         score = signals_score
+        independent_part = independent
         steps.append(("blend weights all 0 — signals only", score))
     else:
         score = sum(w * v for w, v, _t in present) / wsum
+        independent_part = (params.score_weight_signals * independent / wsum
+                            if parts["signals"] is not None else 0.0)
         terms = " + ".join(f"{w:g}×{tag} {v:.0f}" for w, v, tag in present)
         steps.append((f"blend: ({terms}) / {wsum:g}", score))
 
-    score *= verdict.confidence
-    steps.append((f"× Claude confidence {verdict.confidence:.2f}", score))
+    # Confidence discounts the model's judgments and the account's own words;
+    # the independent part of the base (INDEPENDENT_SIGNALS) passes through.
+    # With no independent signal this is exactly `score × confidence`.
+    c = verdict.confidence
+    score = c * score + (1.0 - c) * independent_part
+    if independent_part > 0:
+        steps.append((f"× Claude confidence {c:.2f} on judgments and self-reported "
+                      f"signals (independent signals, {independent_part:.1f} of the "
+                      "base, unscaled)", score))
+    else:
+        steps.append((f"× Claude confidence {c:.2f}", score))
     if not verdict.is_founder:
         score *= 0.2
         steps.append(("× 0.2 (classified not-a-founder)", score))
@@ -360,7 +405,22 @@ def score_breakdown(
         if verdict.verification is not None
         else verdict.grounding in (None, "none", "bio")
     )
-    if ungrounded:
+    # …but an HONEST stealth unknown made no product claim to be ungrounded.
+    # Waived only when the quiet is explained by something other parties
+    # observed changing (STEALTH_EVIDENCE_SIGNALS): pedigree plus a bio
+    # keyword — the Raindrop case — never qualifies.
+    stealth_evidence = (
+        [s.name for s in lead.signals
+         if s.name in STEALTH_EVIDENCE_SIGNALS and s.value > 0]
+        if verdict.stage in STEALTH_STAGES
+        and not (verdict.product_summary or "").strip()
+        else []
+    )
+    if ungrounded and stealth_evidence:
+        steps.append((
+            "ungrounded penalty waived — stealth, no product claim, independent "
+            f"evidence: {', '.join(stealth_evidence)}", score))
+    elif ungrounded:
         multiplier = params.ungrounded_multiplier
         score *= multiplier
         basis = (
