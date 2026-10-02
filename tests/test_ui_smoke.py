@@ -1026,3 +1026,32 @@ def test_fresh_install_renders_every_page(tmp_path, monkeypatch) -> None:
     at.session_state["startups_view"] = "Database"
     at.run()
     assert not at.exception, at.exception[0].message if at.exception else ""
+
+
+def test_crm_write_back_surfaces_and_triage_queues_a_push(tmp_path, monkeypatch) -> None:
+    """With a CRM connected: Settings shows it, a shortlisted startup's
+    detail pane offers "Send to Attio", and a triage save queues a CRM
+    push for the worker instead of calling Attio inside the click."""
+    db = tmp_path / "crm.db"
+    monkeypatch.setenv("DB_PATH", str(db))
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "")
+    monkeypatch.setenv("ATTIO_API_KEY", "attio-test-key")
+    monkeypatch.setenv("AFFINITY_API_KEY", "")
+    seed_store(db)
+    Store(db).set_pipeline("smoke_founder", status="shortlisted")
+    at = AppTest.from_file(str(UI_PATH), default_timeout=30)
+    at.session_state["nav"] = "Startups"
+    at.run()
+    assert not at.exception, at.exception[0].message if at.exception else ""
+    assert any(b.label == "Send to Attio" for b in at.button)
+
+    at.button(key="feeddet_save_smoke_founder").click().run()
+    assert not at.exception, at.exception[0].message if at.exception else ""
+    queued = [j for j in Store(db).jobs() if j["kind"] == "crm_sync"]
+    assert len(queued) == 1 and "smoke_founder" in queued[0]["payload_json"]
+
+    at.session_state["nav"] = "Settings"
+    at.run()
+    assert not at.exception, at.exception[0].message if at.exception else ""
+    text = _page_text(at)
+    assert "CRM write-back" in text and "Connected: <b>Attio</b>" in text

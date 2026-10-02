@@ -2267,6 +2267,64 @@ class Store:
         ).fetchall()
         return {status: n for status, n in rows}
 
+    # ------------------------------------------------------------------- CRM
+
+    def crm_link(self, provider: str, domain: str) -> dict | None:
+        """What Scout has already written to one CRM for one company domain
+        (scout/crm.py) — the record, list entry and notes, so a push
+        resumes instead of repeating."""
+        if not self.db["crm_links"].exists():
+            return None
+        rows = list(self.db["crm_links"].rows_where(
+            "provider = ? and domain = ?", [provider, domain.lower()], limit=1))
+        return dict(rows[0]) if rows else None
+
+    def crm_links(self) -> dict[str, list[dict]]:
+        """Every CRM link, keyed by lowercased handle — the UI's badges."""
+        if not self.db["crm_links"].exists():
+            return {}
+        out: dict[str, list[dict]] = {}
+        for row in self.db["crm_links"].rows:
+            out.setdefault((row.get("handle") or "").lower(), []).append(dict(row))
+        return out
+
+    def record_crm_step(
+        self, provider: str, domain: str, handle: str, *,
+        error: str | None = None, event: bool = False, result=None, **fields,
+    ) -> None:
+        """Record one CRM write as soon as it succeeds (or an error), and —
+        with `event` — the crm_pushed event in the same transaction."""
+        now = datetime.now(timezone.utc).isoformat()
+        who = self.actor
+        domain = domain.lower()
+        with self.write_tx():
+            row = self.crm_link(provider, domain) or {
+                "provider": provider, "domain": domain, "created_at": now}
+            row["handle"] = handle.lstrip("@").lower()
+            written = {k: v for k, v in fields.items() if v is not None}
+            row.update(written)
+            if written:
+                row["pushed_at"] = now
+                row["pushed_by"] = who or ""
+            if error is not None:
+                row["last_error"] = error
+                row["error_at"] = now if error else None
+            self.db["crm_links"].upsert(row, pk=("provider", "domain"), alter=True)
+            if event and who and result is not None:
+                self._append_event("crm_pushed", handle=handle, actor=who, payload={
+                    "provider": provider, "remote_url": result.remote_url or "",
+                    "created": result.created, "listed": result.listed,
+                    "notes": result.notes,
+                })
+
+    def forget_crm_link(self, provider: str, domain: str) -> None:
+        """Drop a link whose CRM record no longer exists (deleted there)."""
+        if not self.db["crm_links"].exists():
+            return
+        with self.write_tx():
+            self.db.execute("delete from crm_links where provider = ? and domain = ?",
+                            [provider, domain.lower()])
+
     # ------------------------------------------------------- activity events
 
     def _append_event(

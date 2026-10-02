@@ -469,3 +469,28 @@ class MemoVersion(BaseModel):
     author: str = ""  # "agent:memo" or a member's email
     kind: str = "generated"  # generated | edited
     created_at: datetime | None = None
+
+
+class CrmPushResult(BaseModel):
+    """What one CRM write-back did for one startup (scout/crm.py).
+
+    `skipped` names why nothing was attempted (no company domain to key
+    the record on); `error` why an attempt stopped. Each step that did run
+    is recorded in the store as it happens, so a retry resumes rather
+    than repeats — a duplicate note in a partner's CRM is the failure mode
+    this shape exists to make visible."""
+
+    provider: str  # "attio" | "affinity"
+    handle: str
+    domain: str | None = None
+    remote_id: str | None = None
+    remote_url: str | None = None
+    created: bool = False  # the record was new (or empty) and Scout filled it
+    listed: bool = False  # added to the configured list on this push
+    notes: list[str] = Field(default_factory=list)  # titles of notes added
+    skipped: str = ""
+    error: str = ""
+
+    @property
+    def changed(self) -> bool:
+        return self.created or self.listed or bool(self.notes)

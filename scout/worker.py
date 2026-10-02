@@ -232,6 +232,32 @@ def handle_verify(store: Store, settings: Settings, job: dict) -> dict:
     return {"log_path": str(log_path)}
 
 
+def handle_crm(store: Store, settings: Settings, job: dict) -> dict:
+    """Write startups at or past the push threshold to the firm's CRM —
+    or exactly `handles` from the payload (a "Send to CRM" click). In-
+    process: a few HTTP calls per company, and a sync over an unchanged
+    pipeline makes none (crm.due decides locally). Raises only when every
+    attempted push failed, so a single bad record retries alone next pass
+    instead of failing the batch."""
+    from scout import crm
+    from scout.theses import resolve as resolve_thesis
+
+    payload = job.get("payload") or {}
+    if not crm.configured(settings):
+        return {"skipped": "no CRM configured (ATTIO_API_KEY / AFFINITY_API_KEY)"}
+    try:
+        thesis_name = resolve_thesis(store).name or ""
+    except Exception:  # noqa: BLE001 — a note without a thesis name is fine
+        thesis_name = ""
+    results = crm.sync(store, settings, handles=payload.get("handles"),
+                       thesis_name=thesis_name)
+    errors = [r for r in results if r.error]
+    if errors and len(errors) == len(results):
+        raise RuntimeError("; ".join(f"@{r.handle}: {r.error}" for r in errors[:3]))
+    return {"summary": crm.summarize(results), "pushed": len(results),
+            "errors": [f"@{r.handle} → {r.provider}: {r.error}" for r in errors]}
+
+
 HANDLERS = {
     jobs_mod.KIND_RUN: handle_run,
     jobs_mod.KIND_MEMO: handle_memo,
@@ -240,6 +266,7 @@ HANDLERS = {
     jobs_mod.KIND_REFRESH: handle_refresh,
     jobs_mod.KIND_RESOLVE: handle_resolve,
     jobs_mod.KIND_PUBLISH: handle_publish,
+    jobs_mod.KIND_CRM: handle_crm,
 }
 
 

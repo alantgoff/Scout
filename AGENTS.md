@@ -124,7 +124,8 @@ scout/
                     add, refresh, resolve, merge, inspect, verify,
                     reclassify, probe, demo, export, budget, strategy, thesis,
                     graph, publish, ui + the v9 additions: migrate, worker,
-                    jobs, schedule, digest, memo, hindsight.
+                    jobs, schedule, digest, memo, hindsight; and doctor,
+                    yield, network, intros, crm (status|push|sync|config).
                     Pipeline helpers: _run_pipeline, _enrich_accounts,
                     _run_discovery, _merge_accounts (fills Account.sources),
                     _reconcile_identities (THE identity rule, see below),
@@ -420,6 +421,30 @@ scout/
                     signals); company_key/group_by_company fold accounts
                     sharing a company into one entry (primary = highest score).
   demo_data.py      8 synthetic sample founders for `scout demo` (obviously fake handles).
+  crm.py            CRM write-back (Attio REST v2 / Affinity v1). Startups at
+                    or past the push threshold (settings `crm_push_threshold`,
+                    default shortlisted; THRESHOLDS exclude "won" — portfolio
+                    arrives via `add --status won` and is already in the CRM)
+                    are written: company ASSERTED/FOUND BY DOMAIN (never by
+                    name; company_domain_for refuses a founder's own site,
+                    publishers, socials; a synthesized "stealth startup"
+                    name never becomes a record name), only EMPTY fields
+                    filled, list entry (Attio assert; Affinity checked
+                    first), a "Sourced by Scout" note once, the memo as a
+                    note when its hash changes. Each step is recorded in
+                    store.crm_links as it succeeds (resume, never repeat —
+                    a duplicate note in a partner's CRM is the failure this
+                    shape prevents); a 404 on a stored record relinks once.
+                    Retries: connect errors + 429 always, 5xx only for
+                    idempotent GET/PUT/PATCH (a 502 on a POST note may have
+                    been processed). crm.due decides locally, so syncing an
+                    unchanged pipeline makes zero API calls. Triggers:
+                    ui._set_status (EVERY UI status change goes through it)
+                    queues a crm_sync job when `crm_auto_push`; `scout crm
+                    status|push|sync|config`; Settings → CRM write-back;
+                    doctor probes the key + that the list holds companies
+                    (warn, never fail: a broken CRM stops write-back, not the
+                    scan). Firm-private: votes/comments/notes never sent.
   container.py      The self-host image's entrypoint (`python -m scout.container
                     ui|worker|layout|<cli cmd>`). The image holds code; the
                     /data volume holds everything the firm owns. The app reads
@@ -534,7 +559,9 @@ tests/              pytest, no network — test_star_velocity (snapshot deltas,
                     test_hindsight (point-in-time discipline, base rates,
                     fairness), test_signal_eval (the statistics, against
                     known answers), test_container (entrypoint logic + the
-                    bundle's static contract).
+                    bundle's static contract), test_crm (both CRMs against
+                    MockTransport fakes: domain keying, no-clobber, resume,
+                    retry safety, zero-call sync).
 thesis.yaml         Targeting + weights + signal_params + firm value-add levers
                     + llm_prompt. User-owned.
 seeds.yaml          Query bank, bio_searches, watchlist, github_topics. User-owned.
@@ -744,6 +771,7 @@ in the DB keep the model's numbers; overrides live only in their own table.
 | schedules | recurring work: kind + payload + ScheduleSpec + next_run_at. Materialized into jobs by the worker, at most one per schedule per pass |
 | papers, paper_authors | arXiv record + **per-author affiliation snapshots**. The affiliation HISTORY is the asset: `departure_signal` infers a lab exit from self-reported bio language, while a change of institution across a publication record is the same event observed at the source and typically far earlier (`authors_who_moved`). An absent affiliation is "unknown", never "unaffiliated" — arXiv's field is optional and reading a gap as a move would manufacture departures out of metadata sparsity |
 | backtests | stored hindsight runs (report JSON + headline metrics), so "has this got better as we tuned?" is a series rather than one screenshot |
+| crm_links | CRM write-back state per (provider, domain): remote record id/url, list entry, summary note, memo hash + note, pushed_at/by, last_error. The resume log that keeps pushes idempotent; `handle` column, so rename_handle carries it |
 
 **Two table-creation styles, and the rule for choosing.** Most tables are born
 from their first `upsert(..., alter=True)` — sqlite-utils infers the columns,
@@ -926,6 +954,9 @@ silently widen its input set to all-time).
   `write_tx` as the state change, then add its sentence to `_VERB_TEXT` in
   ui.py (that map is presentation; the store records what happened, the UI
   says it in English). Add it to a `verb_groups` filter if it belongs in one.
+- **Change a triage status in the UI:** call `_set_status`, never
+  `store.set_pipeline(status=...)` directly — it is the one hook CRM
+  write-back has on status changes.
 - **Add a firm-wide setting:** `store.set_setting`/`get_setting`, and if it
   should override a `.env` field add it to `Store.RUNTIME_SETTING_FIELDS` so
   `apply_settings_overrides` picks it up for every session and worker run.
@@ -1034,10 +1065,13 @@ silently widen its input set to all-time).
     statistical guards in §11, surfaced as a top-level Evidence page
     (Results / Signals / Over time).
   - `run --watch` is GONE rather than left as a stub; scheduling is the worker.
-  - **Not yet built:** CRM write-back (Affinity/Attio — deliberately deferred
-    until a firm names theirs). (Warm-intro paths — scout/intros.py — source
-    attribution — insights.source_yield — and the Docker Compose self-host
-    bundle — scout/container.py, deploy/docker/ — are built. The bundle was
+  - **CRM write-back is built for BOTH Attio and Affinity** (scout/crm.py)
+    rather than waiting for a firm to name theirs — tested against in-memory
+    fakes of each API; never yet run against a live workspace, so the first
+    `scout doctor` + `scout crm push` with real keys is its live check.
+    (Warm-intro paths — scout/intros.py — source attribution — insights.
+    source_yield — and the Docker Compose self-host bundle — scout/
+    container.py, deploy/docker/ — are built too. The bundle was
     built and run end to end: fresh-DB first start, doctor in-container,
     data surviving `down`/`up`, a deleted schedule staying deleted, the
     sign-in guard, Caddy TLS with the websocket, and a Litestream

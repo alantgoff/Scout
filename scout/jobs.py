@@ -29,9 +29,10 @@ KIND_VERIFY = "verify"
 KIND_REFRESH = "refresh_tracked"
 KIND_RESOLVE = "resolve_unlinked"
 KIND_PUBLISH = "publish_digest"
+KIND_CRM = "crm_sync"
 
 JOB_KINDS = {KIND_RUN, KIND_MEMO, KIND_DIGEST, KIND_VERIFY, KIND_REFRESH, KIND_RESOLVE,
-             KIND_PUBLISH}
+             KIND_PUBLISH, KIND_CRM}
 
 JOB_LABELS = {
     KIND_RUN: "Sourcing run",
@@ -41,6 +42,7 @@ JOB_LABELS = {
     KIND_REFRESH: "Tracked refresh",
     KIND_RESOLVE: "Unlinked-lead resolve",
     KIND_PUBLISH: "Phone app publish",
+    KIND_CRM: "CRM sync",
 }
 
 # Terminal states never re-enter the queue.
@@ -176,4 +178,6 @@ def job_label(kind: str, payload: dict | None = None) -> str:
         return f"{base} ({payload['source']})"
     if kind == KIND_DIGEST and payload.get("window"):
         return f"{base} ({payload['window']})"
+    if kind == KIND_CRM and payload.get("handles"):
+        return f"{base} — " + ", ".join(f"@{h}" for h in payload["handles"][:3])
     return base

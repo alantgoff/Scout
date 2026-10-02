@@ -24,6 +24,8 @@ posted to.
 
 from __future__ import annotations
 
+import json
+
 import os
 import shutil
 from collections.abc import Callable
@@ -234,6 +236,20 @@ def config_checks(settings: Settings, thesis: Thesis | None, seeds: Seeds,
         add(Check(area="Optional", name="Vercel CLI", status="warn",
                   detail="Vercel is configured but the CLI is not installed",
                   fix="npm i -g vercel"))
+    from scout import crm
+
+    clients = crm.clients_from(settings)
+    threshold = store.get_setting("crm_push_threshold") or crm.DEFAULT_THRESHOLD
+    unlisted = [c.label for c in clients if not c.list_ref]
+    add(Check(
+        area="Optional", name="CRM write-back", status="ok" if clients else "info",
+        detail=(f"{' + '.join(c.label for c in clients)} — pushes at "
+                f"{threshold} or later"
+                + (f"; no list for {', '.join(unlisted)} (records + notes only)"
+                   if unlisted else "")) if clients else
+               "not connected — pursued startups stay in Scout",
+        fix="" if clients else "Set ATTIO_API_KEY (+ ATTIO_LIST) or AFFINITY_API_KEY "
+                               "(+ AFFINITY_LIST_ID) — README: 'CRM write-back'."))
     return checks
 
 
@@ -285,15 +301,86 @@ def _targets(settings: Settings, thesis: Thesis, seeds: Seeds) -> list[tuple[str
     if "rss" in sources:
         for feed in [f.strip() for f in seeds.rss_feeds if f.strip()][:_MAX_FEEDS_PROBED]:
             targets.append((f"RSS {feed}", feed, ua))
+    from scout import crm
+
+    for client in crm.clients_from(settings):
+        headers = client.http.headers
+        if client.provider == "attio":
+            path = f"/lists/{client.list_ref}" if client.list_ref else "/self"
+            targets.append(("Attio", crm.ATTIO_BASE + path, headers))
+        else:
+            targets.append(("Affinity", crm.AFFINITY_BASE + "/lists", headers))
     return targets
 
 
-def _judge(name: str, status: int | None, body: str) -> Check:
+# Probed hosts that are not discovery sources: their failure never means "a
+# run would read nothing".
+_NOT_DISCOVERY = {"Anthropic API", "Attio", "Affinity"}
+
+
+def _judge_crm(name: str, status: int, body: str, settings: Settings) -> Check:
+    """A CRM key and list, judged as write-back will use them. Never a
+    fail: a broken CRM link stops write-back, not the daily scan."""
+    area = "Network"
+    if status in (401, 403):
+        key = "ATTIO_API_KEY" if name == "Attio" else "AFFINITY_API_KEY"
+        return Check(area=area, name=name, status="warn",
+                     detail=f"HTTP {status} — the key was rejected",
+                     fix=f"Replace {key}; Attio keys need record, list-entry and "
+                         "note write scopes." if name == "Attio" else
+                         f"Replace {key} (Affinity → Settings → API).")
+    try:
+        data = json.loads(body) if body else {}
+    except ValueError:
+        data = {}
+    if name == "Attio":
+        wanted = (settings.attio_list or "").strip()
+        if status == 404 and wanted:
+            return Check(area=area, name=name, status="warn",
+                         detail=f"list {wanted!r} not found",
+                         fix="ATTIO_LIST is the list's id or API slug (list → settings).")
+        if status == 200 and wanted:
+            info = data.get("data") or {}
+            parents = info.get("parent_object") or []
+            parents = [parents] if isinstance(parents, str) else parents
+            if parents and "companies" not in parents:
+                return Check(area=area, name=name, status="warn",
+                             detail=f"list {info.get('name') or wanted!r} holds "
+                                    f"{', '.join(parents)}, not companies",
+                             fix="Point ATTIO_LIST at a list of companies.")
+            return Check(area=area, name=name, status="ok",
+                         detail=f"key accepted · list {info.get('name') or wanted!r}")
+    if name == "Affinity" and status == 200:
+        wanted = (settings.affinity_list_id or "").strip()
+        lists = data if isinstance(data, list) else []
+        if wanted:
+            match = next((x for x in lists if str(x.get("id")) == wanted), None)
+            if match is None:
+                return Check(area=area, name=name, status="warn",
+                             detail=f"list {wanted} not among the key's {len(lists)} lists",
+                             fix="AFFINITY_LIST_ID is the number in the list's URL.")
+            if match.get("type") not in (1, None):
+                return Check(area=area, name=name, status="warn",
+                             detail=f"list {match.get('name') or wanted!r} is not an "
+                                    "organization list",
+                             fix="Scout writes organizations — use an organization list.")
+            return Check(area=area, name=name, status="ok",
+                         detail=f"key accepted · list {match.get('name') or wanted!r}")
+    if 200 <= status < 300:
+        return Check(area=area, name=name, status="ok", detail="key accepted")
+    return Check(area=area, name=name, status="warn", detail=f"HTTP {status}",
+                 fix="CRM write-back will fail until this answers.")
+
+
+def _judge(name: str, status: int | None, body: str,
+           settings: Settings | None = None) -> Check:
     area = "Network"
     if status is None:
         return Check(area=area, name=name, status="warn",
                      detail=f"unreachable — {body}",
                      fix="Check this machine's network / proxy for the host.")
+    if name in ("Attio", "Affinity") and settings is not None:
+        return _judge_crm(name, status, body, settings)
     if name == "Anthropic API":
         if status == 200:
             return Check(area=area, name=name, status="ok", detail="key accepted")
@@ -333,9 +420,9 @@ def network_checks(settings: Settings, thesis: Thesis | None, seeds: Seeds,
         return []
     with ThreadPoolExecutor(max_workers=min(len(targets), 8)) as pool:
         results = list(pool.map(lambda t: probe(t[1], t[2]), targets))
-    checks = [_judge(name, status, body)
+    checks = [_judge(name, status, body, settings)
               for (name, _url, _h), (status, body) in zip(targets, results)]
-    discovery = [c for c in checks if c.name != "Anthropic API"]
+    discovery = [c for c in checks if c.name not in _NOT_DISCOVERY]
     if discovery and settings.tw_cookies is None and all(c.status != "ok" for c in discovery):
         checks.append(Check(
             area="Network", name="Discovery", status="fail",

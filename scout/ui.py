@@ -122,6 +122,7 @@ from scout.insights import (
     triage_stats,
 )
 from scout import jobs as jobs_mod
+from scout import crm as crm_mod
 from scout import intros as intros_mod
 from scout import notify
 from scout import theses as theses_mod
@@ -236,6 +237,53 @@ def _warm_paths_html(lead: Lead) -> str:
         for x in paths[:4])
     return (f'<div class="subtle" style="margin-top:6px">'
             f'<b>Warm paths</b>{items}</div>')
+
+
+def _render_crm_row(lead: Lead, key_ns: str) -> None:
+    """Where this startup stands in the firm's CRM, and a way to send it.
+
+    Linked records open in the CRM; a failed push says why. The button
+    queues a push for the worker when one is running (the click never waits
+    on the CRM), else pushes inline. A startup with no company domain can't
+    be matched to a CRM record, and says so instead of offering a button
+    that would only fail."""
+    hk = lead.account.handle.lower()
+    links = {row["provider"]: row for row in CRM_LINKS.get(hk, [])}
+    bits = []
+    for row in links.values():
+        label = "Attio" if row["provider"] == "attio" else "Affinity"
+        if row.get("last_error"):
+            bits.append(f'<span title="{_e(row["last_error"])}">⚠ {label}: last push '
+                        'failed</span>')
+        elif row.get("remote_url"):
+            bits.append(f'<a href="{_e(row["remote_url"])}" target="_blank">In {label} ↗</a>')
+        elif row.get("remote_id"):
+            bits.append(f"In {label}")
+    domain = crm_mod.company_domain_for(lead)
+    if domain is None:
+        bits.append("CRM: no company domain to match a record on")
+    if bits:
+        st.markdown(f'<div class="subtle" style="margin:4px 0">{" · ".join(bits)}</div>',
+                    unsafe_allow_html=True)
+    clean = [p for p, row in links.items() if row.get("remote_id") and not row.get("last_error")]
+    if domain is None or len(clean) >= len(CRM_LABELS):
+        return
+    if st.button(f"Send to {' + '.join(CRM_LABELS)}", key=f"{key_ns}_crm_{hk}",
+                 use_container_width=True):
+        worker = store.worker_status()
+        if worker and worker.get("alive"):
+            store.enqueue_job(jobs_mod.KIND_CRM, {"handles": [hk]}, actor=ACTOR, dedupe=True)
+            st.session_state["toast"] = (f"Queued for {' + '.join(CRM_LABELS)} — "
+                                         "the worker sends it within seconds.")
+        else:
+            with st.spinner(f"Sending to {' + '.join(CRM_LABELS)}…"):
+                results = crm_mod.sync(store, settings, handles=[hk],
+                                       thesis_name=thesis.name or "")
+            failed = [r for r in results if r.error]
+            st.session_state["toast"] = (
+                f"CRM push failed: {failed[0].error[:120]}" if failed else
+                f"Sent to {' + '.join(CRM_LABELS)}")
+        st.rerun()
 
 
 def _connections_html(lead: Lead) -> str:
@@ -1271,6 +1319,22 @@ if time.time() - st.session_state.get("user_seen_at", 0.0) > 60:
 CURRENT_USER = st.session_state.get("current_user_row") or store.get_user(ACTOR) or {}
 IS_ADMIN = CURRENT_USER.get("role") == "admin"
 
+# --- status changes -----------------------------------------------------------
+# Every triage click funnels through _set_status so CRM write-back has ONE
+# hook: a status at or past the firm's push threshold queues a CRM push for
+# the worker (scout/crm.py). The click never waits on the CRM — and a
+# Slack-style outage there can never break triage.
+CRM_LABELS = crm_mod.configured(settings)
+
+
+def _set_status(handle: str, *, status: str, **fields) -> None:
+    store.set_pipeline(handle, status=status, **fields)
+    if not CRM_LABELS or (store.get_setting("crm_auto_push") or "1") == "0":
+        return
+    if status in crm_mod.push_statuses(store.get_setting("crm_push_threshold")):
+        store.enqueue_job(jobs_mod.KIND_CRM, {"handles": [handle.lstrip("@").lower()]},
+                          actor=ACTOR, dedupe=True)
+
 # --- thesis provenance ------------------------------------------------------
 # Runs recorded before thesis identity existed carry only a strategy hash;
 # backfilling on load means the pickers and provenance lines are populated for
@@ -1367,6 +1431,8 @@ filings_on_file = store.filings_by_handle()  # SEC Form Ds matched to tracked ro
 attrs_by_handle = store.all_attrs()
 votes_by_handle = store.all_votes()
 comment_counts = store.all_comment_counts()
+# What has been written to the firm's CRM (scout/crm.py), per handle.
+CRM_LINKS = store.crm_links() if CRM_LABELS else {}
 USERS = store.list_users()
 
 # Graph lookups for the Connections block: connector node → the companies it
@@ -2431,38 +2497,38 @@ def _lead_card(
             if status == "longlisted":
                 if st.button("Shortlist", key=f"{key_ns}_short_{handle_key}", type="primary",
                              use_container_width=True):
-                    store.set_pipeline(account.handle, status="shortlisted")
+                    _set_status(account.handle, status="shortlisted")
                     st.session_state["toast"] = f"Shortlisted @{account.handle}"
                     st.rerun()
                 if st.button("Remove", key=f"{key_ns}_rm_{handle_key}", use_container_width=True):
-                    store.set_pipeline(account.handle, status="new")
+                    _set_status(account.handle, status="new")
                     st.session_state["toast"] = f"Removed @{account.handle} from the longlist"
                     st.rerun()
             elif status == "shortlisted":
                 if st.button("To longlist", key=f"{key_ns}_demote_{handle_key}",
                              use_container_width=True):
-                    store.set_pipeline(account.handle, status="longlisted")
+                    _set_status(account.handle, status="longlisted")
                     st.session_state["toast"] = f"Moved @{account.handle} back to the longlist"
                     st.rerun()
             elif status in WIN_STAGES:  # contacted and beyond — manage on Shortlist
                 if st.button("Remove", key=f"{key_ns}_rm_{handle_key}", use_container_width=True):
-                    store.set_pipeline(account.handle, status="new")
+                    _set_status(account.handle, status="new")
                     st.session_state["toast"] = f"Removed @{account.handle} from the shortlist"
                     st.rerun()
             elif status == "passed":
                 if st.button("Restore", key=f"{key_ns}_restore_{handle_key}",
                              use_container_width=True):
-                    store.set_pipeline(account.handle, status="new")
+                    _set_status(account.handle, status="new")
                     st.session_state["toast"] = f"Restored @{account.handle}"
                     st.rerun()
             else:
                 if st.button("Longlist", key=f"{key_ns}_long_{handle_key}", type="primary",
                              use_container_width=True):
-                    store.set_pipeline(account.handle, status="longlisted")
+                    _set_status(account.handle, status="longlisted")
                     st.session_state["toast"] = f"Longlisted @{account.handle}"
                     st.rerun()
                 if st.button("Pass", key=f"{key_ns}_pass_{handle_key}", use_container_width=True):
-                    store.set_pipeline(account.handle, status="passed")
+                    _set_status(account.handle, status="passed")
                     st.session_state["toast"] = f"Passed on @{account.handle}"
                     st.rerun()
 
@@ -2687,10 +2753,10 @@ def _detail_pane(lead: Lead) -> None:
     if status == "longlisted":
         c1, c2 = st.columns(2)
         if c1.button("Shortlist", key=f"{ns}_short_{hk}", type="primary", use_container_width=True):
-            store.set_pipeline(account.handle, status="shortlisted")
+            _set_status(account.handle, status="shortlisted")
             st.session_state["toast"] = f"Shortlisted @{account.handle}"; st.rerun()
         if c2.button("Remove", key=f"{ns}_rm_{hk}", use_container_width=True):
-            store.set_pipeline(account.handle, status="new")
+            _set_status(account.handle, status="new")
             st.session_state["toast"] = f"Removed @{account.handle} from the longlist"; st.rerun()
     elif status in WIN_STAGES:
         # In the funnel: move the stage (including back to Longlist) and keep
@@ -2705,11 +2771,11 @@ def _detail_pane(lead: Lead) -> None:
                              placeholder="Call notes, next step, owner…")
         c1, c2 = st.columns(2)
         if c1.button("Save", key=f"{ns}_save_{hk}", type="primary", use_container_width=True):
-            store.set_pipeline(account.handle, status=LABEL_TO_STATUS.get(new_stage, "shortlisted"),
-                               notes=notes)
+            _set_status(account.handle, status=LABEL_TO_STATUS.get(new_stage, "shortlisted"),
+                        notes=notes)
             st.session_state["toast"] = f"Saved @{account.handle}"; st.rerun()
         if c2.button("Remove", key=f"{ns}_rm_{hk}", use_container_width=True):
-            store.set_pipeline(account.handle, status="new")
+            _set_status(account.handle, status="new")
             st.session_state["toast"] = f"Removed @{account.handle} from the shortlist"; st.rerun()
         # Thread to the next funnel stage: draft/open the outreach memo.
         memo_label = "Open memo →" if pipeline.get(hk, {}).get("brief") else "Write memo →"
@@ -2719,16 +2785,20 @@ def _detail_pane(lead: Lead) -> None:
             st.rerun()
     elif status == "passed":
         if st.button("Restore", key=f"{ns}_restore_{hk}", use_container_width=True):
-            store.set_pipeline(account.handle, status="new")
+            _set_status(account.handle, status="new")
             st.session_state["toast"] = f"Restored @{account.handle}"; st.rerun()
     else:
         c1, c2 = st.columns(2)
         if c1.button("Longlist", key=f"{ns}_long_{hk}", type="primary", use_container_width=True):
-            store.set_pipeline(account.handle, status="longlisted")
+            _set_status(account.handle, status="longlisted")
             st.session_state["toast"] = f"Longlisted @{account.handle}"; st.rerun()
         if c2.button("Pass", key=f"{ns}_pass_{hk}", use_container_width=True):
-            store.set_pipeline(account.handle, status="passed")
+            _set_status(account.handle, status="passed")
             st.session_state["toast"] = f"Passed on @{account.handle}"; st.rerun()
+
+    # Where it stands in the firm's CRM — only for startups in the funnel.
+    if CRM_LABELS and status in crm_mod.THRESHOLDS + ["won"]:
+        _render_crm_row(lead, ns)
 
     # Discussion sits between the action and the reasoning: it is the firm's
     # own evidence, and it belongs next to the model's.
@@ -4691,7 +4761,7 @@ def _render_db_editor(view_rows: list[dict]) -> None:
     label_to_col = {c["label"]: c for c in db_columns}
     for handle, label, value in changes:
         if label == "Status":
-            store.set_pipeline(handle, status=LABEL_TO_STATUS.get(value, "new"))
+            _set_status(handle, status=LABEL_TO_STATUS.get(value, "new"))
         elif label == "Notes":
             store.set_pipeline(handle, notes=value if isinstance(value, str) else "")
         else:
@@ -4958,7 +5028,7 @@ def _render_database() -> None:
                     if col.button(label, key=f"bulk_{new_status}",
                                   type=kind, use_container_width=True):
                         for handle in picked_handles:
-                            store.set_pipeline(handle, status=new_status)
+                            _set_status(handle, status=new_status)
                         st.session_state["toast"] = (
                             f"{STATUS_LABELS[new_status]} {len(picked_handles)} "
                             "startups")
@@ -5169,6 +5239,11 @@ if nav == "Startups":
 # it is presentation: the store records what happened, this says it in
 # English.
 _VERB_TEXT = {
+    "crm_pushed": lambda p: (
+        f"sent to {'Attio' if p.get('provider') == 'attio' else 'Affinity'}"
+        + (" (new record)" if p.get("created") else "")
+        + (f" · {', '.join(p['notes'])}" if p.get("notes") else "")
+    ),
     "status_changed": lambda p: f"moved to {STATUS_LABELS.get(p.get('new', ''), p.get('new', ''))}",
     "funding_round_detected": lambda p: (
         f"raised {FUNDING_STAGE_LABELS.get(p.get('round', ''), p.get('round', 'a round'))}"
@@ -6204,6 +6279,62 @@ if nav == "Settings":
             store.set_setting("network_people",
                               "\n".join(intros_mod.parse_list(net_people)))
             st.session_state["toast"] = "Network saved — warm paths updated."
+            st.rerun()
+    st.write("")
+
+    # ---- CRM write-back: pursued startups land in the firm's CRM. The rule is
+    # admin-only — it decides what Scout writes into another system — while
+    # status and "sync now" are for everyone.
+    st.markdown('<div class="section-title">CRM write-back</div>'
+                '<div class="section-sub">Startups at or past the threshold are '
+                'written to your CRM: the company (matched by domain — existing '
+                'records are linked, never overwritten), the list, a "Sourced by '
+                'Scout" note, and the memo whenever it changes. Votes and comments '
+                'are never sent.</div>', unsafe_allow_html=True)
+    if not CRM_LABELS:
+        st.markdown('<div class="subtle">Not connected. Set <code>ATTIO_API_KEY</code> '
+                    '(+ <code>ATTIO_LIST</code>) or <code>AFFINITY_API_KEY</code> '
+                    '(+ <code>AFFINITY_LIST_ID</code>) in the server environment.</div>',
+                    unsafe_allow_html=True)
+    else:
+        _crm_threshold = store.get_setting("crm_push_threshold") or crm_mod.DEFAULT_THRESHOLD
+        _crm_auto = (store.get_setting("crm_auto_push") or "1") != "0"
+        _crm_errors = [r for rows in CRM_LINKS.values() for r in rows if r.get("last_error")]
+        _crm_pending = crm_mod.pending(store, settings)
+        st.markdown(
+            f'<div class="subtle">Connected: <b>{_e(" + ".join(CRM_LABELS))}</b> · '
+            f'{sum(1 for v in CRM_LINKS.values() for r in v if r.get("remote_id"))} linked · '
+            f'{len(_crm_pending)} waiting · {len(_crm_errors)} failed</div>'
+            + "".join(f'<div class="subtle">⚠ @{_e(r["handle"])} → {_e(r["provider"])}: '
+                      f'{_e((r["last_error"] or "")[:160])}</div>' for r in _crm_errors[:5]),
+            unsafe_allow_html=True)
+        if IS_ADMIN:
+            with st.form("crm_form"):
+                c1, c2 = st.columns(2)
+                labels = [STATUS_LABELS[x] for x in crm_mod.THRESHOLDS]
+                pick = c1.selectbox(
+                    "Push at", labels,
+                    index=crm_mod.THRESHOLDS.index(_crm_threshold)
+                    if _crm_threshold in crm_mod.THRESHOLDS else 1,
+                    help="This status or later. Allocated (portfolio) companies are "
+                         "never pushed automatically — they are already in your CRM.")
+                auto_in = c2.checkbox("Push the moment a status crosses it", _crm_auto,
+                                      help="Queues a push for the worker on each triage "
+                                           "move. Off: only syncs push.")
+                if st.form_submit_button("Save CRM rule", type="primary"):
+                    store.set_setting("crm_push_threshold", LABEL_TO_STATUS[pick])
+                    store.set_setting("crm_auto_push", "1" if auto_in else "0")
+                    st.session_state["toast"] = "CRM rule saved."
+                    st.rerun()
+        if _crm_pending and st.button(f"Sync {len(_crm_pending)} now", key="crm_sync_now"):
+            _worker = store.worker_status()
+            if _worker and _worker.get("alive"):
+                store.enqueue_job(jobs_mod.KIND_CRM, {}, actor=ACTOR, dedupe=True)
+                st.session_state["toast"] = "CRM sync queued for the worker."
+            else:
+                with st.spinner("Syncing…"):
+                    _results = crm_mod.sync(store, settings, thesis_name=thesis.name or "")
+                st.session_state["toast"] = f"CRM sync: {crm_mod.summarize(_results)}."
             st.rerun()
     st.write("")
 

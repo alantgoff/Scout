@@ -359,6 +359,35 @@ it. The workspace binds to localhost, and refuses to start anywhere wider
 without Google sign-in configured. Guide:
 [`deploy/docker/README.md`](deploy/docker/README.md).
 
+### CRM write-back
+
+The startups you pursue land in your CRM — **Attio** or **Affinity**, either
+or both — so sourcing doesn't end in a second system nobody opens:
+
+```bash
+# in .env / scout.env
+ATTIO_API_KEY=...        ATTIO_LIST=dealflow          # list id or API slug
+AFFINITY_API_KEY=...     AFFINITY_LIST_ID=12345       # an organization list
+
+scout doctor             # checks the key and that the list holds companies
+scout crm status         # what's connected, linked, waiting, failed
+scout crm sync           # push everything at or past the threshold
+scout crm push acme_ai   # one company, now, whatever its status
+```
+
+A startup reaching the threshold (Shortlisted by default; Settings page or
+`scout crm config --threshold`) is written as: the company record **matched
+by domain** — an existing record is linked, never overwritten, and only
+empty fields are filled — an entry on your list, a *Sourced by Scout* note
+(what it is, why it surfaced, the score, the evidenced facts, a link back),
+and the investment memo as a note whenever it changes. Triage moves queue
+the push for the worker, so a click never waits on the CRM; a sync over an
+unchanged pipeline makes no API calls. Votes and comments are never sent,
+nothing is ever deleted, and Allocated (portfolio) companies are never
+pushed automatically — they are already in your CRM. A startup without a
+company domain is skipped and says why: a record keyed by a guessed name is
+a duplicate waiting to happen.
+
 ### The phone app on Vercel
 
 The workspace (Streamlit, the worker, SQLite) is a long-running process and

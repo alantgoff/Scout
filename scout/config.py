@@ -472,6 +472,16 @@ class Settings(BaseSettings):
     # it is the DIGEST_PASSWORD env var of the Vercel project.
     vercel_token: str | None = None
 
+    # CRM write-back (scout/crm.py): startups at or past the push threshold
+    # (Settings page; shortlisted by default) are written to the firm's CRM.
+    # Either or both. The list is optional — without it companies are
+    # created/linked and noted but not added to a list. Strings, not ints:
+    # a blank AFFINITY_LIST_ID= must read as unset, not crash Settings().
+    attio_api_key: str | None = None
+    attio_list: str | None = None  # list id or api slug
+    affinity_api_key: str | None = None
+    affinity_list_id: str | None = None  # an ORGANIZATION list
+
     # Pipeline knobs
     max_accounts: int = 500  # cap accounts ingested per run
     ttl_days: int = 7  # skip accounts scored within the last N days

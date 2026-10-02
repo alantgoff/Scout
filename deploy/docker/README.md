@@ -132,6 +132,13 @@ Schema changes are additive and apply on first start.
 - **Bind mount instead of the named volume:** the containers run as uid
   10001, so `chown -R 10001 /srv/scout-data` first.
 
+## CRM write-back
+
+Add `ATTIO_API_KEY` (+ `ATTIO_LIST`) or `AFFINITY_API_KEY` (+ `AFFINITY_LIST_ID`)
+to `scout.env` and recreate the containers. `docker compose exec worker scout
+doctor` checks the key and the list; shortlisted startups then flow to the
+CRM through the worker. README: "CRM write-back".
+
 ## What leaves the box
 
 Only calls a run makes on purpose:
@@ -142,6 +149,8 @@ Only calls a run makes on purpose:
   directory, RSS feeds, X if configured, and the company websites being
   classified.
 - **Slack:** only if you set a webhook.
+- **Your CRM (Attio or Affinity):** only if you set a key, and only for
+  startups at or past the push threshold.
 
 Nothing else phones home. Streamlit's usage statistics are off in
 `.streamlit/config.toml`.

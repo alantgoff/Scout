@@ -4211,5 +4211,140 @@ def thesis_archive(
     )
 
 
+# ------------------------------------------------------------------------ crm
+
+crm_app = typer.Typer(
+    help="CRM write-back: startups you pursue land in Attio or Affinity.",
+    no_args_is_help=True,
+)
+app.add_typer(crm_app, name="crm")
+
+
+def _crm_thesis_name(store: Store) -> str:
+    from scout.theses import resolve as resolve_thesis
+
+    try:
+        return resolve_thesis(store).name or ""
+    except Exception:  # noqa: BLE001 — a note without a thesis name is fine
+        return ""
+
+
+def _print_crm_results(results) -> None:
+    for r in results:
+        where = f" [dim]{r.remote_url}[/dim]" if r.remote_url else ""
+        if r.skipped:
+            console.print(f"[yellow]·[/yellow] @{r.handle} → {r.provider}: skipped — {r.skipped}")
+        elif r.error:
+            console.print(f"[red]✗[/red] @{r.handle} → {r.provider} ({r.domain}): {r.error}")
+        elif r.changed:
+            did = (["created the record"] if r.created else []) + (
+                ["added to the list"] if r.listed else []) + [f"note: {n}" for n in r.notes]
+            console.print(f"[green]✓[/green] @{r.handle} → {r.provider} ({r.domain}): "
+                          f"{', '.join(did)}{where}")
+        else:
+            console.print(f"[dim]= @{r.handle} → {r.provider} ({r.domain}): "
+                          f"already up to date[/dim]{where}")
+
+
+@crm_app.command("status")
+def crm_status() -> None:
+    """What is connected, the push rule, and what is waiting to go."""
+    from scout import crm
+
+    settings = Settings()
+    store = _open_store(settings)
+    clients = crm.clients_from(settings)
+    if not clients:
+        console.print("[yellow]No CRM connected.[/yellow] Set ATTIO_API_KEY (+ ATTIO_LIST) "
+                      "or AFFINITY_API_KEY (+ AFFINITY_LIST_ID).")
+        return
+    threshold = store.get_setting("crm_push_threshold") or crm.DEFAULT_THRESHOLD
+    auto = (store.get_setting("crm_auto_push") or "1") != "0"
+    for client in clients:
+        console.print(f"[bold]{client.label}[/bold] — list: {client.list_ref or 'none'}")
+    console.print(f"Pushes at: [bold]{STATUS_LABELS.get(threshold, threshold)}[/bold] "
+                  f"or later · on status change: {'yes' if auto else 'no (sync only)'}")
+    links = store.crm_links()
+    errors = [x for rows in links.values() for x in rows if x.get("last_error")]
+    waiting = crm.pending(store, settings, clients)
+    linked = sum(1 for rows in links.values() for x in rows if x.get("remote_id"))
+    console.print(f"{linked} linked record(s), "
+                  f"{len(errors)} with an error, {len(waiting)} waiting to sync"
+                  + (f" ({', '.join('@' + h for h in waiting[:5])})" if waiting else ""))
+    for row in errors[:10]:
+        console.print(f"  [red]✗[/red] @{row['handle']} → {row['provider']}: {row['last_error']}")
+
+
+@crm_app.command("push")
+def crm_push(
+    handles: Annotated[list[str], typer.Argument(help="Startups to send, by handle.")],
+) -> None:
+    """Send these startups to the CRM now, whatever their status."""
+    from scout import crm
+
+    settings = Settings()
+    store = _open_store(settings)
+    if not crm.configured(settings):
+        console.print("[red]No CRM connected[/red] — set ATTIO_API_KEY or AFFINITY_API_KEY.")
+        raise typer.Exit(1)
+    results = crm.sync(store, settings, handles=handles,
+                       thesis_name=_crm_thesis_name(store))
+    missing = {h.lstrip("@").lower() for h in handles} - {r.handle for r in results}
+    for handle in sorted(missing):
+        console.print(f"[yellow]·[/yellow] @{handle}: not in the ledger")
+    _print_crm_results(results)
+    if any(r.error for r in results):
+        raise typer.Exit(1)
+
+
+@crm_app.command("sync")
+def crm_sync(
+    limit: Annotated[int, typer.Option(help="Most companies to push this pass.")] = 50,
+) -> None:
+    """Push every startup at or past the threshold that has something new —
+    a first push, a list entry, or a changed memo. An unchanged pipeline
+    makes no API calls."""
+    from scout import crm
+
+    settings = Settings()
+    store = _open_store(settings)
+    if not crm.configured(settings):
+        console.print("[yellow]No CRM connected[/yellow] — nothing to sync.")
+        return
+    results = crm.sync(store, settings, limit=limit, thesis_name=_crm_thesis_name(store))
+    _print_crm_results(results)
+    console.print(f"CRM sync: {crm.summarize(results) if results else 'nothing new'}.")
+    if results and all(r.error for r in results):
+        raise typer.Exit(1)
+
+
+@crm_app.command("config")
+def crm_config(
+    threshold: Annotated[
+        str | None, typer.Option(help="Push at this status or later: longlisted | "
+                                      "shortlisted | contacted | meeting | diligence. "
+                                      "Allocated (portfolio) never auto-pushes.")
+    ] = None,
+    auto: Annotated[
+        bool | None, typer.Option("--auto/--no-auto",
+                                  help="Queue a push the moment a status crosses the "
+                                       "threshold (needs the worker).")
+    ] = None,
+) -> None:
+    """Set the firm-wide push rule (also on the Settings page)."""
+    from scout.crm import THRESHOLDS
+
+    store = _open_store(Settings())
+    if threshold is not None:
+        if threshold not in THRESHOLDS:
+            console.print(f"[red]Unknown threshold {threshold!r}[/red] — one of "
+                          f"{', '.join(THRESHOLDS)}.")
+            raise typer.Exit(1)
+        store.set_setting("crm_push_threshold", threshold)
+    if auto is not None:
+        store.set_setting("crm_auto_push", "1" if auto else "0")
+    crm_status()
+
+
 if __name__ == "__main__":
     app()
