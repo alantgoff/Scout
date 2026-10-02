@@ -1,0 +1,103 @@
+# Scout, self-hosted — for firms that won't put deal flow on someone
+# else's server. Everything runs on one box you control; the only outbound
+# traffic is what a run makes (Anthropic, the free sources, X if enabled).
+#
+#   cp deploy/docker/scout.env.example scout.env    # fill it in
+#   docker compose up -d                            # workspace + worker
+#   open http://localhost:8501
+#
+# Optional profiles:
+#   --profile tls      Caddy in front, automatic HTTPS for SCOUT_DOMAIN
+#   --profile backup   Litestream replicating the database to S3/R2/B2
+#
+# Full guide: deploy/docker/README.md
+
+name: scout
+
+x-scout: &scout
+  build: .
+  image: scout:local
+  init: true                       # forwards SIGTERM, reaps scraper children
+  restart: unless-stopped
+  env_file:
+    - path: scout.env
+      required: true
+  environment:
+    # The volume layout is the image's contract — not overridable from
+    # scout.env, so a laptop .env copied over can't point the DB elsewhere.
+    DB_PATH: /data/scout.db
+    OUT_DIR: /data/out
+    SCOUT_DATA: /data
+  volumes:
+    - scout-data:/data
+
+services:
+  ui:
+    <<: *scout
+    command: ["ui"]
+    environment:
+      DB_PATH: /data/scout.db
+      OUT_DIR: /data/out
+      SCOUT_DATA: /data
+      # Seen by the sign-in guard: off-loopback without Google sign-in
+      # refuses to start.
+      SCOUT_BIND: ${SCOUT_BIND:-127.0.0.1}
+      SCOUT_PORT: ${SCOUT_PORT:-8501}
+    ports:
+      # Loopback by default: reach it over SSH/VPN, or put the tls profile
+      # in front. Binding wider requires sign-in (see the guard above).
+      - "${SCOUT_BIND:-127.0.0.1}:${SCOUT_PORT:-8501}:8501"
+    healthcheck:
+      test: ["CMD", "python", "-c",
+             "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8501/_stcore/health', timeout=4)"]
+      interval: 30s
+      timeout: 5s
+      start_period: 40s
+      retries: 3
+
+  worker:
+    <<: *scout
+    command: ["worker"]
+    # The worker finishes the job in flight on SIGTERM rather than
+    # abandoning it half-written; a sourcing run is minutes. If it overruns
+    # anyway nothing is lost — the lease lapses and the job is requeued.
+    stop_grace_period: 15m
+
+  caddy:
+    image: caddy:2
+    profiles: ["tls"]
+    restart: unless-stopped
+    depends_on:
+      ui:
+        condition: service_healthy
+    env_file:
+      - path: scout.env
+        required: true
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"
+    volumes:
+      - ./deploy/docker/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+      - caddy-config:/config
+
+  litestream:
+    image: litestream/litestream:0.3.13
+    profiles: ["backup"]
+    restart: unless-stopped
+    command: ["replicate"]
+    depends_on:
+      ui:
+        condition: service_healthy   # the database exists once the UI is up
+    env_file:
+      - path: scout.env
+        required: true
+    volumes:
+      - scout-data:/data
+      - ./deploy/docker/litestream.yml:/etc/litestream.yml:ro
+
+volumes:
+  scout-data:
+  caddy-data:
+  caddy-config:

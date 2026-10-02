@@ -1,0 +1,30 @@
+# Secrets and firm data never enter the build context, let alone a layer.
+.env
+.env.*
+!.env.example
+scout.env
+**/*.cookies
+**/cookies.json
+**/x_cookies.json
+**/*.db
+**/*.db-wal
+**/*.db-shm
+**/secrets.toml
+
+# Local state and build noise.
+.git
+.venv
+.claude
+.gstack
+out
+docs
+**/__pycache__
+**/*.py[cod]
+.pytest_cache
+.ruff_cache
+**/.DS_Store
+
+# Not needed at run time.
+tests
+conftest.py
+Scout.command

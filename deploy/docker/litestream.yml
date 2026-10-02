@@ -1,0 +1,14 @@
+# Continuous replication of the Scout database (compose profile "backup").
+# Every value comes from scout.env; any S3-compatible store works
+# (AWS S3, Cloudflare R2, Backblaze B2, MinIO). Litestream reads
+# LITESTREAM_ACCESS_KEY_ID / LITESTREAM_SECRET_ACCESS_KEY itself.
+dbs:
+  - path: /data/scout.db
+    replicas:
+      - type: s3
+        bucket: ${LITESTREAM_BUCKET}
+        path: scout.db
+        region: ${LITESTREAM_REGION}
+        endpoint: ${LITESTREAM_ENDPOINT}
+        sync-interval: 10s
+        retention: 720h

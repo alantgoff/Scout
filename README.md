@@ -340,6 +340,25 @@ litestream for continuous backup to object storage. One small VM is enough;
 SQLite in WAL mode handles a firm's concurrency comfortably, and the database
 is a single file you can copy.
 
+### Self-hosting with Docker
+
+For a firm that won't put deal flow on someone else's server, the same stack
+ships as one Docker Compose project — workspace, worker, and optional TLS and
+backup — on any machine you control:
+
+```bash
+cp deploy/docker/scout.env.example scout.env   # add ANTHROPIC_API_KEY, SEC_USER_AGENT
+docker compose up -d                           # http://localhost:8501
+docker compose exec worker scout doctor
+docker compose --profile tls --profile backup up -d   # HTTPS + continuous backup
+```
+
+Everything the firm owns — database, thesis, seeds, logs — lives in one
+volume, so upgrades (`git pull && docker compose up -d --build`) never touch
+it. The workspace binds to localhost, and refuses to start anywhere wider
+without Google sign-in configured. Guide:
+[`deploy/docker/README.md`](deploy/docker/README.md).
+
 ### The phone app on Vercel
 
 The workspace (Streamlit, the worker, SQLite) is a long-running process and

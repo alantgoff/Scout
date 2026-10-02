@@ -1001,3 +1001,28 @@ def test_triage_writes_do_not_invalidate_the_expensive_cache(tmp_path) -> None:
     # …but real new evidence still does.
     store.save_leads("run-2", store.load_latest_leads())
     assert store.ledger_stamp() != before
+
+
+def test_fresh_install_renders_every_page(tmp_path, monkeypatch) -> None:
+    """A brand-new, empty database — what a self-hosted container serves on
+    first start. `./start` seeds demo data before the UI ever opens, which
+    hid a crash here: the masthead's thesis version read the `runs` table
+    before any run had created it."""
+    db = tmp_path / "fresh.db"
+    monkeypatch.setenv("DB_PATH", str(db))
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "")
+    at = AppTest.from_file(str(UI_PATH), default_timeout=30)
+    at.run()
+    assert not at.exception, at.exception[0].message if at.exception else ""
+    pages = ["Thesis", "Startups", "Longlist", "Shortlist", "Memos", "Activity",
+             "Graph", "Evidence", "Automation", "Settings"]
+    for page in pages:
+        at.session_state["nav"] = page
+        at.run()
+        assert not at.exception, (
+            f"{page}: {at.exception[0].message}" if at.exception else ""
+        )
+    at.session_state["nav"] = "Startups"
+    at.session_state["startups_view"] = "Database"
+    at.run()
+    assert not at.exception, at.exception[0].message if at.exception else ""

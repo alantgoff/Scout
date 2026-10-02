@@ -1,0 +1,8 @@
+# TLS in front of the Scout workspace (compose profile "tls").
+# Caddy obtains and renews the certificate for SCOUT_DOMAIN automatically;
+# point the domain's DNS at this host and open ports 80 and 443.
+{$SCOUT_DOMAIN} {
+	encode zstd gzip
+	# Streamlit's websocket (/_stcore/stream) proxies through unchanged.
+	reverse_proxy ui:8501
+}

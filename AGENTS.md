@@ -79,6 +79,7 @@ uv run pytest -q                 # ~630 tests, ~40s, no network (incl. AppTest U
 ./scout-cli ui                   # Streamlit workspace on :8501
 ./scout-cli doctor               # readiness: keys, seeds, worker, per-source reachability
 ./start                          # user-facing launcher: sync → seed-if-empty → serve → open browser
+docker compose up -d             # self-host: workspace + worker in containers (deploy/docker/)
 
 # multiplayer / background
 ./scout-cli migrate --owner you@firm.com  # adopt a single-user DB (idempotent)
@@ -419,6 +420,29 @@ scout/
                     signals); company_key/group_by_company fold accounts
                     sharing a company into one entry (primary = highest score).
   demo_data.py      8 synthetic sample founders for `scout demo` (obviously fake handles).
+  container.py      The self-host image's entrypoint (`python -m scout.container
+                    ui|worker|layout|<cli cmd>`). The image holds code; the
+                    /data volume holds everything the firm owns. The app reads
+                    thesis.yaml / seeds.yaml / theses/ / docs/ RELATIVE TO ITS
+                    SOURCE TREE (ui.PROJECT_ROOT, the worker's child cwd), so
+                    `layout` (build time) moves the shipped defaults to
+                    /app/defaults and plants symlinks into /data — which is
+                    also why the install stays EDITABLE (a site-packages
+                    install would move PROJECT_ROOT). First start copies
+                    missing defaults in, never over the firm's copy (staged
+                    + renamed: both containers race to it). Two guards: the
+                    UI refuses to start when reachable beyond the host
+                    (SCOUT_DOMAIN, or SCOUT_BIND off loopback) without Google
+                    sign-in — it renders Streamlit's [auth] block from
+                    GOOGLE_CLIENT_ID/SECRET with a cookie secret persisted in
+                    the volume; and the worker bootstraps schedules only into
+                    a DB that has never had any (marker file), so a deleted
+                    schedule stays deleted. Bundle: Dockerfile, compose.yaml
+                    (ui + worker; caddy/litestream behind the tls/backup
+                    profiles), deploy/docker/. test_container.py pins the
+                    logic AND the bundle (compose/Dockerfile agreement,
+                    secrets out of the build context, every env-example key
+                    read by something, stock-only Caddy directives).
   ui.py             Streamlit app, TEN pages: Thesis / Startups (Feed +
                     Database) / Longlist / Shortlist / Memos / Activity /
                     Graph / Evidence / Automation / Settings. Session-state nav
@@ -509,7 +533,8 @@ tests/              pytest, no network — test_star_velocity (snapshot deltas,
                     digests), test_theses (per-member resolution),
                     test_hindsight (point-in-time discipline, base rates,
                     fairness), test_signal_eval (the statistics, against
-                    known answers).
+                    known answers), test_container (entrypoint logic + the
+                    bundle's static contract).
 thesis.yaml         Targeting + weights + signal_params + firm value-add levers
                     + llm_prompt. User-owned.
 seeds.yaml          Query bank, bio_searches, watchlist, github_topics. User-owned.
@@ -1010,10 +1035,13 @@ silently widen its input set to all-time).
     (Results / Signals / Over time).
   - `run --watch` is GONE rather than left as a stub; scheduling is the worker.
   - **Not yet built:** CRM write-back (Affinity/Attio — deliberately deferred
-    until a firm names theirs) and a self-host (Docker Compose) bundle for
-    firms that will not put dealflow on a third-party server. (Warm-intro
-    paths — scout/intros.py — and source attribution — insights.
-    source_yield — are built.)
+    until a firm names theirs). (Warm-intro paths — scout/intros.py — source
+    attribution — insights.source_yield — and the Docker Compose self-host
+    bundle — scout/container.py, deploy/docker/ — are built. The bundle was
+    built and run end to end: fresh-DB first start, doctor in-container,
+    data surviving `down`/`up`, a deleted schedule staying deleted, the
+    sign-in guard, Caddy TLS with the websocket, and a Litestream
+    replicate→restore across containers.)
 
 ---
 

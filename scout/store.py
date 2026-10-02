@@ -1076,11 +1076,15 @@ class Store:
     def thesis_version_history(self, thesis_id: str) -> list[dict]:
         if not self.db["thesis_versions"].exists():
             return []
+        # A fresh install registers its thesis before any run exists.
+        run_count = (
+            "(select count(*) from runs r where r.thesis_id = v.thesis_id"
+            " and r.thesis_version = v.version)"
+            if self.db["runs"].exists() else "0"
+        )
         rows = self.db.execute(
-            """
-            select v.version, v.created_at,
-                   (select count(*) from runs r
-                     where r.thesis_id = v.thesis_id and r.thesis_version = v.version)
+            f"""
+            select v.version, v.created_at, {run_count}
             from thesis_versions v where v.thesis_id = ?
             order by v.created_at asc
             """,

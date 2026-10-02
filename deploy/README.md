@@ -1,5 +1,8 @@
 # Deploying Scout for a firm (one small VM)
 
+Prefer containers? [`docker/README.md`](docker/README.md) runs the same stack
+with `docker compose up -d` — no uv, systemd or Caddy install on the host.
+
 One box runs everything: the Streamlit workspace, the job worker, litestream
 backup, and Caddy for TLS. SQLite (WAL mode) is the database — correct at this
 team size because every write path in `scout/store.py` runs inside

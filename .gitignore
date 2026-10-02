@@ -25,3 +25,7 @@ __pycache__/
 # Phone digest checkout (its own repo: scout-digest)
 docs/
 .gstack/
+
+# Self-host (docker compose) secrets — copy from deploy/docker/scout.env.example
+scout.env
+.streamlit/secrets.toml
