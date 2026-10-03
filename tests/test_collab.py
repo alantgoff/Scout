@@ -500,3 +500,15 @@ def test_migrate_never_overwrites_a_real_vote(tmp_path: Path) -> None:
 def test_migrate_requires_an_owner(tmp_path: Path) -> None:
     with pytest.raises(ValueError):
         make_store(tmp_path).migrate_multiplayer("  ")
+
+
+def test_email_allowed_never_locks_out_an_admin() -> None:
+    from scout.collab import email_allowed
+
+    assert email_allowed("anyone@x.com", "", "")  # open bootstrap state
+    assert email_allowed("ada@firm.com", "firm.com", "")
+    assert email_allowed("ADA@FIRM.COM", "@firm.com", "")
+    assert not email_allowed("ada@firmx.com", "firm.com", "")
+    assert email_allowed("guest@other.io", "firm.com", "guest@other.io, x@y.z")
+    assert not email_allowed("me@old-domain.com", "new-domain.com", "")
+    assert email_allowed("me@old-domain.com", "new-domain.com", "", is_admin=True)

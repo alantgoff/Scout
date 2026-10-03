@@ -30,9 +30,24 @@ KIND_REFRESH = "refresh_tracked"
 KIND_RESOLVE = "resolve_unlinked"
 KIND_PUBLISH = "publish_digest"
 KIND_CRM = "crm_sync"
+KIND_RECLASSIFY = "reclassify"
+KIND_PREVIEW = "source_preview"
 
 JOB_KINDS = {KIND_RUN, KIND_MEMO, KIND_DIGEST, KIND_VERIFY, KIND_REFRESH, KIND_RESOLVE,
-             KIND_PUBLISH, KIND_CRM}
+             KIND_PUBLISH, KIND_CRM, KIND_RECLASSIFY, KIND_PREVIEW}
+
+# What a schedule may fire, in the order the editor offers them. Memos need
+# a startup and previews are one-offs, so neither is schedulable.
+SCHEDULABLE_KINDS = [KIND_RUN, KIND_RESOLVE, KIND_REFRESH, KIND_DIGEST, KIND_PUBLISH,
+                     KIND_VERIFY, KIND_CRM, KIND_RECLASSIFY]
+
+
+def default_payload(kind: str) -> dict:
+    """The payload a new schedule of this kind starts with."""
+    return {
+        KIND_RUN: {"source": "twscrape"},
+        KIND_DIGEST: {"window": "daily"},
+    }.get(kind, {})
 
 JOB_LABELS = {
     KIND_RUN: "Sourcing run",
@@ -43,6 +58,8 @@ JOB_LABELS = {
     KIND_RESOLVE: "Unlinked-lead resolve",
     KIND_PUBLISH: "Phone app publish",
     KIND_CRM: "CRM sync",
+    KIND_RECLASSIFY: "Rescore",
+    KIND_PREVIEW: "Discovery preview",
 }
 
 # Terminal states never re-enter the queue.

@@ -81,8 +81,17 @@ def _log_path(settings: Settings, kind: str) -> Path:
     return log_dir / f"{kind}-{stamp}.log"
 
 
+class JobStopped(RuntimeError):
+    """A member stopped the run this job was executing. Not a failure to
+    retry: the job ends, and the queue does not bring it back."""
+
+
+# How often a running child is checked for a stop request.
+STOP_POLL_S = 5
+
+
 def _run_cli(args: list[str], settings: Settings, kind: str,
-             actor: str) -> tuple[int, Path, str]:
+             actor: str, store: Store | None = None) -> tuple[int, Path, str]:
     """Run `python -m scout.cli <args>` as a child, tee'd to a log file.
 
     Returns (exit_code, log_path, tail). The tail is the last few lines,
@@ -107,15 +116,41 @@ def _run_cli(args: list[str], settings: Settings, kind: str,
             stdout=fh, stderr=subprocess.STDOUT, env=env,
             start_new_session=True,
         )
-        try:
-            code = proc.wait(timeout=CHILD_TIMEOUT_S)
-        except subprocess.TimeoutExpired:
-            # Kill the whole process group: scrapers spawn helpers, and a
-            # bare terminate() would orphan them.
-            os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
-            proc.wait(timeout=30)
-            code = -9
+        deadline = time.monotonic() + CHILD_TIMEOUT_S
+        stopped_by = None
+        while True:
+            try:
+                code = proc.wait(timeout=STOP_POLL_S)
+                break
+            except subprocess.TimeoutExpired:
+                pass
+            if store is not None and (stopped_by := store.scan_stop_requested()):
+                _kill_group(proc, signal.SIGTERM)
+                code = -15
+                break
+            if time.monotonic() > deadline:
+                # Kill the whole process group: scrapers spawn helpers, and a
+                # bare terminate() would orphan them.
+                _kill_group(proc, signal.SIGKILL)
+                code = -9
+                break
+    if stopped_by:
+        store.scan_finish("failed", f"stopped by {stopped_by}")
+        raise JobStopped(f"stopped by {stopped_by}")
     return code, log_path, _tail(log_path)
+
+
+def _kill_group(proc: subprocess.Popen, sig: int) -> None:
+    """Signal the child's whole process group, escalating to SIGKILL if it
+    doesn't exit."""
+    try:
+        os.killpg(os.getpgid(proc.pid), sig)
+        proc.wait(timeout=30)
+    except subprocess.TimeoutExpired:
+        os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+        proc.wait(timeout=30)
+    except ProcessLookupError:
+        pass
 
 
 def _tail(path: Path, lines: int = 12) -> str:
@@ -138,8 +173,10 @@ def handle_run(store: Store, settings: Settings, job: dict) -> dict:
         args += ["--max-accounts", str(payload["max_accounts"])]
     if payload.get("min_score"):
         args += ["--min-score", str(payload["min_score"])]
+    if payload.get("ttl_days") is not None:
+        args += ["--ttl-days", str(payload["ttl_days"])]
     code, log_path, tail = _run_cli(args, settings, "run",
-                                    job.get("requested_by", "system:scout"))
+                                    job.get("requested_by", "system:scout"), store)
     if code != 0:
         raise RuntimeError(
             f"sourcing run exited {code}\n{tail}" if code != -9
@@ -224,9 +261,40 @@ def handle_publish(store: Store, settings: Settings, job: dict) -> dict:
     return {"log_path": str(log_path)}
 
 
+def handle_reclassify(store: Store, settings: Settings, job: dict) -> dict:
+    """Re-score without discovery (`scout reclassify`): cache-first, so a
+    rescore after a weights change costs little. `scope`: latest (default),
+    stale (only startups scored under an older thesis version) or all."""
+    payload = job.get("payload") or {}
+    args = ["reclassify"]
+    scope = payload.get("scope", "latest")
+    if scope == "stale":
+        args.append("--stale-only")
+    elif scope == "all":
+        args.append("--all")
+    code, log_path, tail = _run_cli(args, settings, "reclassify",
+                                    job.get("requested_by", "system:scout"), store)
+    if code != 0:
+        raise RuntimeError(f"rescore exited {code}\n{tail}")
+    return {"log_path": str(log_path)}
+
+
+def handle_preview(store: Store, settings: Settings, job: dict) -> dict:
+    """Free discovery only (`scout source`) — what a run would find, unscored."""
+    payload = job.get("payload") or {}
+    args = ["source"]
+    if payload.get("max_accounts"):
+        args += ["--max-accounts", str(payload["max_accounts"])]
+    code, log_path, tail = _run_cli(args, settings, "source",
+                                    job.get("requested_by", "system:scout"), store)
+    if code != 0:
+        raise RuntimeError(f"discovery preview exited {code}\n{tail}")
+    return {"log_path": str(log_path)}
+
+
 def handle_verify(store: Store, settings: Settings, job: dict) -> dict:
     code, log_path, tail = _run_cli(["verify"], settings, "verify",
-                                    job.get("requested_by", "system:scout"))
+                                    job.get("requested_by", "system:scout"), store)
     if code != 0:
         raise RuntimeError(f"verification exited {code}\n{tail}")
     return {"log_path": str(log_path)}
@@ -267,6 +335,8 @@ HANDLERS = {
     jobs_mod.KIND_RESOLVE: handle_resolve,
     jobs_mod.KIND_PUBLISH: handle_publish,
     jobs_mod.KIND_CRM: handle_crm,
+    jobs_mod.KIND_RECLASSIFY: handle_reclassify,
+    jobs_mod.KIND_PREVIEW: handle_preview,
 }
 
 
@@ -289,6 +359,10 @@ def execute_job(store: Store, settings: Settings, job: dict) -> bool:
     try:
         with _Heartbeat(store, job["id"]):
             result = handler(store, settings, job)
+    except JobStopped as exc:
+        store.fail_job(job["id"], str(exc), retry=False)
+        console.print(f"[yellow]■ {label}[/yellow] — {exc}")
+        return False
     except Exception as exc:  # noqa: BLE001 — a handler must not stop the loop
         message = f"{type(exc).__name__}: {exc}"
         retrying = store.fail_job(job["id"], message)

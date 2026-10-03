@@ -474,3 +474,97 @@ def test_digest_blocks_render_without_a_base_url(tmp_path: Path) -> None:
     data = notify.digest_data(store, datetime.now(UTC) - timedelta(hours=24))
     blocks = notify.digest_blocks(data)
     assert "*Hotco*" in str(blocks)  # no <url|name>, just the name
+
+
+# --- stopping, rescoring, schedulable kinds ---------------------------------------
+
+
+def test_schedulable_kinds_cover_the_bootstrap_schedules(tmp_path: Path) -> None:
+    store = make_store(tmp_path)
+    worker.bootstrap_schedules(store)
+    for row in store.schedules():
+        assert row["kind"] in jobs_mod.SCHEDULABLE_KINDS
+    assert jobs_mod.default_payload(jobs_mod.KIND_DIGEST) == {"window": "daily"}
+    assert jobs_mod.default_payload(jobs_mod.KIND_RESOLVE) == {}
+
+
+def test_a_stopped_job_is_not_retried(tmp_path: Path) -> None:
+    store = make_store(tmp_path)
+    job_id = store.enqueue_job(jobs_mod.KIND_RUN, {})
+    store.claim_job("w1")
+    assert store.fail_job(job_id, "stopped by alan", retry=False) is False
+    assert store.get_job(job_id)["status"] == "failed"
+
+
+def test_stop_request_reaches_only_a_running_scan(tmp_path: Path) -> None:
+    store = make_store(tmp_path)
+    assert store.request_scan_stop() is False
+    store.scan_start("run", 0, phases=["discovering"])
+    assert store.scan_stop_requested() is None
+    assert store.request_scan_stop("alan@firm.com") is True
+    assert store.scan_stop_requested() == "alan@firm.com"
+    store.scan_start("run", 0)  # a new scan starts clean
+    assert store.scan_stop_requested() is None
+
+
+def test_a_scan_on_another_host_is_not_declared_dead_by_pid(tmp_path: Path) -> None:
+    """Under docker compose the UI can't see the worker's pids: probing one
+    flagged every live worker run as failed."""
+    store = make_store(tmp_path)
+    store.scan_start("run", 999_999)  # a pid that doesn't exist here
+    row = store._scan_row()
+    row["host"] = "worker-container"
+    store.db["scan"].upsert(row, pk="id")
+    assert store.current_scan()["status"] == "running"
+    row["updated_at"] = (datetime.now(timezone.utc) - timedelta(hours=2)).isoformat()
+    store.db["scan"].upsert(row, pk="id")
+    assert store.current_scan()["status"] == "failed"  # silent for 2h: dead
+
+
+def test_run_cli_stops_its_child_when_asked(tmp_path: Path, monkeypatch) -> None:
+    import subprocess
+    import sys
+
+    store = make_store(tmp_path)
+    settings = worker.Settings(db_path=tmp_path / "scout.db")
+    real_popen = subprocess.Popen
+
+    def slow_child(cmd, **kw):
+        store.scan_start("run", 0)
+        store.request_scan_stop("sara@firm.com")
+        return real_popen([sys.executable, "-c", "import time; time.sleep(60)"], **kw)
+
+    monkeypatch.setattr(worker.subprocess, "Popen", slow_child)
+    monkeypatch.setattr(worker, "STOP_POLL_S", 0.2)
+    with pytest.raises(worker.JobStopped, match="sara@firm.com"):
+        worker._run_cli(["run"], settings, "run", "alan@firm.com", store)
+    assert store.current_scan()["status"] == "failed"
+    assert "stopped by sara" in store.current_scan()["detail"]
+
+
+def test_handlers_pass_their_options(tmp_path: Path, monkeypatch) -> None:
+    calls: list[list[str]] = []
+
+    def fake_cli(args, settings, kind, actor, store=None):
+        calls.append(args)
+        return 0, tmp_path / "x.log", ""
+
+    monkeypatch.setattr(worker, "_run_cli", fake_cli)
+    store = make_store(tmp_path)
+    settings = worker.Settings(db_path=tmp_path / "scout.db")
+    worker.handle_run(store, settings, {"payload": {"source": "free", "ttl_days": 3}})
+    worker.handle_reclassify(store, settings, {"payload": {"scope": "stale"}})
+    worker.handle_reclassify(store, settings, {"payload": {}})
+    worker.handle_preview(store, settings, {"payload": {"max_accounts": 40}})
+    assert calls[0][:3] == ["run", "--source", "free"] and calls[0][-2:] == ["--ttl-days", "3"]
+    assert calls[1] == ["reclassify", "--stale-only"]
+    assert calls[2] == ["reclassify"]
+    assert calls[3] == ["source", "--max-accounts", "40"]
+
+
+def test_daily_spend_cap_is_a_firm_setting(tmp_path: Path) -> None:
+    store = make_store(tmp_path)
+    store.set_setting("daily_spend_cap_usd", "2.5")
+    settings = worker.Settings(db_path=tmp_path / "scout.db")
+    store.apply_settings_overrides(settings)
+    assert settings.daily_spend_cap_usd == 2.5

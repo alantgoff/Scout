@@ -9,6 +9,7 @@ from __future__ import annotations
 import json
 import re
 import os
+import socket
 import shutil
 from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
@@ -43,6 +44,19 @@ def _author_key(name: str) -> str:
     a test pins the two implementations together."""
     cleaned = re.sub(r"[^\w\s-]", " ", (name or "").lower())
     return re.sub(r"\s+", " ", cleaned).strip()
+
+
+def _age_seconds(ts: str | None) -> float:
+    """Seconds since an ISO timestamp; 0 when unknown."""
+    if not ts:
+        return 0.0
+    try:
+        then = datetime.fromisoformat(ts)
+    except ValueError:
+        return 0.0
+    if then.tzinfo is None:
+        then = then.replace(tzinfo=timezone.utc)
+    return (datetime.now(timezone.utc) - then).total_seconds()
 
 
 class Store:
@@ -377,6 +391,7 @@ class Store:
     # here — they stay in the environment, never UI-writable.
     RUNTIME_SETTING_FIELDS: dict[str, type] = {
         "xapi_spend_cap_usd": float,
+        "daily_spend_cap_usd": float,
         "claude_model": str,
         "max_accounts": int,
         "ttl_days": int,
@@ -3461,9 +3476,12 @@ class Store:
                 },
             )
 
-    def fail_job(self, job_id: int, error: str, log_path: str = "") -> bool:
+    def fail_job(self, job_id: int, error: str, log_path: str = "",
+                 *, retry: bool = True) -> bool:
         """Record a failure. Retries with backoff until max_attempts, then
-        the job goes terminal. Returns True if it will be retried."""
+        the job goes terminal. `retry=False` ends it now — a run someone
+        stopped must not come back on its own. Returns True if it will be
+        retried."""
         now = datetime.now(timezone.utc)
         with self.write_tx():
             row = self._job_row(job_id)
@@ -3471,7 +3489,7 @@ class Store:
                 return False
             attempts = int(row.get("attempts") or 0)
             max_attempts = int(row.get("max_attempts") or jobs_mod.MAX_ATTEMPTS)
-            will_retry = attempts < max_attempts
+            will_retry = retry and attempts < max_attempts
             update = {
                 "error": error[:2000],
                 **({"log_path": log_path} if log_path else {}),
@@ -3759,10 +3777,38 @@ class Store:
                 "phases_json": json.dumps(phases or []),
                 "phase_log_json": json.dumps([{"phase": "starting", "at": now}]),
                 "log_path": os.environ.get("SCOUT_SCAN_LOG", ""),
+                # Where the pid lives. A pid only means something on its own
+                # host: under docker compose the UI and the worker are
+                # different containers, and probing the worker's pid from the
+                # UI flagged every live worker run as dead.
+                "host": socket.gethostname(),
+                "stop_requested": 0,
+                "stop_requested_by": "",
             },
             pk="id",
             alter=True,
         )
+
+    def request_scan_stop(self, actor: str | None = None) -> bool:
+        """Ask the running scan to stop. Cooperative: whoever owns the
+        process (the worker, or the UI that launched it) sees the flag and
+        stops it. Returns False when nothing is running."""
+        with self.write_tx():
+            row = self._scan_row()
+            if not row or row.get("status") != "running":
+                return False
+            row.update(stop_requested=1,
+                       stop_requested_by=actor or self.actor or "",
+                       updated_at=datetime.now(timezone.utc).isoformat())
+            self.db["scan"].upsert(row, pk="id", alter=True)
+            return True
+
+    def scan_stop_requested(self) -> str | None:
+        """Who asked the running scan to stop, or None."""
+        row = self._scan_row()
+        if row and row.get("status") == "running" and row.get("stop_requested"):
+            return row.get("stop_requested_by") or "someone"
+        return None
 
     def scan_update(
         self,
@@ -3825,14 +3871,24 @@ class Store:
         if not row:
             return None
         if row.get("status") == "running" and row.get("pid"):
-            try:
-                os.kill(int(row["pid"]), 0)
-            except (ProcessLookupError, ValueError):
-                self.scan_finish("failed", "process exited unexpectedly")
+            if (row.get("host") or socket.gethostname()) == socket.gethostname():
+                try:
+                    os.kill(int(row["pid"]), 0)
+                except (ProcessLookupError, ValueError):
+                    self.scan_finish("failed", "process exited unexpectedly")
+                    row = self._scan_row()
+                except PermissionError:
+                    pass  # process exists but isn't ours — treat as alive
+            elif _age_seconds(row.get("updated_at")) > self.SCAN_SILENCE_S:
+                # Another host's process can't be probed; silence is the
+                # only evidence it died.
+                self.scan_finish("failed", "no progress reported for an hour")
                 row = self._scan_row()
-            except PermissionError:
-                pass  # process exists but isn't ours — treat as alive
         return row
+
+    # A scan on another host that reports nothing for this long is dead.
+    # Generous: the network phase alone is budgeted at minutes.
+    SCAN_SILENCE_S = 3600
 
     # ---------------------------------------------------------- budget ledger
 

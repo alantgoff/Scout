@@ -111,3 +111,21 @@ def parse_mentions(body: str, users: list[dict]) -> list[str]:
         if target and target not in found:
             found.append(target)
     return found
+
+
+def email_allowed(email: str, domain: str, emails: str | list[str] | set[str],
+                  *, is_admin: bool = False) -> bool:
+    """Whether an email may enter the workspace under an allowlist.
+
+    Nothing configured is the open bootstrap state. Admins are always
+    allowed: an allowlist an admin saves can never lock out the people who
+    can fix it — before this, setting the wrong domain locked out everyone,
+    with no way back in from the UI or the CLI."""
+    email = (email or "").strip().lower()
+    domain = (domain or "").strip().lower().lstrip("@")
+    if isinstance(emails, str):
+        emails = emails.split(",")
+    allowed = {e.strip().lower() for e in emails if e and e.strip()}
+    if is_admin or (not domain and not allowed):
+        return True
+    return email in allowed or (bool(domain) and email.endswith("@" + domain))

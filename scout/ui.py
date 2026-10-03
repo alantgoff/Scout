@@ -39,6 +39,7 @@ import math
 import os
 import re
 import signal
+import socket
 import subprocess
 import sys
 import time
@@ -88,6 +89,7 @@ from scout.collab import (
     STANCES,
     contested_sort_key,
     disagreements,
+    email_allowed,
     parse_mentions,
     vote_summary,
 )
@@ -1114,7 +1116,7 @@ def _launch_scan(args: list[str], kind_hint: str, job_kind: str = "",
                          env=env, start_new_session=True)
     st.session_state["launch_pending"] = time.time()
     st.session_state["last_log_path"] = str(log_path)
-    st.session_state["toast"] = "Pipeline started — live progress below."
+    st.session_state["toast"] = f"{run_label(kind_hint)} started — live progress below."
     st.rerun()
 
 
@@ -1255,22 +1257,21 @@ def _current_user():
         return None
 
 
+def _is_admin_email(email: str) -> bool:
+    row = store.get_user(email) or {}
+    always = {e.strip().lower() for e in
+              os.environ.get("SCOUT_ADMIN_EMAILS", "").split(",") if e.strip()}
+    return row.get("role") == "admin" or email in always
+
+
 def _user_allowed(email: str) -> bool:
     """Allowlist from the settings table: an email domain and/or explicit
-    emails. Nothing configured = open — the bootstrap state; the first login
-    becomes admin and locks it down in Settings."""
-    domain = (
-        (store.get_setting("allowed_email_domain") or "")
-        .strip().lower().lstrip("@")
-    )
-    emails = {
-        e.strip().lower()
-        for e in (store.get_setting("allowed_emails") or "").split(",")
-        if e.strip()
-    }
-    if not domain and not emails:
-        return True
-    return email in emails or (bool(domain) and email.endswith("@" + domain))
+    emails (collab.email_allowed). Nothing configured = open — the bootstrap
+    state; the first login becomes admin and locks it down in Settings.
+    Admins always get in."""
+    return email_allowed(email, store.get_setting("allowed_email_domain") or "",
+                         store.get_setting("allowed_emails") or "",
+                         is_admin=_is_admin_email(email))
 
 
 _login_user = _current_user()
@@ -1840,12 +1841,31 @@ def _run_panel() -> None:
     b1, b2, _sp = st.columns([1, 1.3, 3.7])
     if running:
         if b1.button("Stop run", key="rp_stop"):
-            try:
-                os.kill(int(scan.get("pid") or 0), signal.SIGTERM)
-            except (ProcessLookupError, ValueError):
-                pass
-            store.scan_finish("failed", "stopped from the UI")
-            st.session_state["toast"] = "Run stopped."
+            # Cooperative first: the flag reaches whoever owns the process.
+            # A worker-run scan is stopped by the worker (and not requeued);
+            # only a run this UI launched on this machine is killed here — a
+            # pid from another container means nothing (or something else).
+            store.request_scan_stop(ACTOR)
+            worker_owned = bool(store.jobs(status="running", limit=5))
+            local = (scan.get("host") or socket.gethostname()) == socket.gethostname()
+            if local and not worker_owned:
+                pid = int(scan.get("pid") or 0)
+                try:
+                    os.killpg(pid, signal.SIGTERM)  # launched with its own session
+                except (ProcessLookupError, PermissionError, ValueError, OSError):
+                    try:
+                        os.kill(pid, signal.SIGTERM)
+                    except (ProcessLookupError, PermissionError, ValueError, OSError):
+                        pass
+                store.scan_finish("failed", f"stopped by {_who(ACTOR)}")
+                st.session_state["toast"] = "Run stopped."
+            else:
+                st.session_state["toast"] = (
+                    "Stop requested — the worker ends the run within seconds.")
+            st.rerun(scope="app")
+    elif scan.get("status") == "failed":
+        if b1.button("Dismiss", key="rp_dismiss"):
+            st.session_state["page_loaded_at"] = datetime.now(timezone.utc).isoformat()
             st.rerun(scope="app")
     elif scan.get("status") == "done":
         if b1.button("View results", key="rp_refresh", type="primary"):
@@ -3191,7 +3211,9 @@ def _render_startup_feed() -> None:
                     unsafe_allow_html=True,
                 )
                 if st.button(f"Rescore {visible_stale} stale", key="rescore_stale"):
-                    _launch_scan(["reclassify", "--stale-only"], "reclassify")
+                    _launch_scan(["reclassify", "--stale-only"], "reclassify",
+                                 job_kind=jobs_mod.KIND_RECLASSIFY,
+                                 payload={"scope": "stale"})
 
         # Reset pagination whenever the view changes (track, scope, filters…)
         page_size = 25
@@ -3879,6 +3901,107 @@ if nav == "Memos":
                 st.rerun()
 
 
+def _render_run_controls() -> None:
+    """Start a run: source, size, the time estimate, the paid-run spend
+    confirmation, Run / Preview / Rescore, then the live run panel. Runs go
+    to the worker's queue when one is alive, otherwise launch from here."""
+    st.markdown('<div class="section-title">Run discovery</div>'
+                '<div class="section-sub">The free sources (GitHub, Hacker News, RSS, SEC '
+                'Form D, YC, arXiv), plus X when it\'s connected. Runs are incremental — '
+                'recently scored startups are skipped.</div>',
+                unsafe_allow_html=True)
+    r1, r2, r3, r4 = st.columns([1.4, 1, 1, 1])
+    # Default to what will actually run: without X cookies the free X
+    # scraper can't start, so "No X" is the honest default (it used to say
+    # "twscrape (free)" and then explain it wouldn't use X).
+    x_connected = bool(settings.tw_cookies and Path(settings.tw_cookies).exists())
+    with r1:
+        source = st.segmented_control(
+            "Source", ["X (free scraper)", "No X", "X API (paid)"],
+            default="X (free scraper)" if x_connected else "No X",
+            required=True, key="run_source",
+            help="The free sources (GitHub, Hacker News, RSS, SEC Form D, YC, "
+                 "arXiv) always run. X adds the query bank, bio search and the "
+                 "investor follow graph.")
+    with r2:
+        max_accounts = st.number_input("Max accounts", 10, 2000, settings.max_accounts,
+                                       step=10, key="run_max",
+                                       help="Most accounts this run reads from discovery.")
+    with r3:
+        min_score_run = st.number_input("Min score", 0, 100, 0, step=5, key="run_minscore",
+                                        help="Startups scoring below this aren't saved "
+                                             "from this run.")
+    with r4:
+        ttl = st.number_input("Skip if scored < N days", 0, 90, settings.ttl_days,
+                              key="run_ttl",
+                              help="Startups scored more recently than this are not "
+                                   "re-scored — runs stay incremental.")
+    paid_run = source == "X API (paid)"
+    run_source = "xapi" if paid_run else ("free" if source == "No X" else "twscrape")
+    if run_source == "twscrape" and not x_connected:
+        st.markdown('<div class="subtle">X isn\'t connected (no <code>TW_COOKIES</code>) — '
+                    'this run will use the free sources only.</div>',
+                    unsafe_allow_html=True)
+    scan_active = ((store.current_scan() or {}).get("status") == "running")
+    run_ready = not scan_active
+
+    # Time estimate up front — empirical after the first completed run,
+    # settings-derived before that.
+    est_lo, est_hi, _per, est_label = _estimate_scan("run", max_accounts=int(max_accounts))
+    st.markdown(
+        f'<div class="rp-est">Estimated <b>{_fmt_dur(est_lo)}–{_fmt_dur(est_hi)}</b> '
+        f'for this run · {_e(est_label)}. Runs happen in the background — you can '
+        'keep browsing while the pipeline reports progress below.</div>',
+        unsafe_allow_html=True,
+    )
+    if paid_run:
+        spent_now = store.xapi_spend_usd()
+        remaining = max(settings.xapi_spend_cap_usd - spent_now, 0.0)
+        est_profiles = int(max_accounts) * settings.xapi_cost_per_user_read
+        est_tweets = (int(max_accounts) * settings.tweets_per_account
+                      * settings.xapi_cost_per_post_read)
+        est_total = est_profiles + est_tweets
+        st.markdown(
+            f'<div class="subtle">Worst case ≈ <b>${est_total:.2f}</b> '
+            f'(${est_profiles:.2f} profiles + up to ${est_tweets:.2f} tweets; the '
+            f'bio-signal gate usually cuts the tweet part sharply) · '
+            f'<b>${remaining:.2f}</b> left of the ${settings.xapi_spend_cap_usd:.0f} cap.</div>',
+            unsafe_allow_html=True,
+        )
+        run_ready = run_ready and st.checkbox(
+            f"Spend up to ${est_total:.2f} of the X API budget",
+            key="confirm_run_spend",
+        )
+    run_col, preview_col, reclass_col, _sp = st.columns([1, 1.75, 1.75, 1.5])
+    if run_col.button("Run scout", type="primary", disabled=not run_ready):
+        _launch_scan(["run", "--source", run_source,
+                      "--max-accounts", str(int(max_accounts)),
+                      "--min-score", str(int(min_score_run)), "--ttl-days", str(int(ttl))],
+                     "run",
+                     job_kind=jobs_mod.KIND_RUN,
+                     payload={"source": run_source,
+                              "max_accounts": int(max_accounts),
+                              "min_score": int(min_score_run),
+                              "ttl_days": int(ttl)})
+    if preview_col.button("Preview discovery (free, no scoring)", disabled=scan_active):
+        _launch_scan(["source", "--max-accounts", str(int(max_accounts))], "source",
+                     job_kind=jobs_mod.KIND_PREVIEW,
+                     payload={"max_accounts": int(max_accounts)})
+    if reclass_col.button(
+        "Rescore latest run", key="run_rescore",
+        disabled=scan_active or not (leads or ledger),
+        help="Re-run Claude classification + the adversarial audit on the latest "
+             "run's leads — no discovery, cache-first, minutes not an hour. Use "
+             "after editing the thesis, prompt, or weights.",
+    ):
+        _launch_scan(["reclassify"], "reclassify",
+                     job_kind=jobs_mod.KIND_RECLASSIFY, payload={"scope": "latest"})
+
+    # The run cockpit — phase stepper, progress bars, ETA, log tail. Renders
+    # only while a scan runs (or just finished) and polls on its own.
+    _run_panel()
+
+
 # ============================================================ THESIS
 
 
@@ -4099,89 +4222,7 @@ if nav == "Thesis":
     st.markdown("---")
 
     # --- Run --------------------------------------------------------------------
-    st.markdown('<div class="section-title">Run discovery</div>'
-                '<div class="section-sub">The free sources (GitHub, Hacker News, RSS, SEC '
-                'Form D, YC, arXiv), plus X when it\'s connected. Runs are incremental — '
-                'recently scored startups are skipped.</div>',
-                unsafe_allow_html=True)
-    r1, r2, r3, r4 = st.columns([1.4, 1, 1, 1])
-    # Default to what will actually run: without X cookies the free X
-    # scraper can't start, so "No X" is the honest default (it used to say
-    # "twscrape (free)" and then explain it wouldn't use X).
-    x_connected = bool(settings.tw_cookies and Path(settings.tw_cookies).exists())
-    with r1:
-        source = st.segmented_control(
-            "Source", ["X (free scraper)", "No X", "X API (paid)"],
-            default="X (free scraper)" if x_connected else "No X",
-            required=True, key="run_source",
-            help="The free sources (GitHub, Hacker News, RSS, SEC Form D, YC, "
-                 "arXiv) always run. X adds the query bank, bio search and the "
-                 "investor follow graph.")
-    with r2:
-        max_accounts = st.number_input("Max accounts", 10, 2000, settings.max_accounts, step=10)
-    with r3:
-        min_score_run = st.number_input("Min score", 0, 100, 0, step=5)
-    with r4:
-        ttl = st.number_input("Skip if scored < N days", 0, 90, settings.ttl_days)
-    paid_run = source == "X API (paid)"
-    run_source = "xapi" if paid_run else ("free" if source == "No X" else "twscrape")
-    if run_source == "twscrape" and not x_connected:
-        st.markdown('<div class="subtle">X isn\'t connected (no <code>TW_COOKIES</code>) — '
-                    'this run will use the free sources only.</div>',
-                    unsafe_allow_html=True)
-    scan_active = ((store.current_scan() or {}).get("status") == "running")
-    run_ready = not scan_active
-
-    # Time estimate up front — empirical after the first completed run,
-    # settings-derived before that.
-    est_lo, est_hi, _per, est_label = _estimate_scan("run", max_accounts=int(max_accounts))
-    st.markdown(
-        f'<div class="rp-est">Estimated <b>{_fmt_dur(est_lo)}–{_fmt_dur(est_hi)}</b> '
-        f'for this run · {_e(est_label)}. Runs happen in the background — you can '
-        'keep browsing while the pipeline reports progress below.</div>',
-        unsafe_allow_html=True,
-    )
-    if paid_run:
-        spent_now = store.xapi_spend_usd()
-        remaining = max(settings.xapi_spend_cap_usd - spent_now, 0.0)
-        est_profiles = int(max_accounts) * settings.xapi_cost_per_user_read
-        est_tweets = (int(max_accounts) * settings.tweets_per_account
-                      * settings.xapi_cost_per_post_read)
-        est_total = est_profiles + est_tweets
-        st.markdown(
-            f'<div class="subtle">Worst case ≈ <b>${est_total:.2f}</b> '
-            f'(${est_profiles:.2f} profiles + up to ${est_tweets:.2f} tweets; the '
-            f'bio-signal gate usually cuts the tweet part sharply) · '
-            f'<b>${remaining:.2f}</b> left of the ${settings.xapi_spend_cap_usd:.0f} cap.</div>',
-            unsafe_allow_html=True,
-        )
-        run_ready = run_ready and st.checkbox(
-            f"Spend up to ${est_total:.2f} of the X API budget",
-            key="confirm_run_spend",
-        )
-    run_col, preview_col, reclass_col, _sp = st.columns([1, 1.75, 1.75, 1.5])
-    if run_col.button("Run scout", type="primary", disabled=not run_ready):
-        _launch_scan(["run", "--source", run_source,
-                      "--max-accounts", str(int(max_accounts)),
-                      "--min-score", str(int(min_score_run)), "--ttl-days", str(int(ttl))],
-                     "run",
-                     job_kind=jobs_mod.KIND_RUN,
-                     payload={"source": run_source,
-                              "max_accounts": int(max_accounts),
-                              "min_score": int(min_score_run)})
-    if preview_col.button("Preview discovery (free, no scoring)", disabled=scan_active):
-        _launch_scan(["source", "--max-accounts", str(int(max_accounts))], "source")
-    if reclass_col.button(
-        "Reclassify latest run", disabled=scan_active or not (leads or ledger),
-        help="Re-run Claude classification + the adversarial audit on the latest "
-             "run's leads — no discovery, cache-first, minutes not an hour. Use "
-             "after editing the thesis, prompt, or weights.",
-    ):
-        _launch_scan(["reclassify"], "reclassify")
-
-    # The run cockpit — phase stepper, progress bars, ETA, log tail. Renders
-    # only while a scan runs (or just finished) and polls on its own.
-    _run_panel()
+    _render_run_controls()
 
     st.write("")
     st.markdown("---")
@@ -6079,7 +6120,12 @@ def _render_schedule_editor(row: dict | None, key: str) -> None:
     the one thing anyone wants here."""
     spec = row["spec"] if row and row["spec"] else jobs_mod.ScheduleSpec(
         daily_at="06:00", weekdays=[0, 1, 2, 3, 4], tz="UTC")
-    kinds = [jobs_mod.KIND_RUN, jobs_mod.KIND_DIGEST, jobs_mod.KIND_VERIFY]
+    # Every kind a schedule can fire — the editor used to offer three, so
+    # editing a Resolve/Refresh/Publish schedule silently turned it into a
+    # sourcing run.
+    kinds = list(jobs_mod.SCHEDULABLE_KINDS)
+    if row and row["kind"] not in kinds:
+        kinds.append(row["kind"])
     c1, c2 = st.columns(2)
     kind = c1.selectbox(
         "What runs", kinds,
@@ -6126,15 +6172,15 @@ def _render_schedule_editor(row: dict | None, key: str) -> None:
                     unsafe_allow_html=True)
         valid = False
 
-    b1, b2, _sp = st.columns([1, 1, 3])
+    b1, b2, b3, _sp = st.columns([1, 0.8, 0.8, 2.4])
     if b1.button("Save schedule", key=f"{key}_save", type="primary",
                  disabled=not valid):
+        # Same kind keeps its payload (a digest's window, a run's source);
+        # a changed kind starts from that kind's defaults.
+        payload = (row["payload"] if row and row["kind"] == kind
+                   else jobs_mod.default_payload(kind))
         store.upsert_schedule(
-            name or jobs_mod.JOB_LABELS.get(kind, kind), kind, new_spec,
-            row["payload"] if row else (
-                {"source": "twscrape"} if kind == jobs_mod.KIND_RUN
-                else {"window": "daily"}
-            ),
+            name or jobs_mod.JOB_LABELS.get(kind, kind), kind, new_spec, payload,
             schedule_id=row["id"] if row else None,
             enabled=row["enabled"] if row else True,
             actor=ACTOR,
@@ -6142,7 +6188,10 @@ def _render_schedule_editor(row: dict | None, key: str) -> None:
         st.session_state["toast"] = "Schedule saved"
         st.session_state.pop(f"{key}_open", None)
         st.rerun()
-    if row and b2.button("Delete", key=f"{key}_del"):
+    if row and b2.button("Cancel", key=f"{key}_cancel"):
+        st.session_state.pop(f"{key}_open", None)
+        st.rerun()
+    if row and b3.button("Delete", key=f"{key}_del"):
         store.delete_schedule(row["id"])
         st.session_state["toast"] = "Schedule deleted"
         st.rerun()
@@ -6216,7 +6265,10 @@ if nav == "Automation":
             f'{_e(_ago(row["next_run_at"]) if row["enabled"] else "—")}</div></div>',
             unsafe_allow_html=True,
         )
-        if s3.toggle("On", value=row["enabled"], key=f"sched_on_{row['id']}") != row["enabled"]:
+        # Keyed on the stored state, so a partner's change remounts the
+        # toggle instead of being flipped back by a stale widget value.
+        if s3.toggle("On", value=row["enabled"],
+                     key=f"sched_on_{row['id']}_{int(row['enabled'])}") != row["enabled"]:
             store.set_schedule_enabled(row["id"], not row["enabled"])
             st.rerun()
         if s4.button("Edit", key=f"sched_edit_{row['id']}", use_container_width=True):
@@ -6231,22 +6283,54 @@ if nav == "Automation":
     st.write("")
     st.markdown('<div class="section-title">Run something now</div>',
                 unsafe_allow_html=True)
+    _now_worker = store.worker_status()
+    worker_alive = bool(_now_worker and _now_worker.get("alive"))
+    st.markdown(
+        '<div class="subtle">' + (
+            "Queued for the worker, which picks them up within seconds."
+            if worker_alive else
+            "No worker is running, so these run right here, now — they don't "
+            "sit in a queue nobody reads.") + '</div>',
+        unsafe_allow_html=True)
+    # Verification hydrates the latest run through the PAID X API — it asks
+    # first, the same way a paid run does.
+    verify_n = len(leads)
+    verify_est = verify_n * (settings.xapi_cost_per_user_read
+                             + settings.tweets_per_account * settings.xapi_cost_per_post_read)
+    verify_ok = bool(settings.x_bearer_token) and st.checkbox(
+        f"Verification may spend up to ${verify_est:.2f} of the X API budget "
+        f"({verify_n} startups)", key="confirm_queue_verify",
+        disabled=not settings.x_bearer_token,
+        help=None if settings.x_bearer_token else "Needs X_BEARER_TOKEN on the server.")
     q1, q2, q3 = st.columns(3)
-    for col, kind, label in (
-        (q1, jobs_mod.KIND_RUN, "Queue a sourcing run"),
-        (q2, jobs_mod.KIND_DIGEST, "Queue a digest"),
-        (q3, jobs_mod.KIND_VERIFY, "Queue verification"),
+    for col, kind, label, enabled in (
+        (q1, jobs_mod.KIND_RUN, "Start a sourcing run", True),
+        (q2, jobs_mod.KIND_DIGEST, "Send a digest", True),
+        (q3, jobs_mod.KIND_VERIFY, "Verify the latest run", verify_ok),
     ):
-        if col.button(label, key=f"queue_{kind}", use_container_width=True):
-            payload = ({"source": "twscrape"} if kind == jobs_mod.KIND_RUN
-                       else {"window": "daily"} if kind == jobs_mod.KIND_DIGEST
-                       else {})
+        if not col.button(label, key=f"queue_{kind}", use_container_width=True,
+                          disabled=not enabled):
+            continue
+        payload = jobs_mod.default_payload(kind)
+        if worker_alive:
             job_id = store.enqueue_job(kind, payload, actor=ACTOR, dedupe=True)
             st.session_state["toast"] = (
-                f"Queued job {job_id}" if job_id
-                else "Already queued or running"
-            )
+                f"Queued job {job_id}" if job_id else "Already queued or running")
             st.rerun()
+        elif kind == jobs_mod.KIND_DIGEST:
+            data = notify.digest_data(
+                store, datetime.now(timezone.utc) - timedelta(hours=24))
+            sent = notify.post_slack(store, notify.digest_fallback_text(data),
+                                     notify.digest_blocks(data))
+            st.session_state["toast"] = (
+                "Digest sent to Slack." if sent else
+                "Not sent — set a Slack webhook under Notifications.")
+            st.rerun()
+        elif kind == jobs_mod.KIND_RUN:
+            x_on = bool(settings.tw_cookies and Path(settings.tw_cookies).exists())
+            _launch_scan(["run", "--source", "twscrape" if x_on else "free"], "run")
+        else:
+            _launch_scan(["verify"], "verify")
 
     st.write("")
     st.markdown('<div class="section-title">Recent jobs</div>', unsafe_allow_html=True)
@@ -6288,11 +6372,25 @@ if nav == "Automation":
 if nav == "Settings":
     spent = store.xapi_spend_usd()
     cap = settings.xapi_spend_cap_usd
+    # The numbers that matter to a firm: what today cost against the daily
+    # envelope (what bounds unattended spend), whether the worker is alive,
+    # and — only when the paid X API is configured — its lifetime ledger.
+    _today = store.spend_today_usd()
+    _daily = settings.daily_spend_cap_usd
+    _wk = store.worker_status()
     s1, s2, s3 = st.columns(3)
-    s1.markdown(_tile("X API spend", f"${spent:.2f}", f"of ${cap:.0f} cap"), unsafe_allow_html=True)
-    s2.markdown(_tile("Latest leads", str(len(leads)), "most recent run"), unsafe_allow_html=True)
-    s3.markdown(_tile("Verdict cache TTL", f"{settings.verdict_ttl_days}d",
-                      "re-runs reuse Claude verdicts"), unsafe_allow_html=True)
+    s1.markdown(_tile("Spent today", f"${_today:.2f}",
+                      f"of ${_daily:.2f} daily cap" if _daily > 0 else "no daily cap"),
+                unsafe_allow_html=True)
+    s2.markdown(_tile("Worker",
+                      "alive" if (_wk and _wk.get("alive")) else
+                      ("stopped" if _wk else "never run"),
+                      f"last seen {_ago(_wk['last_seen'])}" if _wk else
+                      "schedules don't fire without it"),
+                unsafe_allow_html=True)
+    if settings.x_bearer_token:
+        s3.markdown(_tile("X API spend", f"${spent:.2f}", f"of ${cap:.0f} lifetime cap"),
+                    unsafe_allow_html=True)
     st.write("")
 
     # Readiness — the same checks as `scout doctor`, graded against one
@@ -6331,7 +6429,13 @@ if nav == "Settings":
     with st.form("settings_form"):
         c1, c2 = st.columns(2)
         with c1:
-            cap_in = st.number_input("X API spend cap (USD)", 0.0, 25.0, float(cap), 1.0)
+            daily_in = st.number_input(
+                "Daily spend cap (USD)", 0.0, 100.0, float(settings.daily_spend_cap_usd), 0.5,
+                help="Total Claude + X spend per UTC day across every run, memo and "
+                     "refresh. Paid calls stop when it is spent and resume tomorrow. "
+                     "0 = uncapped.")
+            cap_in = st.number_input("X API lifetime cap (USD)", 0.0, 25.0, float(cap), 1.0,
+                                     help="Hard stop for the paid X API across all runs.")
             model_in = st.text_input("Claude model", settings.claude_model)
             llm_cap_in = st.number_input("Max accounts sent to Claude per run", 10, 2000,
                                          settings.llm_max_candidates)
@@ -6343,6 +6447,7 @@ if nav == "Settings":
         if st.form_submit_button("Save settings", type="primary",
                                  disabled=not IS_ADMIN,
                                  help=None if IS_ADMIN else "Admins only"):
+            store.set_setting("daily_spend_cap_usd", f"{daily_in:.2f}")
             store.set_setting("xapi_spend_cap_usd", f"{cap_in:.2f}")
             store.set_setting("claude_model", model_in.strip())
             store.set_setting("max_accounts", str(int(max_in)))
@@ -6480,7 +6585,34 @@ if nav == "Settings":
                 help="Extra addresses outside the domain. Leave both empty to allow anyone who can sign in (bootstrap only).",
             )
             if st.form_submit_button("Save workspace access"):
-                store.set_setting("allowed_email_domain", domain_in.strip())
-                store.set_setting("allowed_emails", emails_in.strip())
+                # Who the new rule would shut out, before it does. Admins are
+                # never shut out (collab.email_allowed), so this lists members.
+                shut_out = [
+                    m["id"] for m in members
+                    if not email_allowed(m["id"], domain_in, emails_in,
+                                         is_admin=m.get("role") == "admin")
+                ]
+                if shut_out:
+                    st.session_state["ws_pending"] = (domain_in.strip(),
+                                                      emails_in.strip(), shut_out)
+                else:
+                    store.set_setting("allowed_email_domain", domain_in.strip())
+                    store.set_setting("allowed_emails", emails_in.strip())
+                    st.session_state["toast"] = "Workspace access updated."
+                st.rerun()
+        if pending := st.session_state.get("ws_pending"):
+            new_domain, new_emails, shut_out = pending
+            st.warning(
+                f"This would remove access for {len(shut_out)} member"
+                f"{'s' if len(shut_out) != 1 else ''}: "
+                + ", ".join(_who(m) for m in shut_out) + ".")
+            c1, c2, _c3 = st.columns([1.2, 1, 3])
+            if c1.button("Save anyway", key="ws_confirm", type="primary"):
+                store.set_setting("allowed_email_domain", new_domain)
+                store.set_setting("allowed_emails", new_emails)
+                st.session_state.pop("ws_pending", None)
                 st.session_state["toast"] = "Workspace access updated."
+                st.rerun()
+            if c2.button("Cancel", key="ws_cancel"):
+                st.session_state.pop("ws_pending", None)
                 st.rerun()

@@ -157,7 +157,7 @@ def test_ui_renders_without_exceptions(tmp_path, monkeypatch) -> None:
     at.session_state["nav"] = "Settings"
     at.run()
     assert not at.exception
-    assert "X API spend" in _page_text(at)
+    assert "Spent today" in _page_text(at)
     # The readiness panel: the same grading as `scout doctor`. The smoke
     # env has no Anthropic key, so it must say what blocks and how to fix it.
     assert "ANTHROPIC_API_KEY" in _page_text(at)
@@ -617,6 +617,8 @@ def test_queue_button_enqueues_and_cancels(tmp_path, monkeypatch) -> None:
     monkeypatch.setenv("ANTHROPIC_API_KEY", "")
     monkeypatch.setenv("SCOUT_DEV_USER", "alan@firm.com")
     seed_store(db)
+    # With a worker alive the button queues; without one it runs immediately.
+    Store(db).record_worker_heartbeat("worker:1")
 
     at = AppTest.from_file(str(UI_PATH), default_timeout=30)
     at.session_state["nav"] = "Automation"
@@ -1113,3 +1115,74 @@ def test_schedules_show_when_they_will_run(tmp_path, monkeypatch) -> None:
     assert not at.exception, at.exception[0].message if at.exception else ""
     text = _page_text(at)
     assert "next in " in text and "next just now" not in text
+
+
+def test_editing_a_resolve_schedule_keeps_it_a_resolve(tmp_path, monkeypatch) -> None:
+    """The editor offered only Run/Digest/Verify, so saving a bootstrap
+    Resolve schedule silently turned it into a sourcing run."""
+    db = tmp_path / "sched.db"
+    monkeypatch.setenv("DB_PATH", str(db))
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "")
+    store = seed_store(db)
+    from scout.worker import bootstrap_schedules
+    bootstrap_schedules(store)
+    resolve = next(s for s in store.schedules() if s["kind"] == "resolve_unlinked")
+    key = f"sched_{resolve['id']}"
+    at = AppTest.from_file(str(UI_PATH), default_timeout=30)
+    at.session_state["nav"] = "Automation"
+    at.run()
+    at.button(key=f"sched_edit_{resolve['id']}").click().run()
+    assert at.selectbox(key=f"{key}_kind").value == "resolve_unlinked"
+    at.button(key=f"{key}_save").click().run()
+    assert not at.exception, at.exception[0].message if at.exception else ""
+    saved = next(s for s in Store(db).schedules() if s["id"] == resolve["id"])
+    assert saved["kind"] == "resolve_unlinked" and saved["payload"] == resolve["payload"]
+    # And Cancel closes an open editor without saving (a fresh session:
+    # AppTest can't re-open a widget tree it already tore down).
+    at2 = AppTest.from_file(str(UI_PATH), default_timeout=30)
+    at2.session_state["nav"] = "Automation"
+    at2.run()
+    at2.button(key=f"sched_edit_{resolve['id']}").click().run()
+    assert any(b.key == f"{key}_save" for b in at2.button)
+    at2.button(key=f"{key}_cancel").click().run()
+    assert f"{key}_open" not in at2.session_state
+
+
+def test_allowlist_that_shuts_out_members_asks_first(tmp_path, monkeypatch) -> None:
+    db = tmp_path / "ws.db"
+    monkeypatch.setenv("DB_PATH", str(db))
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "")
+    monkeypatch.setenv("SCOUT_DEV_USER", "alan@firm.com")
+    store = seed_store(db)
+    store.ensure_user("alan@firm.com", name="Alan")   # first user → admin
+    store.ensure_user("sara@partner.vc", name="Sara")
+    at = AppTest.from_file(str(UI_PATH), default_timeout=30)
+    at.session_state["nav"] = "Settings"
+    at.run()
+    domain = next(t for t in at.text_input if t.label == "Allowed email domain")
+    domain.set_value("firm.com")
+    next(b for b in at.button if b.label == "Save workspace access").click().run()
+    assert not at.exception, at.exception[0].message if at.exception else ""
+    assert Store(db).get_setting("allowed_email_domain") is None  # not yet
+    assert "Sara" in " ".join(w.value for w in at.warning)
+    at.button(key="ws_confirm").click().run()
+    assert Store(db).get_setting("allowed_email_domain") == "firm.com"
+
+
+def test_run_now_without_a_worker_acts_instead_of_queueing(tmp_path, monkeypatch) -> None:
+    db = tmp_path / "now.db"
+    monkeypatch.setenv("DB_PATH", str(db))
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "")
+    monkeypatch.setenv("X_BEARER_TOKEN", "")
+    store = seed_store(db)
+    store.set_setting("slack_webhook_url", "https://hooks.slack.test/x")
+    sent: list[dict] = []
+    monkeypatch.setattr("scout.notify._post", lambda url, payload: sent.append(payload))
+    at = AppTest.from_file(str(UI_PATH), default_timeout=30)
+    at.session_state["nav"] = "Automation"
+    at.run()
+    # Verification spends X money: no token, no button.
+    assert at.button(key="queue_verify").disabled
+    at.button(key="queue_digest").click().run()
+    assert not at.exception, at.exception[0].message if at.exception else ""
+    assert sent and Store(db).jobs() == []   # sent now, nothing queued
