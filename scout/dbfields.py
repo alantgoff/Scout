@@ -17,7 +17,8 @@ ATTR_TYPE_LABELS = {
 
 # Column names the grid computes — user columns may not shadow these.
 DB_COMPUTED_LABELS = {
-    "handle", "Startup", "Score", "Q", "F", "S", "Band", "What they do",
+    "handle", "Startup", "Score", "Q", "F", "S", "Quality", "Fit", "Signals",
+    "Band", "What they do",
     "Stage", "Sector", "Customers", "Status", "Adjusted", "Memo", "Followers",
     "First seen", "Runs", "Profile", "Notes",
 }

@@ -35,3 +35,16 @@ def test_run_label_never_says_run_running():
     assert run_label("reclassify") == "Rescore"
     assert run_label("source preview") == "Preview"
     assert run_label(None) == "Run"
+
+
+def test_memo_display_drops_what_the_header_already_says():
+    from scout.present import memo_for_display
+
+    md = ("# EvalForge — investment memo\n\nVERDICT: PURSUE\n\n"
+          "## Overview\nAgent evals.\n\n## Recommendation\n**VERDICT: PURSUE**\nBack it.")
+    shown = memo_for_display(md)
+    assert not shown.startswith("# ")
+    assert shown.startswith("## Overview")
+    # The Recommendation keeps its own verdict line — it's the memo's text.
+    assert "**VERDICT: PURSUE**" in shown
+    assert memo_for_display("## Overview\nx") == "## Overview\nx"

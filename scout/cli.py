@@ -4331,7 +4331,7 @@ def crm_config(
                                        "threshold (needs the worker).")
     ] = None,
 ) -> None:
-    """Set the firm-wide push rule (also on the Settings page)."""
+    """Set the firm-wide push rule (also in Settings → Integrations)."""
     from scout.crm import THRESHOLDS
 
     store = _open_store(Settings())

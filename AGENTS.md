@@ -23,10 +23,10 @@ resolves every founder-like lead to a startup identity (real company name, or
 a synthesized "Ada Lin's stealth startup" placeholder when unnamed) and folds
 founder + company accounts into one entry, in every view and the report. It's
 a Python 3.12 package with a **Typer CLI**, a **Streamlit UI** (Headline design
-language, funnel-ordered: Thesis · Startups (Feed / Database) · Longlist ·
-Shortlist · Memos · Activity · Evidence · Automation · Settings; session-state
-nav, so buttons route across pages) and a **background worker**, managed by
-**uv**. A thesis drives all targeting; nothing is hardcoded.
+language, six pages in the order the work happens: Startups (Feed / Database /
+Graph) · Pipeline (Longlist / Shortlist / In talks / Allocated / Passed) ·
+Memos · Activity · Thesis · Settings; `scout/nav.py` is the map, and the old
+page names stay aliases) and a **background worker**, managed by **uv**. A thesis drives all targeting; nothing is hardcoded.
 
 **Scout is a multi-member tool.** It runs as one shared instance for a firm —
 Google sign-in, per-member votes and comments, an activity feed, a job worker
@@ -73,7 +73,7 @@ time.
 ## 2. Run it / test it — always via `./scout-cli` or `uv run`
 
 ```bash
-uv run pytest -q                 # ~630 tests, ~40s, no network (incl. AppTest UI smoke tests)
+uv run pytest -q                 # ~770 tests, ~60s, no network (incl. AppTest UI smoke tests)
 ./scout-cli demo                 # $0 offline end-to-end run on sample founders — best smoke test
 ./scout-cli source --strategy github,hn   # free live discovery, no scoring
 ./scout-cli ui                   # Streamlit workspace on :8501
@@ -255,7 +255,7 @@ scout/
                     company never paths to itself. FIRM-PRIVATE: publish.py
                     never sees it. `scout intros`, `scout network`, the
                     detail pane, the list-row tag, the card, the "Warm
-                    paths" feed sort, Settings → Your network (any member
+                    paths" feed sort, Settings → Workspace → Your network (any member
                     may edit — nothing there moves spend).
   jobs.py           Pure background-work logic: job kinds, deterministic
                     backoff, and ScheduleSpec/next_occurrence — deliberately
@@ -278,7 +278,7 @@ scout/
                     ledger and pipeline → which queries produce triaged
                     companies vs burn the time budget. performance_block(_for)
                     renders it (with graph.watchlist_candidates) into the
-                    strategy agent's prompt and the Thesis page. SOURCE
+                    strategy agent's prompt and Thesis → Tune. SOURCE
                     yield (source_yield / SourceYield) does the same per
                     discovery source over Account.sources: scored,
                     triaged, and unique_triaged — triaged companies no
@@ -287,7 +287,7 @@ scout/
                     companies found elsewhere; `dead` = 20+ scored, none
                     triaged). source_key folds twscrape's
                     "search:<category>" into "search". `scout yield`, the
-                    Thesis page, and performance_block.
+                    Thesis → Tune, and performance_block.
   ui.py             The Streamlit workspace. TWO cache tiers, and the split
                     matters: _load_workspace holds only the EXPENSIVE reads
                     (ledger window query + re-parsing every stored lead's
@@ -297,10 +297,11 @@ scout/
                     rerun instead. Keying on mtime meant one triage click
                     re-parsed the whole database to record a status change;
                     triage is the highest-frequency action in the product.
-                    Quick-find in the masthead routes to the feed via
-                    session_state["feed_q"] + nav_target. _empty_state() is
-                    the one empty-state shape: what is empty AND the next
-                    step.
+                    Quick-find in the masthead is an on_change callback: an
+                    exact name opens that startup, anything else searches
+                    the feed (session_state["feed_q"]), via _route.
+                    _empty_state() is the one empty-state shape: what is
+                    empty AND the next step; _tile() the one number tile.
   publish.py        The phone app (GitHub Pages OR Vercel): `scout publish` renders docs/ as
                     a self-contained read-only PWA — four hash-routed views
                     (Startups with client-side search/sort/filters off
@@ -382,7 +383,7 @@ scout/
                     corrected verdict retracts the edges it implied) and
                     queries via graph_edges/graph_hubs/graph_related. CLI:
                     `scout graph`; UI: the Connections block on each card.
-  graph_view.py     The Graph page's canvas, pure: edge rows in, a self-
+  graph_view.py     The Startups → Graph canvas, pure: edge rows in, a self-
                     contained HTML document out (custom force layout, no JS
                     deps, offline-safe) rendered in a components iframe.
                     Node palette validated for CVD separation/contrast on
@@ -441,7 +442,7 @@ scout/
                     unchanged pipeline makes zero API calls. Triggers:
                     ui._set_status (EVERY UI status change goes through it)
                     queues a crm_sync job when `crm_auto_push`; `scout crm
-                    status|push|sync|config`; Settings → CRM write-back;
+                    status|push|sync|config`; Settings → Integrations;
                     doctor probes the key + that the list holds companies
                     (warn, never fail: a broken CRM stops write-back, not the
                     scan). Firm-private: votes/comments/notes never sent.
@@ -468,16 +469,31 @@ scout/
                     logic AND the bundle (compose/Dockerfile agreement,
                     secrets out of the build context, every env-example key
                     read by something, stock-only Caddy directives).
-  ui.py             Streamlit app, TEN pages: Thesis / Startups (Feed +
-                    Database) / Longlist / Shortlist / Memos / Activity /
-                    Graph / Evidence / Automation / Settings. Session-state nav
-                    (nav_target routes across pages — the card Memo button lands
-                    on Memos and auto-generates); Slack deep links arrive as
-                    ?s=<handle>&p=<page> and are translated into that same
-                    mechanism once, then cleared. Startup database with dossier
-                    row-select; per-card Q/F/S score breakout + Adjust-scoring
-                    popover; Memos page with in-place editing, version history
-                    and .md/.pdf export. Headline design language. ~5200 lines.
+  ui.py             Streamlit app, SIX pages (the ten-page layout was
+                    consolidated in v10): Startups (Feed · Database · Graph,
+                    plus the run bar — "Run scout", Run options, live
+                    progress) / Pipeline (Longlist · Shortlist · In talks ·
+                    Allocated · Passed, partner meeting on top) / Memos /
+                    Activity (Feed · Your taste) / Thesis (Define · Tune ·
+                    Evidence) / Settings (General · Integrations · Automation
+                    · Workspace). Every page is a `_page_<name>()` function
+                    behind one dispatcher (`_PAGE_RENDERERS`, bottom of the
+                    file). ROUTING: `_route(page, view, handle=, state=)`
+                    queues a route; `_apply_route()` applies it at the top
+                    of the next run, before any widget — Slack deep links
+                    (?p=<page>&s=<handle>), old page names (nav.ALIASES) and
+                    buttons all go through it; a handle opens where the
+                    startup actually is (Pipeline picks the stage from its
+                    status) and an explicit selection that isn't in the list
+                    says so instead of opening row 1. ONE DOSSIER:
+                    `_detail_pane(lead, key_ns=)` renders a startup in the
+                    feed (feeddet), the Pipeline (pipedet) and the Database
+                    (dbdet); `_triage_actions` is the one funnel state
+                    machine and `_set_status` the one status write (the CRM
+                    hook). Rail/filter widgets use persist_state="session",
+                    so they survive page changes. Memos page: generate (in
+                    the tab, or queued to a live worker), edit in place,
+                    review, versions, .md/.pdf export. ~6,500 lines.
                     The ledger and graph edges load through st.cache_data
                     keyed on store.ledger_stamp() (content, not file mtime —
                     see the first ui.py entry above); judgment state is read
@@ -488,6 +504,18 @@ scout/
                     per-signal statistics are cached separately
                     (_signal_evaluation) because bootstrap + permutation cost
                     ~480ms and a stored backtest is immutable.
+  nav.py            The UI's map, pure (no Streamlit): PAGES, PAGE_VIEWS (each
+                    page's rail views and their session key), ALIASES (old
+                    page names → page/view, never pruned), PIPELINE_STAGES +
+                    stage_for_status, SELECTION_KEYS, resolve(). Unit-tested
+                    in test_nav.py; the every-page AppTests iterate it.
+  present.py        Pure presentation helpers: relative_time (past AND future
+                    — "in 10h", so a schedule never reads "just now"),
+                    run_label (no "Run running"), memo_for_display (drops what
+                    the memo panel's header already says; display only).
+  status.py         The deal-flow status vocabulary (STATUS_LABELS,
+                    WIN_STAGES, FUNNEL_STAGES) — shared by the UI, worker,
+                    notifications, insights and CRM without Streamlit.
   ingest/
     base.py         SourceAdapter ABC (X sources) + DiscoverySource ABC (github/hn).
     twscrape_src.py Primary free X adapter: query bank, bio search, list members,
@@ -805,7 +833,7 @@ partition key is `lower(handle)` (leads pk is case-sensitive, everything else is
 NOCASE); ordering is `(created_at, run_id)`, never run_id alone (rows in a run
 share one created_at; `verify-` > `demo-` lexicographically); `demo-` runs are
 excluded unless `include_demo`; `verify-` runs are always included (real
-re-scores). The UI's Longlist / Shortlist / Memos pages always resolve leads
+re-scores). The UI's Pipeline and Memos pages always resolve leads
 through the ledger so a triaged lead missing from the latest run never degrades. `scout export` and
 `scout verify` deliberately keep latest-run semantics (verify is paid — never
 silently widen its input set to all-time).
@@ -940,11 +968,17 @@ silently widen its input set to all-time).
   verdict chip greps `VERDICT: (PURSUE|TRACK|PASS)`; keep that line format.
   **Write memos through `store.set_memo`, never `set_pipeline(brief=...)`** —
   set_memo appends the immutable version that makes regeneration safe.
-- **Add a page:** append to `PAGES` in ui.py and add an `if nav == "…":` block.
-  Sub-views within a page are a sidebar `segmented_control`, NOT `st.tabs` —
-  st.tabs renders every tab server-side, which once leaked the feed's sidebar
-  controls onto the Database view. Route to it from elsewhere by setting
-  `st.session_state["nav_target"]` then `st.rerun()`.
+- **Add a page or a view:** add it to `scout/nav.py` (`PAGES`, or the page's
+  entry in `PAGE_VIEWS`), write a `_page_<name>()` function in ui.py and
+  register it in `_PAGE_RENDERERS` (the dispatcher at the bottom). A page's
+  views are the rail switch `_rail_view(page)` renders — a sidebar
+  `segmented_control`, NOT `st.tabs` (st.tabs renders every tab server-side,
+  which once leaked the feed's sidebar controls onto the Database view). Route
+  to it from anywhere with `_route(page, view, handle=…)`; never write `nav`
+  directly. Moving or renaming a page? Add the old name to `nav.ALIASES` —
+  Slack messages carry page names forever. `test_fresh_install_renders_every_page`
+  and `test_every_page_and_view_renders_with_data` walk the map, so a new
+  view is covered without editing them.
 - **Add a job kind:** add the constant + label to `jobs.JOB_KINDS/JOB_LABELS`,
   write `handle_x(store, settings, job) -> dict` in worker.py, register it in
   `worker.HANDLERS`. Long or crash-prone work should shell out via `_run_cli`
@@ -973,8 +1007,8 @@ silently widen its input set to all-time).
 ## 10. Current state / open threads
 
 - Fully working: demo, source (all strategies), the whole scored pipeline, the
-  Thesis/Startups/Longlist/Shortlist/Memos/Settings UI (Headline design
-  language, lead cards), strategy agent (`scout strategy` + Thesis tab,
+  six-page UI (Headline design language — see v10 below), strategy agent
+  (`scout strategy` + Thesis → Define,
   validated live), investment memos v2 (three depths, live web research with
   cited sources, in-place editing, PDF export, hardened stream loop — deep
   runs validated live on Walden Robotics and Cosmic Labs), manual score
@@ -1077,6 +1111,26 @@ silently widen its input set to all-time).
     sign-in guard, Caddy TLS with the websocket, and a Litestream
     replicate→restore across containers.)
 
+- **v10 — the UI walkthrough: ten pages became six** (validated with a seeded
+  walkthrough: every page and view screenshotted at 1440 and 390px, zero
+  exceptions, reruns unchanged at ~220–300ms):
+  - Sessions land on **Startups**, which carries the run bar; **Pipeline**
+    replaced Longlist + Shortlist (one cockpit by stage, the partner meeting
+    over the whole funnel); Graph, Evidence and Automation became views of
+    Startups, Thesis and Settings; Slack/CRM/phone-app settings moved to
+    Settings → Integrations; member roles are editable (the store refuses to
+    demote the last admin). Old names are aliases in `nav.ALIASES`.
+  - One routing core (`_route`/`_apply_route`), persisted rail state, honest
+    deep links (a link opens the startup it names — or says it can't — and
+    never spends on a memo; only an explicit Write memo click does).
+  - One dossier (`_detail_pane`) everywhere; `_lead_card` is gone.
+  - Background work through the worker when one is alive (runs, previews,
+    rescores, memos, digests), a cooperative Stop that reaches a worker-run
+    scan, and spend confirmations on every paid path.
+  - Accessibility: visible keyboard focus, `--warn` at AA contrast, an 11px
+    text floor, reduced motion honoured, stance badges carry a symbol
+    (++ / + / ? / −) as well as colour.
+
 ---
 
 ## 11. The backtest's methodological commitments (read before editing)
@@ -1178,6 +1232,21 @@ capability that could mislead, add its limitation there in the same commit.
 - **Name collisions are silent.** `_initials(name, handle)` (startup avatar)
   and a new `_initials(actor)` (stance badge) simply shadowed each other at
   import. Grep before naming a helper here.
+- **Widget state can only be written before the widget renders this run**
+  (or in a callback). That is why routing is `_route` → applied by
+  `_apply_route` at the top of the NEXT run, and why quick-find and the
+  comment box are `on_change`/`on_click` callbacks.
+- **`persist_state="session"` keeps a widget's value across pages** (the rail
+  filters, sort, views). Seed its key in session_state rather than passing
+  `default=` as well (both together warns), and reset a stored value that is
+  no longer an option (`_rail_view` does) — or the widget raises.
+- **A button with `help=` renders inside a tooltip wrapper**, so a
+  `.stButton>button` child selector silently stops styling it. The button CSS
+  uses descendant selectors (`.stButton button`) for that reason.
+- **Turning a page block into a function changes scope:** names it assigned
+  stop being module globals. Pass what another function reads as an argument
+  (`_render_evidence_signals(report, evaluation, row)`), then run
+  `ruff --select F821,F823` and the every-page AppTests.
 
 **AppTest (tests/test_ui_smoke.py)**
 
@@ -1185,5 +1254,11 @@ capability that could mislead, add its limitation there in the same commit.
   Assert on text inside the expander, not its title.
 - Buttons are found by `.label` or `.key`; a page that renders behind a rail
   switch needs its `session_state` view key set before `at.run()`.
-- Setting `at.session_state["nav"]` is how you route to a page — the nav is
-  session-state driven precisely so tests (and buttons) can route.
+- Setting `at.session_state["nav"]` to a CURRENT page name routes there. An
+  old name (an alias such as "Shortlist") does NOT: AppTest drops a widget
+  value that isn't one of the widget's options before the script sees it.
+  Route the way links do — `at.session_state["_route"] = {"page": "Shortlist"}`
+  — or set the page and its view key (`"pipeline_stage"`, `"settings_view"`…).
+- AppTest can't select dataframe rows. The Database dossier test wraps
+  `streamlit.dataframe` to report a selection — copy that, don't add
+  test-only plumbing to the page.

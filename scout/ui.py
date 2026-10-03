@@ -2,32 +2,40 @@
 language (headline.com): warm cream paper, ink serif display, butter-yellow
 accents, uppercase tracked labels.
 
-Six surfaces, funnel-ordered (session-state nav, so any action can route to
-any page — a card's Memo button lands on the Memos page):
+Six pages, in the order the work happens (scout/nav.py is the map; a page's
+views are the switch at the top of the left rail):
 
-  THESIS    — define how the scrape runs: the AI strategy agent, run controls,
-              and (behind disclosure) every manual knob: query bank, watchlist,
-              weights, prompt
-  STARTUPS  — what sourcing found: the lead feed (latest run or the all-runs
-              ledger) plus a Database sub-page — every tracked startup as a
-              dossier table (select a row for the full record), with the raw
-              SQLite browser behind an expander
-  LONGLIST  — the first cut: candidates worth a closer look, Claude's
-              per-dimension scoring open on every card
-  SHORTLIST — the working set: stage/notes tracking to allocation,
-              per-dimension scoring, CRM-ready CSV export
-  MEMOS     — the full investment memo per startup (overview, product,
-              tech, competition, market, acquisition dynamics,
-              recommendation): generate, edit in place, export .md/.pdf,
-              outreach draft alongside
-  SETTINGS  — keys, budget, defaults
+  STARTUPS  — what sourcing found, and where a run starts ("Run scout", with
+              its options and live progress). Feed (the cockpit: a list and
+              the dossier) · Database (every tracked startup as a table, your
+              own columns, bulk triage) · Graph (who connects to whom)
+  PIPELINE  — the startups the firm chose to look at, by stage: Longlist ·
+              Shortlist · In talks · Allocated · Passed, with the partner
+              meeting (contested startups) on top
+  MEMOS     — the investment memo per startup: generate (in the tab, or
+              queued to the worker), edit in place, review, version history,
+              export .md/.pdf, the outreach draft alongside
+  ACTIVITY  — Feed (everything the firm did, unread since your last visit) ·
+              Your taste (what your votes say, where the model disagreed)
+  THESIS    — Define (the thesis library, the statement, the AI strategy
+              designer) · Tune (targeting, query bank, watchlist, scoring) ·
+              Evidence (the hindsight backtest)
+  SETTINGS  — General (spend, readiness, shared defaults) · Integrations
+              (Slack, CRM, phone app) · Automation (schedules, the worker,
+              jobs) · Workspace (members and roles, access, your network)
 
-Scoring is transparent and overridable: every card breaks the score into
-quality / fit / signals with per-dimension evidence, and an Adjust-scoring
-panel persists the investor's own numbers (store.score_overrides) on top.
+One dossier (_detail_pane) renders a startup wherever one is opened, and
+every triage move goes through _set_status (the CRM write-back hook). Routes
+go through _route / _apply_route, so Slack deep links (?p=&s=) and the old
+ten-page names (nav.ALIASES) keep working.
 
-Edits write back to thesis.yaml / seeds.yaml / .env; deal-flow state lives in
-scout.db. The UI never stores secrets. Launch with `./scout-cli ui`.
+Scoring is transparent and overridable: every dossier breaks the score into
+quality / fit / signals with per-dimension evidence, and Adjust scoring
+persists the investor's own numbers (store.score_overrides) on top.
+
+Firm-wide configuration lives in scout.db (theses, settings) with
+thesis.yaml / seeds.yaml as readable exports; the UI never stores or shows
+secrets. Launch with `./scout-cli ui`.
 """
 
 from __future__ import annotations
@@ -136,7 +144,7 @@ from scout.models import (
     LLMVerdict,
 )
 from scout.outreach import CHANNELS, draft_outreach
-from scout.present import relative_time, run_label
+from scout.present import memo_for_display, relative_time, run_label
 from scout import rubric as rubric_mod
 from scout.score import (
     apply_override,
@@ -397,7 +405,8 @@ def _inject_css() -> None:
           --good-line:rgba(46,107,52,0.34); --good-wash:rgba(46,107,52,0.07);
           --bad:#7c2d20;  --bad-soft:rgba(178,58,44,0.12);
           --bad-line:rgba(178,58,44,0.32);
-          --warn:#8a6d1f; --warn-soft:rgba(217,184,63,0.14);
+          /* 5.5:1 on --bg (AA); the old #8a6d1f was 4.1:1. */
+          --warn:#735a14; --warn-soft:rgba(217,184,63,0.14);
           --warn-line:rgba(217,184,63,0.45);
           --split:#8a4d1f; --split-soft:rgba(200,110,40,0.14);
           --split-line:rgba(200,110,40,0.34);
@@ -409,10 +418,6 @@ def _inject_css() -> None:
              at 3, controls at 10, cards at 12, readouts and popovers at 14,
              large containers at 16, pills. Naming it is what keeps a new
              surface picking a ROLE instead of inventing a seventh number. */
-          /* Vertical rhythm. The nudges scattered through the page markup
-             clustered on 4/6/8/10 — this names that scale so a new surface
-             picks a step instead of another bespoke pixel value. */
-          --s-1:4px; --s-2:6px; --s-3:8px; --s-4:10px;
           --r-ctl:10px; --r-card:12px; --r-panel:14px; --r-lg:16px;
           /* Also the cap for meters: on a 4-6px bar it clamps to height/2,
              so every track and fill is a capsule without hand-computing
@@ -487,7 +492,7 @@ def _inject_css() -> None:
         section[data-testid="stSidebar"] [data-testid="stSegmentedControl"],
         section[data-testid="stSidebar"] [role="radiogroup"] { width:100%;
           flex-wrap:wrap; }
-        section[data-testid="stSidebar"] label p { font-size:0.68rem !important;
+        section[data-testid="stSidebar"] label p { font-size:0.7rem !important;
           text-transform:uppercase; letter-spacing:0.09em; color:var(--muted);
           font-weight:600; }
 
@@ -502,7 +507,7 @@ def _inject_css() -> None:
         /* Stance buttons: never break a label mid-word. The pane is narrow
            and "Strong yes" was rendering as "STRO NG YES". */
         [class*="st-key-voterow_"] [data-testid="stButton"] > button {
-          white-space:nowrap; font-size:0.68rem; padding-left:4px;
+          white-space:nowrap; font-size:0.7rem; padding-left:4px;
           padding-right:4px; letter-spacing:0.02em; }
         [class*="st-key-frow_"] [data-testid="stButton"] { margin:0; }
         [class*="st-key-frow_"] [data-testid="stButton"] > button { width:100%;
@@ -513,6 +518,9 @@ def _inject_css() -> None:
         [class*="st-key-frow_"] [data-testid="stButton"] > button:focus,
         [class*="st-key-frow_"] [data-testid="stButton"] > button:focus:not(:active) {
           outline:none; color:inherit; box-shadow:none; }
+        /* …but a keyboard user must see where they are. */
+        [class*="st-key-frow_"] [data-testid="stButton"] > button:focus-visible {
+          box-shadow:inset 0 0 0 2px var(--ink) !important; }
         /* Selected row: light surface + accent bar, held across hover/focus
            (!important beats Streamlit's built-in primary-button theme hover). */
         [class*="st-key-frow_"] [data-testid="stButton"] > button[kind="primary"],
@@ -550,13 +558,13 @@ def _inject_css() -> None:
           overflow:hidden; align-items:center; }
         .frow-tags .stance-inline { display:inline-flex; gap:3px; align-items:center;
           flex-shrink:0; }
-        .frow-tags .stance-badge { width:18px; height:18px; font-size:9.5px; }
-        .frow-tags .stance-split { padding:1px 6px; font-size:9.5px; }
-        .frow-tag { font-size:9px; letter-spacing:.06em; text-transform:uppercase;
+        .frow-tags .stance-badge { height:18px; font-size:11px; }
+        .frow-tags .stance-split { padding:1px 6px; font-size:11px; }
+        .frow-tag { font-size:11px; letter-spacing:.04em; text-transform:uppercase;
           font-weight:600; padding:2px 7px; border-radius:var(--r-pill); border:1px solid var(--hair);
           color:var(--ink-2); white-space:nowrap; }
         .frow-fit .frow-fitlab { display:flex; justify-content:space-between;
-          font-size:9.5px; color:var(--muted); letter-spacing:.04em; }
+          font-size:11px; color:var(--muted); letter-spacing:.04em; }
         .frow-fit .frow-fitlab b { font-family:var(--serif); font-size:12px; color:var(--ink); }
         .frow-bar { height:5px; background:var(--track); border-radius:var(--r-pill); overflow:hidden;
           margin-top:3px; }
@@ -595,8 +603,12 @@ def _inject_css() -> None:
         .stance-row { display:flex; gap:5px; align-items:center; margin:7px 0 2px;
           flex-wrap:wrap; }
         .stance-badge { display:inline-flex; align-items:center; justify-content:center;
-          width:22px; height:22px; border-radius:50%; font-size:10.5px;
-          font-weight:700; letter-spacing:.02em; border:1px solid transparent; }
+          min-width:22px; height:22px; padding:0 5px; border-radius:var(--r-pill);
+          font-size:11px; font-weight:700; letter-spacing:.02em;
+          border:1px solid transparent; }
+        /* The stance as a symbol beside the initials — colour alone can't
+           carry it (colour-blind readers, greyscale printouts). */
+        .stance-badge i { font-style:normal; margin-left:2px; }
         .stance-badge.strong_yes { background:var(--good); color:var(--surface); }
         .stance-badge.yes { background:var(--good-soft); color:var(--good);
           border-color:var(--good-line); }
@@ -606,7 +618,7 @@ def _inject_css() -> None:
           border-color:var(--bad-line); }
         /* A split is the most interesting state a startup can be in here —
            it earns its own mark, not a muted one. */
-        .stance-split { font-size:10.5px; font-weight:700; letter-spacing:.06em;
+        .stance-split { font-size:11px; font-weight:700; letter-spacing:.06em;
           text-transform:uppercase; color:var(--split);
           background:var(--split-soft); border:1px solid var(--split-line);
           border-radius:var(--r-pill); padding:2px 8px; }
@@ -627,7 +639,7 @@ def _inject_css() -> None:
            one, and no surface can drift to its own private hex. */
         /* A secondary line set off from what precedes it — nine sites had
            been writing `style="margin-top:10px"` by hand. */
-        .subtle.lead-in { margin-top:var(--s-4); }
+        .subtle.lead-in { margin-top:10px; }
         .tone { font-weight:650; }
         .tone-good { color:var(--good); }
         .tone-bad { color:var(--bad); }
@@ -704,25 +716,25 @@ def _inject_css() -> None:
         .stTabs .react-aria-SelectionIndicator { display:none !important; }
 
         /* Buttons — thin-outline pills with uppercase tracked labels ("MORE") */
-        .stButton>button, .stDownloadButton>button, .stFormSubmitButton>button,
+        .stButton button, .stDownloadButton button, .stFormSubmitButton button,
         [data-testid="stPopoverButton"] {
           border-radius:var(--r-pill); font-weight:600; font-size:0.74rem;
           text-transform:uppercase; letter-spacing:0.08em;
           border:1px solid var(--hair-strong); background:transparent; color:var(--ink);
           padding:0.38rem 1.05rem; transition:all .12s ease; box-shadow:none; }
-        .stButton>button:hover, .stDownloadButton>button:hover,
+        .stButton button:hover, .stDownloadButton button:hover,
         [data-testid="stPopoverButton"]:hover { border-color:var(--ink);
           color:var(--bg); background:var(--ink); }
         [data-testid="stPopoverButton"] p { font-size:0.74rem !important; }
-        .stButton>button[kind="primary"], .stFormSubmitButton>button[kind="primary"] {
+        .stButton button[kind="primary"], .stFormSubmitButton button[kind="primary"] {
           background:var(--ink); border-color:var(--ink); color:var(--bg); }
-        .stButton>button[kind="primary"]:hover { background:var(--ink-hover);
+        .stButton button[kind="primary"]:hover { background:var(--ink-hover);
           border-color:var(--ink-hover); color:var(--bg); }
-        .stButton>button:active { transform:scale(0.97); }
-        .stButton>button:disabled { opacity:0.4; cursor:not-allowed; }
-        .stButton>button:disabled:hover { border-color:var(--hair-strong);
+        .stButton button:active { transform:scale(0.97); }
+        .stButton button:disabled { opacity:0.4; cursor:not-allowed; }
+        .stButton button:disabled:hover { border-color:var(--hair-strong);
           color:var(--ink); background:transparent; }
-        .stButton>button[kind="primary"]:disabled:hover { background:var(--ink);
+        .stButton button[kind="primary"]:disabled:hover { background:var(--ink);
           border-color:var(--ink); color:var(--bg); }
 
         /* Top-level nav — a segmented control styled exactly like the old
@@ -731,6 +743,15 @@ def _inject_css() -> None:
         .st-key-topnav [role="radiogroup"] { margin:1.4rem auto 1.6rem; }
         .st-key-topnav [data-testid="stButtonGroup"] { display:flex;
           justify-content:center; }
+        /* On a phone the six pages scroll sideways in one strip rather than
+           wrapping into a second row of pills. */
+        @media (max-width: 640px) {
+          .st-key-topnav [role="radiogroup"] { flex-wrap:nowrap; overflow-x:auto;
+            justify-content:flex-start;
+            max-width:100%; margin:0.8rem 0 1rem; scrollbar-width:none; }
+          .st-key-topnav [role="radiogroup"]::-webkit-scrollbar { display:none; }
+          .st-key-topnav [data-testid="stButtonGroup"] button { flex:0 0 auto; }
+        }
         /* Six pages on one row beside the wordmark: a touch tighter than the
            rail's pills (those have room to spare). */
         .st-key-topnav [data-testid="stButtonGroup"] button {
@@ -754,6 +775,15 @@ def _inject_css() -> None:
           background:var(--ink) !important; box-shadow:none !important; }
         [data-testid="stButtonGroup"] button[aria-checked="true"] p {
           color:var(--bg); font-weight:600; }
+        [data-testid="stButtonGroup"] button:focus-visible,
+        .stButton button:focus-visible {
+          box-shadow:0 0 0 2px var(--bg), 0 0 0 4px var(--ink) !important; }
+
+        /* Motion is decoration here: the pulsing dot and the sliding bar stop
+           for readers who asked their system for less of it. */
+        @media (prefers-reduced-motion: reduce) {
+          *, *::before, *::after { animation:none !important; transition:none !important; }
+        }
 
         /* Cards & tiles — cream paper panels with hairline rules */
         [data-testid="stVerticalBlockBorderWrapper"] {
@@ -767,7 +797,7 @@ def _inject_css() -> None:
           padding:0.65rem 0.75rem; }
         .tile { background:var(--surface); border:1px solid var(--hair); border-radius:var(--r-lg);
           padding:16px 18px; box-shadow:var(--shadow); }
-        .tile .label { color:var(--muted); font-size:0.68rem; text-transform:uppercase;
+        .tile .label { color:var(--muted); font-size:0.7rem; text-transform:uppercase;
           letter-spacing:0.1em; font-weight:600; }
         .tile .value { font-family:var(--serif); color:var(--ink); font-size:1.8rem;
           font-weight:600; letter-spacing:-0.01em; line-height:1.15; margin-top:4px; }
@@ -777,14 +807,14 @@ def _inject_css() -> None:
            ("INFRASTRUCTURE" / "FINTECH" on the Headline portfolio page) */
         .chiprow { display:flex; flex-wrap:wrap; gap:6px; margin-top:9px; }
         .chip { display:inline-block; padding:3.5px 11px; border-radius:var(--r-pill);
-          font-size:0.66rem; font-weight:600; text-transform:uppercase;
+          font-size:0.7rem; font-weight:600; text-transform:uppercase;
           letter-spacing:0.07em; background:var(--track); color:var(--ink-2);
           white-space:nowrap; }
         .chip.accent { background:var(--butter); color:var(--ink); font-weight:600; }
         .chip.status { background:var(--ink); color:var(--bg); }
         .chip.invalid { text-decoration:line-through; opacity:0.55; }
 
-        .scorecap { color:var(--muted); font-size:0.66rem; text-transform:uppercase;
+        .scorecap { color:var(--muted); font-size:0.7rem; text-transform:uppercase;
           letter-spacing:0.1em; font-weight:600; margin-top:2px; }
 
         /* Signal bars (single hue — magnitude) */
@@ -825,7 +855,7 @@ def _inject_css() -> None:
         .st-key-memodoc strong { color:var(--ink); }
         .st-key-memodoc table { border-collapse:collapse; width:100%;
           margin:8px 0 4px; }
-        .st-key-memodoc th { font-size:0.68rem; text-transform:uppercase;
+        .st-key-memodoc th { font-size:0.7rem; text-transform:uppercase;
           letter-spacing:0.08em; color:var(--muted); font-weight:600;
           text-align:left; padding:6px 12px 6px 0;
           border-bottom:1px solid var(--hair-strong); }
@@ -982,7 +1012,7 @@ PHASE_LABELS = {
     "verifying": "Adversarial verification",
     "scoring & saving": "Score & save",
     "hydrating": "Hydrate via X API",
-    "preparing": "Load cached leads",
+    "preparing": "Load cached startups",
 }
 PHASE_BLURB = {
     "discovering": "X searches, watchlist follow-diff, GitHub & Hacker News legs",
@@ -990,11 +1020,11 @@ PHASE_BLURB = {
     "reading websites": "fetch each candidate's site so Claude classifies from "
                         "real product copy, not bio pedigree",
     "classifying": "Claude reads each dossier: product, stage, sector, thesis fit",
-    "verifying": "Claude re-reads each top lead's evidence and corrects "
+    "verifying": "Claude re-reads each top startup's evidence and corrects "
                  "speculative verdicts",
-    "scoring & saving": "weighted signals × fit multipliers → ranked leads",
+    "scoring & saving": "weighted signals × fit multipliers → ranked startups",
     "hydrating": "fresh official X API reads for the shortlist",
-    "preparing": "reload the latest run's leads and cached evidence",
+    "preparing": "reload the latest run's startups and cached evidence",
 }
 
 
@@ -1053,7 +1083,7 @@ def _launch_scan(args: list[str], kind_hint: str, job_kind: str = "",
     # Click-time guard: the page may have rendered before another scan
     # started (buttons enabled), so re-check right before launching.
     if (store.current_scan() or {}).get("status") == "running":
-        st.warning("A scan is already running — wait for it to finish.")
+        st.warning("A run is already in progress — wait for it to finish.")
         return
 
     worker = store.worker_status()
@@ -1443,6 +1473,10 @@ def _my_stance(handle: str) -> str:
     return ""
 
 
+# The stance as a symbol, so a badge reads without its colour.
+_STANCE_GLYPH = {"strong_yes": "++", "yes": "+", "unsure": "?", "pass": "−"}
+
+
 def _stance_chips_html(handle: str, *, inline: bool = False) -> str:
     """Each partner's stance as an initial-badge row — who thinks what, at a
     glance, without opening anything. `inline` returns a span that sits in
@@ -1451,8 +1485,11 @@ def _stance_chips_html(handle: str, *, inline: bool = False) -> str:
     if summary is None:
         return ""
     badges = "".join(
-        f'<span class="stance-badge {stance}" title="{_e(_who(actor))}: '
-        f'{_e(STANCE_LABELS.get(stance, stance))}">{_e(_actor_initials(actor))}</span>'
+        f'<span class="stance-badge {stance}" role="img" '
+        f'title="{_e(_who(actor))}: {_e(STANCE_LABELS.get(stance, stance))}" '
+        f'aria-label="{_e(_who(actor))}: {_e(STANCE_LABELS.get(stance, stance))}">'
+        f'{_e(_actor_initials(actor))}<i aria-hidden="true">{_STANCE_GLYPH.get(stance, "")}</i>'
+        '</span>'
         for actor, stance in sorted(summary.by_actor.items())
     )
     split = '<span class="stance-split">Split</span>' if summary.contested else ""
@@ -1811,7 +1848,7 @@ def _run_panel() -> None:
     if not scan or (not running and not just_finished):
         return
 
-    kind = scan.get("kind") or "scan"
+    kind = scan.get("kind") or "run"
     phases: list[str] = json.loads(scan.get("phases_json") or "[]")
     current = scan.get("phase") or ""
     if not phases:  # legacy row (run started under old code)
@@ -1887,14 +1924,14 @@ def _run_panel() -> None:
         )
 
     if running:
-        title = f'<span class="scandot"></span>{_e(kind.capitalize())} in progress'
+        title = f'<span class="scandot"></span>{_e(run_label(kind))} in progress'
         meta = (f'elapsed <b>{_fmt_dur(elapsed)}</b> · '
                 f'≈ <b>{_fmt_dur(remaining)}</b> left')
     elif scan.get("status") == "done":
-        title = f'{_e(kind.capitalize())} finished'
+        title = f'{_e(run_label(kind))} finished'
         meta = f'took <b>{_fmt_dur(_iso_ts(scan.get("finished_at")) - _iso_ts(scan.get("started_at")))}</b>'
     else:
-        title = f'{_e(kind.capitalize())} failed'
+        title = f'{_e(run_label(kind))} failed'
         meta = f'after {_fmt_dur(_iso_ts(scan.get("finished_at")) - _iso_ts(scan.get("started_at")))}'
     detail = scan.get("detail") or ""
     st.markdown(
@@ -2214,15 +2251,16 @@ def _score_detail_html(lead: Lead, comps: dict) -> str:
                 f'{params.score_weight_fit:.0%} of the blend — '
                 f'{_e(verdict.fit_reason or "no reasoning recorded")}</div>'
             )
-    # ---- X signals (S): the deterministic momentum score — every signal that
-    # fired, its weighted points, and the evidence.
+    # ---- Signals (S): the deterministic momentum score — every signal that
+    # fired, its weighted points, and the evidence. Not "X signals": they
+    # include GitHub, Hacker News, arXiv, SEC and cross-source corroboration.
     hits = [s for s in lead.signals if s.value > 0]
     if comps["signals"] is not None:
         s_note = (f'{len(hits)} signal{"s" if len(hits) != 1 else ""} fired '
                   f'of {len(thesis.weights)} tracked'
                   if hits else "no signals fired")
         parts.append(
-            f'<div class="subtle lead-in">X signals '
+            f'<div class="subtle lead-in">Signals '
             f'<b>S {comps["signals"]:.0f}</b> · {params.score_weight_signals:.0%} '
             f'of the blend — {s_note}. Hover a signal for what it means; '
             'points = value × weight.</div>'
@@ -2268,7 +2306,7 @@ def _score_math_html(lead: Lead, manual_score: float | None = None) -> str:
         for desc, running in score_breakdown(lead, thesis, manual_score=manual_score)
     )
     return ('<div class="subtle lead-in">Score math — the blend '
-            'renormalizes over the components this lead actually evidences, then '
+            'renormalizes over the components this startup actually evidences, then '
             'trust multipliers apply:</div>'
             f'<div style="margin-top:2px">{steps}</div>')
 
@@ -2636,7 +2674,8 @@ def _detail_pane(lead: Lead, *, entry: LedgerEntry | None = None, key_ns: str = 
         f'<div class="dpane-fit">{_e(fit_str)}</div></div></div>'
         f'<div class="dpane-dims">{dim_html}</div>'
         '<div class="dpane-legend">Quality = product &amp; founder strength · '
-        'Fit = match to your thesis · Signal = smart-money follows this run.</div></div>'
+        'Fit = match to your thesis · Signal = public momentum (investor follows, '
+        'launches, GitHub, filings).</div></div>'
         + '</div>',
         unsafe_allow_html=True,
     )
@@ -2829,14 +2868,15 @@ def _render_startup_feed() -> None:
     else:
         # Controls live in the left rail (sidebar) so the feed column is just
         # results — not a stack of segmented toggles stacked above every card.
-        # The rail header + Feed/Database switch are rendered by the
-        # nav-level block before this runs.
+        # The rail header + view switch are rendered by _page_startups
+        # before this runs.
         rail = st.sidebar
         with rail:
             # THE product split: real launched startups first; people the
             # system expects to launch soon are the completeness track.
+            # "Show", not "Track": TRACK is also a memo verdict.
             track = st.segmented_control(
-                "Track", ["Startups", "Pre-launch watch", "Everything"],
+                "Show", ["Startups", "Pre-launch watch", "Everything"],
                 default="Startups", key="leads_track", persist_state="session",
             ) or "Startups"
             scope = st.segmented_control(
@@ -2958,7 +2998,7 @@ def _render_startup_feed() -> None:
                                               default=FILTER_DEFAULTS["f_ctype"], key="f_ctype", persist_state="session",
                                               format_func=lambda c: CUSTOMER_TYPE_LABEL[c],
                                               help="B2B vs B2C lens the classifier applied. "
-                                                   "Unclassified leads are never hidden by this.")
+                                                   "Unclassified startups are never hidden by this.")
                 min_score = st.slider("Minimum score", 0, 100, 0, key="f_minscore", persist_state="session")
                 min_fit = st.slider("Minimum thesis fit", 0, 100, 0, format="%d%%", key="f_minfit", persist_state="session")
                 hide_passed = st.toggle("Hide passed", value=True, key="f_hidepassed", persist_state="session")
@@ -3057,7 +3097,7 @@ def _render_startup_feed() -> None:
         elif track == "Startups":
             count_text = f"{len(display)} startups of {len(pairs)} accounts"
         else:
-            count_text = f"{len(shown)} of {len(pairs)} leads"
+            count_text = f"{len(shown)} of {len(pairs)} accounts"
         st.markdown(
             f'<div class="subtle" style="margin:4px 0 10px">{count_text}{hidden_note}</div>',
             unsafe_allow_html=True,
@@ -3481,13 +3521,12 @@ def _page_memos() -> None:
         memo_pool.insert(0, wanted)
 
     if not memo_pool:
-        st.markdown(
-            '<div class="section-title">No memos yet</div>'
-            '<div class="section-sub">Longlist or shortlist startups first — or hit '
-            '<b>Memo</b> on any card in the feed — and the full investment memo '
-            '(product, tech, competition, market, acquisition dynamics, '
-            'recommendation) gets written here.</div>',
-            unsafe_allow_html=True,
+        _empty_state(
+            "No memos yet",
+            "Longlist or shortlist startups first — or press <b>Write memo</b> in "
+            "any startup's dossier — and the full investment memo (product, tech, "
+            "competition, market, acquisition dynamics, recommendation) is written "
+            "here.",
         )
     else:
         n_briefed = len(briefed)
@@ -3655,7 +3694,7 @@ def _page_memos() -> None:
                     f'<span class="memo-title">{_e(picked_name)}</span>{verdict_chip}',
                     unsafe_allow_html=True,
                 )
-                memo_tldr, memo_body = _memo_parts(existing_memo)
+                memo_tldr, memo_body = _memo_parts(memo_for_display(existing_memo))
                 if memo_tldr:
                     with st.container(key="memotldr"):
                         st.markdown(_memo_md(memo_tldr))
@@ -4170,7 +4209,7 @@ def _thesis_tune() -> None:
 
     with st.expander("Targeting — stages, keywords, markers"):
         st.markdown('<div class="subtle">Stages steer the whole engine: which searches run, which '
-                    'discovery sources fire, and how leads are scored for fit.</div>',
+                    'discovery sources fire, and how startups are scored for fit.</div>',
                     unsafe_allow_html=True)
         stage_cols = st.columns(len(STAGES))
         chosen_stages = []
@@ -4362,13 +4401,16 @@ def _thesis_tune() -> None:
                     st.session_state.pop("weight_proposal", None)
                     st.rerun()
         st.markdown("---")
+        _sp = thesis.signal_params
+        _blend = [_sp.score_weight_quality, _sp.score_weight_fit, _sp.score_weight_signals]
+        _shares = "/".join(f"{w / (sum(_blend) or 1):.0%}" for w in _blend)
         st.markdown('<div class="subtle">Score = blend of <b>company quality</b> (the readiness '
                     'scorecard — enterprise rubric for B2B, consumer for B2C, criteria scored '
-                    '1–3 from evidence), <b>thesis fit</b>, and <b>X signals</b> — weighted '
-                    '45/35/20 by default, renormalized over what each lead evidences — then '
-                    '× Claude confidence, × 0.2 if not-a-founder, × stage multiplier, '
-                    '× value-add multiplier (off by default), × ungrounded multiplier. '
-                    'All editable.</div>',
+                    '1–3 from evidence), <b>thesis fit</b>, and <b>signals</b> — weighted '
+                    f'{_shares}, renormalized over what each startup '
+                    'evidences — then × Claude confidence, × 0.2 if not a founder, × stage '
+                    'multiplier, × value-add multiplier (off by default), × ungrounded '
+                    'multiplier. All editable above.</div>',
                     unsafe_allow_html=True)
         with st.form("signals_form"):
             names = list(SIGNAL_HELP) + [n for n in thesis.weights if n not in SIGNAL_HELP]
@@ -4381,7 +4423,7 @@ def _thesis_tune() -> None:
                                                              help=SIGNAL_HELP.get(name, "")))
             st.divider()
             st.markdown("**Final score blend** — quality / fit / signals, renormalized "
-                        "over whatever a lead evidences")
+                        "over whatever a startup evidences")
             params = thesis.signal_params
             b1, b2, b3 = st.columns(3)
             with b1:
@@ -4978,10 +5020,10 @@ def _render_database() -> None:
         unsafe_allow_html=True,
     )
     if not ledger:
-        st.markdown(
-            '<div class="subtle">Nothing tracked yet — press <b>Run scout</b> '
-            'above, or <code>./scout-cli demo</code> for an offline sample.</div>',
-            unsafe_allow_html=True,
+        _empty_state(
+            "Nothing tracked yet",
+            "Press <b>Run scout</b> above, or run <code>./scout-cli demo</code> for "
+            "an offline sample.",
         )
     else:
         db_rows: list[dict] = []
@@ -5120,15 +5162,19 @@ def _render_database() -> None:
                     "Score": st.column_config.ProgressColumn(
                         "Score", min_value=0, max_value=100, format="%d", width="small",
                         help="Final score — quality/fit/signals blend × trust multipliers"),
+                    # Spelled out: a header of "Q" / "F" / "S" is a code
+                    # nobody outside this team can read.
                     "Q": st.column_config.NumberColumn(
-                        "Q", width="small",
+                        "Quality", width="small",
                         help="Company quality 0–100 — the readiness scorecard "
                              "(B2B: enterprise · B2C: consumer), evidence-backed "
                              "criteria rolled up through weighted sections"),
                     "F": st.column_config.NumberColumn(
-                        "F", width="small", help="Thesis fit 0–100"),
+                        "Fit", width="small", help="Thesis fit 0–100"),
                     "S": st.column_config.NumberColumn(
-                        "S", width="small", help="X-signal momentum 0–100"),
+                        "Signals", width="small",
+                        help="Public momentum 0–100 — investor follows, launches, "
+                             "GitHub, Hacker News, filings"),
                     "Band": st.column_config.TextColumn(
                         "Band", width="small", help=rubric_mod.BAND_HELP),
                     "What they do": st.column_config.TextColumn("What they do",
@@ -5406,7 +5452,6 @@ _VERB_TEXT = {
     "override_set": lambda p: "adjusted the scoring",
     "attrs_changed": lambda p: f"updated {', '.join(p.get('keys', [])) or 'fields'}",
     "notes_edited": lambda p: "edited the notes",
-    "thesis_switched": lambda p: f"switched the workspace thesis to {p.get('name', '')}",
     "role_changed": lambda p: (
         f"made {_who(p.get('member', ''))} "
         + ("an admin" if p.get("role") == "admin" else "a member")
@@ -5447,19 +5492,22 @@ def _render_activity_feed() -> None:
         format_func=lambda uid: "Everyone" if uid == "Everyone" else _who(uid),
         key="act_who", persist_state="session",
     )
-    kind_filter = a2.selectbox(
-        "Kind", ["Everything", "Votes & comments", "Triage", "Memos"],
-        key="act_kind", persist_state="session",
-    )
+    # Every verb the store emits belongs to exactly one group (the
+    # "Company news" group existed but could never be picked).
     verb_groups = {
         "Votes & comments": ["vote_cast", "vote_cleared", "comment_added",
                              "votes_imported"],
         "Triage": ["status_changed", "assigned", "unassigned", "notes_edited",
-                   "override_set", "attrs_changed"],
+                   "override_set", "attrs_changed", "crm_pushed"],
         "Memos": ["memo_generated", "memo_edited", "memo_review_requested",
-                  "memo_approved", "memo_changes_requested"],
-        "Company news": ["funding_round_detected", "company_status_changed"],
+                  "memo_approved", "memo_changes_requested", "memo_review_cleared"],
+        "Company news": ["funding_round_detected", "company_status_changed",
+                         "filing_matched", "lead_resolved", "handle_merged"],
+        "Workspace": ["role_changed"],
     }
+    kind_filter = a2.selectbox(
+        "Kind", ["Everything", *verb_groups], key="act_kind", persist_state="session",
+    )
     feed = store.events(
         limit=200,
         actor=None if who_filter == "Everyone" else who_filter,
@@ -5477,10 +5525,13 @@ def _render_activity_feed() -> None:
         )
 
     if not feed:
-        st.markdown(
-            '<div class="subtle">Nothing yet — votes, comments, triage moves '
-            'and memo work all land here.</div>',
-            unsafe_allow_html=True,
+        filtered = who_filter != "Everyone" or kind_filter != "Everything"
+        _empty_state(
+            "Nothing matches these filters" if filtered else "No activity yet",
+            "Set Member and Kind back to Everyone / Everything to see the rest."
+            if filtered else
+            "Votes, comments, triage moves and memo work all land here — open a "
+            "startup's dossier and vote to start the record.",
         )
     for event in feed:
         is_new = (event.id or 0) > seen_to and event.actor != ACTOR
@@ -5665,22 +5716,20 @@ def _evidence_trust_banner(report) -> None:
 def _render_evidence_results(report) -> None:
     """Did the composite score work? Headline metrics, then every company."""
     metrics = report.metrics()
+    # The explanation under each number, not in a tooltip: these four are
+    # read by people deciding whether to trust the tool.
     m1, m2, m3, m4 = st.columns(4)
-    m1.metric("Recall", f"{metrics.recall:.0%}",
-              help=f"Share of companies that raised which scored at or above "
-                   f"{report.threshold:.0f}.")
-    m2.metric("AUC", f"{metrics.auc:.2f}",
-              help="Chance a company that raised outranks one that did not. "
-                   "0.5 is a coin flip; 1.0 is perfect separation.")
-    m3.metric(
-        "Median lead",
-        f"{metrics.median_lead_days / 30.44:.1f} mo"
-        if metrics.median_lead_days else "—",
-        help="How far ahead of the announced round the cutoff sat.",
-    )
-    m4.metric("Controls", metrics.n_controls,
-              help="Companies from the same window that did not raise. "
-                   "Without these, recall proves nothing.")
+    m1.markdown(_tile("Recall", f"{metrics.recall:.0%}",
+                      f"of those that raised scored ≥ {report.threshold:.0f}"),
+                unsafe_allow_html=True)
+    m2.markdown(_tile("AUC", f"{metrics.auc:.2f}",
+                      "0.5 is a coin flip · 1.0 is perfect"), unsafe_allow_html=True)
+    m3.markdown(_tile("Median lead",
+                      f"{metrics.median_lead_days / 30.44:.1f} mo"
+                      if metrics.median_lead_days else "—",
+                      "ahead of the announced round"), unsafe_allow_html=True)
+    m4.markdown(_tile("Controls", str(metrics.n_controls),
+                      "same window, did not raise"), unsafe_allow_html=True)
     st.markdown(
         f'<div class="subtle">Cutoff <b>{report.cutoff:%d %B %Y}</b> · '
         f'mean score <b>{metrics.mean_outcome_score}</b> for companies that '
@@ -6212,19 +6261,17 @@ def _render_automation() -> None:
     depth = store.job_queue_depth()
     w1, w2, w3 = st.columns(3)
     if worker_state is None:
-        w1.metric("Worker", "Never run")
-    elif worker_state["alive"]:
-        w1.metric("Worker", "Running", delta=f"seen {_ago(worker_state['last_seen'])}",
-                  delta_color="off")
+        w1.markdown(_tile("Worker", "never run", "schedules don't fire without it"),
+                    unsafe_allow_html=True)
     else:
-        w1.metric("Worker", "Offline", delta=f"last seen {_ago(worker_state['last_seen'])}",
-                  delta_color="inverse")
-    w2.metric("Queued or running", depth)
+        w1.markdown(_tile("Worker", "running" if worker_state["alive"] else "offline",
+                          f"last seen {_ago(worker_state['last_seen'])}"),
+                    unsafe_allow_html=True)
+    w2.markdown(_tile("Queued or running", str(depth)), unsafe_allow_html=True)
     next_up = [s for s in store.schedules() if s["enabled"] and s.get("next_run_at")]
-    w3.metric(
-        "Next scheduled",
-        _ago(min(s["next_run_at"] for s in next_up)) if next_up else "—",
-    )
+    w3.markdown(_tile("Next scheduled",
+                      _ago(min(s["next_run_at"] for s in next_up)) if next_up else "—"),
+                unsafe_allow_html=True)
 
     if worker_state is None or not worker_state["alive"]:
         st.markdown(

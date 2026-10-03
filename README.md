@@ -30,31 +30,44 @@ in Finder instead.
 
 ---
 
-## The ten pages
+## The six pages
 
-**Thesis** — the control room. Write your thesis in plain language and the
-strategy agent generates the whole sourcing configuration: X query bank, bio
-searches, GitHub topics, an investor watchlist (handles are existence-checked;
-fabrications are dropped), and scoring weights. You review before anything
-saves. This page also holds the thesis library — switch between theses without
-losing either, and see how many startups each one found. Runs launch from here,
-with a worst-case cost estimate and an explicit confirmation before any paid
-run.
+In the order the work happens. Each page's views are the switch at the top of
+the left rail; links from Slack open the startup they name, on the page it's
+on now.
 
-**Startups** — everything sourcing found, newest run or all runs, as a triage
-cockpit: a dense scannable list on the left, full dossier on the right. Each row
-shows thesis fit, score, funding round and B2B/B2C at a glance. The dossier
-gives you the product summary, the sector line, "How it scored" with every point
-attributed, and one-click Longlist / Pass. Filter by round, stage, customer
-type, fit or score. A **Database** view of the same data adds editable CRM
-columns (vertical, use case, priority, your own custom fields) with AI
-auto-categorisation.
+**Startups** — where you land, and where runs start. **Run scout** sources from
+the free channels (GitHub, Hacker News, RSS, SEC Form D, YC, arXiv) plus X when
+it's connected; **Run options** holds the source, run size, a time estimate,
+an explicit spend confirmation before any paid run, and Preview / Rescore.
+Progress shows live above the list, and a run goes to the worker when one is
+running, so closing the tab doesn't stop it. Three views:
 
-**Longlist** — companies you've marked worth a closer look. Same cockpit,
-narrower set, with the next action being shortlist or pass.
+- **Feed** — a triage cockpit: a dense scannable list on the left, the full
+  dossier on the right. Each row shows thesis fit, score, funding round,
+  B2B/B2C and your partners' votes at a glance. The dossier gives you the
+  product summary, an ⚠ warning first if the company was acquired or shut
+  down, warm-intro paths, your vote, one-click Longlist / Pass, "How it scored"
+  with every point attributed, connections, and the evidence. Filter by round,
+  stage, customer type, fit or score — your filters stay put when you leave.
+- **Database** — every tracked startup as a table, with editable CRM columns
+  (vertical, use case, priority, your own custom fields), AI
+  auto-categorisation, bulk triage, and the same dossier for the selected row.
+- **Graph** — the database sideways. A live force-directed map of who
+  connects to whom: companies, their backers, founders and the labs they left,
+  acquirers, and the smart money watching — every edge derived from cited
+  evidence, never from vibes. Click a node to trace its connections; focus on
+  one company to see its two-hop neighborhood; hub tables underneath answer
+  the standing questions (which backer keeps showing up, which lab the
+  founders come from). The same graph answers in the terminal via
+  `scout graph`.
 
-**Shortlist** — the ones you're seriously considering. This is where memos get
-written and outreach gets drafted.
+**Pipeline** — the startups the firm decided to look at, by stage:
+**Longlist** (worth a closer look) · **Shortlist** (the decision queue) ·
+**In talks** (contacted, meeting, diligence) · **Allocated** (your portfolio)
+· **Passed**. Same cockpit, with stage and notes in the dossier. On top, the
+**partner meeting**: every startup where partners' votes split, widest split
+first.
 
 **Memos** — a 12-section first-draft investment memo per company: *Overview ·
 Why now · Team · Product & differentiation · Technology & architecture ·
@@ -63,46 +76,50 @@ Traction & metrics · Competitive landscape · Market sizing · Strategic capita
 opening with a TL;DR and closing with a **VERDICT: PURSUE / TRACK / PASS**,
 tripwires, and first-call questions. Deep research is the default: it finds the
 real company site, researches founders by name, verifies funding, and cites its
-sources. Memos are editable in place and export as Markdown or styled PDF.
+sources. A memo is only ever written when you press **Write memo** (a link
+never starts one); with a worker running, it's queued so you can close the
+tab. Memos are editable in place, reviewed and approved by name, versioned
+(regenerating never loses an edit), and export as Markdown or styled PDF.
 AI-drafted outreach sits below each one.
 
-**Activity** — the firm's shared memory. Every vote, comment, triage move and
-memo edit, newest first, filterable by member and kind, with an unread count in
-the nav. With partners in different timezones this is the first thing you open:
-what happened while you were asleep.
+**Activity** — the firm's shared memory. **Feed**: every vote, comment, triage
+move and memo edit, newest first, filterable by member and kind, with an
+unread count in the nav. With partners in different timezones this is the
+first thing you open: what happened while you were asleep. **Your taste**:
+what your own votes say — the sectors and stages you actually back — and the
+calls where you and the model disagreed.
 
-**Graph** — the database sideways. A live force-directed map of everything
-the pipeline knows about who connects to whom: companies, their backers,
-founders and the labs they left, acquirers, and the smart money watching —
-every edge derived from cited evidence, never from vibes. Click a node to
-trace its connections with their evidence; focus on one company to see its
-two-hop neighborhood; hub tables underneath answer the standing questions
-(which backer keeps showing up, which lab the founders come from, what else
-an acquirer bought). The same graph answers in the terminal via `scout graph`.
+**Thesis** — what Scout looks for. **Define**: write your thesis in plain
+language and the strategy agent generates the whole sourcing configuration: X
+query bank, bio searches, GitHub topics, an investor watchlist (handles are
+existence-checked; fabrications are dropped), and scoring weights. You review
+before anything saves. The thesis library lets you switch between theses
+without losing either. **Tune**: every part of that configuration by hand,
+each beside the measured yield of what it controls (which queries and sources
+ever produced a startup you triaged). **Evidence**: whether any of this
+actually works. A backtest scores companies using only evidence that was
+public on a past date, then checks where the ones that went on to raise
+actually ranked — **Results** (recall, separation, lead time, every company
+against the controls), **Signals** (which individual signals carried the
+information, with confidence intervals and a check for two signals measuring
+the same thing), and **Over time** (whether a signal is wearing out). Every
+report carries its own limitations — including the ones that undercut it.
 
-**Evidence** — whether any of this actually works. A backtest scores companies
-using only evidence that was public on a past date, then checks where the ones
-that went on to raise actually ranked. Three views: **Results** (recall,
-separation, lead time, and every company plotted against the controls),
-**Signals** (which individual signals carried the information, with confidence
-intervals and a check for two signals measuring the same thing), and **Over
-time** (whether a signal is wearing out as the world catches on). Every report
-carries its own limitations — including the ones that undercut it.
-
-**Automation** — schedules, the job queue, and whether the worker is alive.
+**Settings** — **General**: today's spend against the daily cap, whether the
+worker is alive, the readiness checks (`scout doctor`), and firm-wide
+defaults. **Integrations**: Slack digests and mentions, CRM write-back, and
+the phone app. **Automation**: schedules, the job queue, and the worker.
 Momentum signals decay in days, so the run that matters is the one nobody had
-to remember. Sourcing runs, digests and memos can all be scheduled or queued.
-`scout worker --bootstrap` sets up the daily rhythm: a sourcing run at 06:00,
-an unlinked-lead resolve at 06:30 (turns the headlines and launches the run
-could not key to a company into scored leads), a tracked-company refresh at
-06:45 (re-researches the longlisted+ companies whose facts are oldest —
-raises, acquisitions, shutdowns land in the feed), and the digest at 07:30. The whole day is bounded by one spend envelope
-(`DAILY_SPEND_CAP_USD`, default $1): heuristics, caches and free scraping
-always run; paid Claude/X calls stop when the envelope is spent and resume
-tomorrow.
-
-**Settings** — API keys, the X spend ledger, Slack notifications, your own
-taste profile, and firm-wide defaults.
+to remember. `scout worker --bootstrap` sets up the daily rhythm: a sourcing
+run at 06:00, an unlinked-lead resolve at 06:30 (turns the headlines and
+launches the run could not key to a company into scored startups), a
+tracked-company refresh at 06:45 (re-researches the longlisted+ companies
+whose facts are oldest — raises, acquisitions, shutdowns land in the feed),
+the digest at 07:30 and the phone app at 07:45. The whole day is bounded by
+one spend envelope (`DAILY_SPEND_CAP_USD`, default $1): heuristics, caches and
+free scraping always run; paid Claude/X calls stop when the envelope is spent
+and resume tomorrow. **Workspace**: members and their roles, who may sign in,
+your firm's network for warm intros, and your own Slack ID.
 
 ## How it works
 
@@ -280,13 +297,13 @@ network      Who the firm knows. Derived from the pipeline (portfolio =
 yield        Which discovery sources and X queries produce companies you
              triage: per source, companies scored, triaged, and triaged
              companies NO other source found — what switching it off would
-             lose. Also on the Thesis page; the strategy agent reads it.
+             lose. Also on Thesis → Tune; the strategy agent reads it.
 doctor       Is this installation ready to source? Keys, X cookies, thesis
              and seeds, database, worker and schedules, then a probe of every
              host the config would use — from this machine, with the real
              SEC User-Agent and GitHub token. Every problem comes with its
              fix; exits 1 when something blocks the daily scan. Spends
-             nothing. Also on the Settings page.
+             nothing. Also under Settings → General.
   --offline                skip the network probes
 demo         $0 offline end-to-end test
 ui           Launch the workspace
@@ -375,7 +392,7 @@ scout crm sync           # push everything at or past the threshold
 scout crm push acme_ai   # one company, now, whatever its status
 ```
 
-A startup reaching the threshold (Shortlisted by default; Settings page or
+A startup reaching the threshold (Shortlisted by default; Settings → Integrations or
 `scout crm config --threshold`) is written as: the company record **matched
 by domain** — an existing record is linked, never overwritten, and only
 empty fields are filled — an entry on your list, a *Sourced by Scout* note
@@ -457,7 +474,7 @@ and a few you correctly skipped.
   forward settles the second. Outcomes and controls are also chosen by hand,
   and X history cannot be reconstructed at all, so every figure is a floor
   with a selection bias on top. Each report states all of this itself; the
-  Evidence page will not show a number without them.
+  Thesis → Evidence will not show a number without them.
 
 ---
 

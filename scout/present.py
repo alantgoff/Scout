@@ -4,6 +4,7 @@ for people — pure, importable without Streamlit, so they unit-test.
 
 from __future__ import annotations
 
+import re
 from datetime import datetime, timezone
 
 # Within this many seconds either side of now, a time is just "just now".
@@ -60,3 +61,26 @@ def run_label(kind: str | None) -> str:
     """The noun for a scan kind. Never "Run running": the verb is the
     banner's job ("in progress", "finished", "failed")."""
     return _RUN_LABELS.get((kind or "").lower(), (kind or "Run").capitalize())
+
+
+_VERDICT_LINE = re.compile(r"\**VERDICT:\s*(PURSUE|TRACK|PASS)\**\s*")
+
+
+def memo_for_display(md: str) -> str:
+    """The memo as the Memos panel shows it: minus what the panel's header
+    already says — a leading "# <name> — investment memo" title, and a bare
+    VERDICT line ahead of the first section (the header chip shows it).
+    Display only: the stored memo, the exports and the chip's own grep keep
+    both, and a VERDICT line inside a section (the Recommendation) stays."""
+    lines = md.strip().splitlines()
+    if lines and lines[0].startswith("# "):
+        lines = lines[1:]
+    out: list[str] = []
+    in_head = True
+    for line in lines:
+        if line.startswith("## "):
+            in_head = False
+        if in_head and _VERDICT_LINE.fullmatch(line.strip()):
+            continue
+        out.append(line)
+    return "\n".join(out).strip()
