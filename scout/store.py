@@ -374,14 +374,29 @@ class Store:
             self.db["users"].update(user_id.strip().lower(), updates, alter=True)
 
     def set_user_role(self, user_id: str, role: str) -> None:
+        """Promote or demote a member. Refuses to demote the last admin: a
+        workspace with no admin can't change its own settings, access list
+        or roles ever again, short of editing the database by hand."""
         if role not in ("admin", "member"):
             raise ValueError(f"unknown role: {role!r}")
-        if self.db["users"].exists():
-            self.db.execute(
-                "update users set role = ? where id = ?",
-                [role, user_id.strip().lower()],
-            )
-            self.db.conn.commit()
+        if not self.db["users"].exists():
+            return
+        uid = user_id.strip().lower()
+        with self.write_tx():
+            current = self.db.execute(
+                "select role from users where id = ?", [uid]).fetchone()
+            if current is None or current[0] == role:
+                return
+            if role != "admin":
+                admins = self.db.execute(
+                    "select count(*) from users where role = 'admin'").fetchone()[0]
+                if admins <= 1:
+                    raise ValueError("can't demote the last admin — promote "
+                                     "someone else first")
+            self.db.execute("update users set role = ? where id = ?", [role, uid])
+            if self.actor:
+                self._append_event("role_changed",
+                                   payload={"member": uid, "role": role})
 
     # --------------------------------------------------------------- settings
 

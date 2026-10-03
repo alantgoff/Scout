@@ -148,13 +148,13 @@ def config_checks(settings: Settings, thesis: Thesis | None, seeds: Seeds,
         add(Check(area="Thesis & seeds", name="Investor watchlist", status="warn",
                   detail="empty — no smart-money follow signals",
                   fix="List the investors whose follows you trust in seeds.yaml "
-                      "(Thesis page → Watchlist & discovery)."))
+                      "(Thesis → Tune → Watchlist & discovery)."))
     elif watchers <= EXAMPLE_WATCHLIST:
         add(Check(area="Thesis & seeds", name="Investor watchlist", status="warn",
                   detail=f"still the example list ({len(watchers)} handles) — the "
                          "smart-money signals follow someone else's taste",
                   fix="Replace it with your own investors in seeds.yaml "
-                      "(Thesis page → Watchlist & discovery)."))
+                      "(Thesis → Tune → Watchlist & discovery)."))
     else:
         add(Check(area="Thesis & seeds", name="Investor watchlist", status="ok",
                   detail=f"{len(watchers)} handles"))
@@ -221,7 +221,7 @@ def config_checks(settings: Settings, thesis: Thesis | None, seeds: Seeds,
     slack = bool(store.get_setting("slack_webhook_url"))
     add(Check(area="Optional", name="Slack digest", status="ok" if slack else "info",
               detail="webhook set" if slack else "no webhook — digests are not posted",
-              fix="" if slack else "Settings page → Slack webhook."))
+              fix="" if slack else "Settings → Integrations → Slack."))
     targets = []
     if settings.digest_repo:
         targets.append("GitHub Pages")

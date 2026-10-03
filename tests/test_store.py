@@ -5,6 +5,8 @@ from __future__ import annotations
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
+import pytest
+
 from scout.models import Account, Lead, LLMVerdict, Signal, SitePage
 from scout.store import Store
 
@@ -637,6 +639,25 @@ def test_ensure_user_admin_env_promotes(tmp_path: Path, monkeypatch) -> None:
     # An existing member is promoted on next login too.
     store.set_user_role("sara@firm.com", "member")
     assert store.ensure_user("sara@firm.com")["role"] == "admin"
+
+
+def test_the_last_admin_cannot_be_demoted(tmp_path: Path) -> None:
+    """A workspace with no admin can never change its settings, access list
+    or roles again — so the store refuses, whoever asks."""
+    store = make_store(tmp_path)
+    store.ensure_user("alan@firm.com")            # first → admin
+    store.ensure_user("sara@firm.com")            # member
+    store.actor = "alan@firm.com"
+    with pytest.raises(ValueError, match="last admin"):
+        store.set_user_role("alan@firm.com", "member")
+    assert store.get_user("alan@firm.com")["role"] == "admin"
+    store.set_user_role("sara@firm.com", "admin")
+    store.set_user_role("alan@firm.com", "member")  # someone else holds it now
+    assert [u["role"] for u in store.list_users()] == ["admin", "member"]
+    verbs = [e.verb for e in store.events(limit=10)]
+    assert verbs.count("role_changed") == 2
+    store.set_user_role("sara@firm.com", "admin")  # no change → no event
+    assert [e.verb for e in store.events(limit=10)].count("role_changed") == 2
 
 
 def test_settings_roundtrip_and_overrides(tmp_path: Path) -> None:

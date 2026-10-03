@@ -17,6 +17,7 @@ from pathlib import Path
 
 from streamlit.testing.v1 import AppTest
 
+from scout import nav
 from scout.agents import MEMO_SECTIONS
 from scout.models import Account, Lead, LLMVerdict, Signal
 from scout.store import Store
@@ -82,8 +83,15 @@ def test_ui_renders_without_exceptions(tmp_path, monkeypatch) -> None:
     at.run()
 
     assert not at.exception, at.exception[0].message if at.exception else ""
-    # Default page is Thesis; the top-level tabs are gone (session-state nav).
-    assert at.session_state["nav"] == "Thesis"
+    # Sessions land on the work (Startups), not on setup; the run control
+    # lives here, where its results appear.
+    assert at.session_state["nav"] == "Startups"
+    assert any(b.label == "Run scout" for b in at.button)
+
+    at.session_state["nav"] = "Thesis"
+    at.run()
+    assert not at.exception, at.exception[0].message if at.exception else ""
+    assert at.session_state["thesis_view"] == "Define"
     assert "Define the thesis" in _page_text(at)
 
     # ---- Startups: feed + database sub-tabs
@@ -138,13 +146,14 @@ def test_ui_renders_without_exceptions(tmp_path, monkeypatch) -> None:
     assert "On disk" in page_text
     assert "matching rows" in page_text
 
-    # ---- Funnel pages render their empty states (nothing triaged in seed)
-    at.session_state["nav"] = "Longlist"
+    # ---- Pipeline stages render their empty states (nothing triaged in seed)
+    at.session_state["nav"] = "Pipeline"
     at.run()
     assert not at.exception
+    assert at.session_state["pipeline_stage"] == "Longlist"
     assert "Nothing longlisted yet" in _page_text(at)
 
-    at.session_state["nav"] = "Shortlist"
+    at.session_state["pipeline_stage"] = "Shortlist"
     at.run()
     assert not at.exception
     assert "Nothing shortlisted yet" in _page_text(at)
@@ -165,24 +174,28 @@ def test_ui_renders_without_exceptions(tmp_path, monkeypatch) -> None:
 
 
 def test_longlist_and_shortlist_render_cards_with_leads(tmp_path, monkeypatch) -> None:
-    """The funnel pages call _lead_card, which reaches module-level helpers
-    (e.g. _attr_display) that must be bound before ANY nav block runs — not
-    just the Startups page. The base smoke test only hits the empty states,
-    so this seeds a longlisted + shortlisted lead and renders both pages."""
+    """The Pipeline stages render the cockpit with real rows. The old page
+    names still work — "Longlist" and "Shortlist" are aliases that land on
+    Pipeline at that stage (Slack messages carry them forever)."""
     at = _app(tmp_path, monkeypatch)
     at.run()
     store = Store(tmp_path / "smoke.db")
     store.set_pipeline("smoke_founder", status="longlisted")
     store.set_pipeline("nora_builds", status="shortlisted")
 
-    at.session_state["nav"] = "Longlist"
+    at.session_state["_route"] = {"page": "Longlist"}
     at.run()
     assert not at.exception, at.exception[0].message if at.exception else ""
-    assert "SmokeCo" in _page_text(at)  # the card rendered, not the empty state
+    assert at.session_state["nav"] == "Pipeline"
+    assert at.session_state["pipeline_stage"] == "Longlist"
+    assert "SmokeCo" in _page_text(at)  # the cockpit rendered, not the empty state
 
-    at.session_state["nav"] = "Shortlist"
+    at.session_state["_route"] = {"page": "Shortlist"}
     at.run()
     assert not at.exception, at.exception[0].message if at.exception else ""
+    assert at.session_state["pipeline_stage"] == "Shortlist"
+    assert "Nora Vale" in _page_text(at)
+    assert "SmokeCo" not in _page_text(at)  # one stage at a time
 
 
 def test_warm_paths_show_on_the_card_and_the_network_form(tmp_path, monkeypatch) -> None:
@@ -208,7 +221,7 @@ def test_warm_paths_show_on_the_card_and_the_network_form(tmp_path, monkeypatch)
     store.set_pipeline("target", status="longlisted")
     store.rebuild_graph(store.load_lead_ledger())
 
-    at.session_state["nav"] = "Longlist"
+    at.session_state["_route"] = {"page": "Longlist"}
     at.run()
     assert not at.exception, at.exception[0].message if at.exception else ""
     text = _page_text(at)
@@ -218,6 +231,7 @@ def test_warm_paths_show_on_the_card_and_the_network_form(tmp_path, monkeypatch)
     assert "Accel backs TargetCo — and co-invested with you in PortCo" in text
 
     at.session_state["nav"] = "Settings"
+    at.session_state["settings_view"] = "Workspace"
     at.run()
     assert not at.exception, at.exception[0].message if at.exception else ""
     assert "Your network" in _page_text(at)
@@ -432,7 +446,7 @@ def test_allowlist_blocks_unlisted_user(tmp_path, monkeypatch) -> None:
     at2 = AppTest.from_file(str(UI_PATH), default_timeout=30)
     at2.run()
     assert not at2.exception
-    assert at2.session_state["nav"] == "Thesis"
+    assert at2.session_state["nav"] == "Startups"
 
 
 # --- collaboration surfaces -----------------------------------------------------
@@ -577,7 +591,7 @@ def test_automation_page_warns_when_no_worker_is_running(tmp_path, monkeypatch) 
     seed_store(db)
 
     at = AppTest.from_file(str(UI_PATH), default_timeout=30)
-    at.session_state["nav"] = "Automation"
+    at.session_state["_route"] = {"page": "Automation"}
     at.run()
     assert not at.exception, at.exception[0].message if at.exception else ""
     page = _page_text(at)
@@ -587,7 +601,7 @@ def test_automation_page_warns_when_no_worker_is_running(tmp_path, monkeypatch) 
     # With a live heartbeat the warning goes away.
     Store(db).record_worker_heartbeat("test-worker:1")
     at2 = AppTest.from_file(str(UI_PATH), default_timeout=30)
-    at2.session_state["nav"] = "Automation"
+    at2.session_state["_route"] = {"page": "Automation"}
     at2.run()
     assert not at2.exception, at2.exception[0].message if at2.exception else ""
     assert "No worker is running" not in _page_text(at2)
@@ -601,7 +615,7 @@ def test_bootstrap_button_creates_the_recommended_schedules(tmp_path, monkeypatc
     seed_store(db)
 
     at = AppTest.from_file(str(UI_PATH), default_timeout=30)
-    at.session_state["nav"] = "Automation"
+    at.session_state["_route"] = {"page": "Automation"}
     at.run()
     next(b for b in at.button if "recommended schedules" in b.label).click().run()
     assert not at.exception, at.exception[0].message if at.exception else ""
@@ -621,7 +635,7 @@ def test_queue_button_enqueues_and_cancels(tmp_path, monkeypatch) -> None:
     Store(db).record_worker_heartbeat("worker:1")
 
     at = AppTest.from_file(str(UI_PATH), default_timeout=30)
-    at.session_state["nav"] = "Automation"
+    at.session_state["_route"] = {"page": "Automation"}
     at.run()
     next(b for b in at.button if b.key == "queue_digest").click().run()
     assert not at.exception, at.exception[0].message if at.exception else ""
@@ -651,8 +665,7 @@ def test_run_button_queues_when_a_worker_is_live(tmp_path, monkeypatch) -> None:
                         lambda *a, **kw: spawned.append(a) or _FakeProc())
 
     at = AppTest.from_file(str(UI_PATH), default_timeout=30)
-    at.session_state["nav"] = "Thesis"  # where the run controls live
-    at.run()
+    at.run()  # lands on Startups, where the run control lives
     next(b for b in at.button if b.label == "Run scout").click().run()
     assert not at.exception, at.exception[0].message if at.exception else ""
     assert spawned == []  # queued, not spawned
@@ -700,7 +713,7 @@ def test_evidence_view_shows_backtest_results(tmp_path, monkeypatch) -> None:
                              "metrics": report.metrics().model_dump()})
 
     at = AppTest.from_file(str(UI_PATH), default_timeout=30)
-    at.session_state["nav"] = "Evidence"
+    at.session_state["_route"] = {"page": "Evidence"}
     at.run()
     assert not at.exception, at.exception[0].message if at.exception else ""
     page = _page_text(at)
@@ -736,7 +749,7 @@ def test_evidence_view_flags_an_untrustworthy_backtest(tmp_path, monkeypatch) ->
                              "metrics": report.metrics().model_dump()})
 
     at = AppTest.from_file(str(UI_PATH), default_timeout=30)
-    at.session_state["nav"] = "Evidence"
+    at.session_state["_route"] = {"page": "Evidence"}
     at.run()
     assert not at.exception, at.exception[0].message if at.exception else ""
     assert "not usable" in _page_text(at)
@@ -774,7 +787,7 @@ def test_evidence_view_attributes_power_to_individual_signals(tmp_path, monkeypa
                              "metrics": report.metrics().model_dump()})
 
     at = AppTest.from_file(str(UI_PATH), default_timeout=30)
-    at.session_state["nav"] = "Evidence"
+    at.session_state["_route"] = {"page": "Evidence"}
     at.session_state["evidence_view"] = "Signals"
     at.run()
     assert not at.exception, at.exception[0].message if at.exception else ""
@@ -803,7 +816,7 @@ def test_evidence_page_teaches_when_there_is_no_backtest(tmp_path, monkeypatch) 
     seed_store(db)
 
     at = AppTest.from_file(str(UI_PATH), default_timeout=30)
-    at.session_state["nav"] = "Evidence"
+    at.session_state["_route"] = {"page": "Evidence"}
     at.run()
     assert not at.exception, at.exception[0].message if at.exception else ""
     page = _page_text(at)
@@ -836,7 +849,7 @@ def test_evidence_trends_view_explains_what_a_trend_needs(tmp_path, monkeypatch)
                              "metrics": report.metrics().model_dump()})
 
     at = AppTest.from_file(str(UI_PATH), default_timeout=30)
-    at.session_state["nav"] = "Evidence"
+    at.session_state["_route"] = {"page": "Evidence"}
     at.session_state["evidence_view"] = "Over time"
     at.run()
     assert not at.exception, at.exception[0].message if at.exception else ""
@@ -875,7 +888,7 @@ def test_evidence_results_plots_the_separation(tmp_path, monkeypatch) -> None:
                              "metrics": report.metrics().model_dump()})
 
     at = AppTest.from_file(str(UI_PATH), default_timeout=30)
-    at.session_state["nav"] = "Evidence"
+    at.session_state["_route"] = {"page": "Evidence"}
     at.run()
     assert not at.exception, at.exception[0].message if at.exception else ""
     page = _page_text(at)
@@ -910,7 +923,7 @@ def test_evidence_skips_the_run_picker_when_there_is_only_one(tmp_path, monkeypa
     base = datetime(2025, 2, 1, tzinfo=timezone.utc)
     _save(base)
     at = AppTest.from_file(str(UI_PATH), default_timeout=30)
-    at.session_state["nav"] = "Evidence"
+    at.session_state["_route"] = {"page": "Evidence"}
     at.run()
     assert not at.exception, at.exception[0].message if at.exception else ""
     assert not [s for s in at.selectbox if s.key == "ev_pick"]
@@ -918,7 +931,7 @@ def test_evidence_skips_the_run_picker_when_there_is_only_one(tmp_path, monkeypa
     # A second run makes the choice meaningful, so the picker appears.
     _save(base - timedelta(days=180))
     at2 = AppTest.from_file(str(UI_PATH), default_timeout=30)
-    at2.session_state["nav"] = "Evidence"
+    at2.session_state["_route"] = {"page": "Evidence"}
     at2.run()
     assert not at2.exception, at2.exception[0].message if at2.exception else ""
     assert [s for s in at2.selectbox if s.key == "ev_pick"]
@@ -942,7 +955,7 @@ def test_graph_page_renders_map_and_hubs(tmp_path, monkeypatch) -> None:
     store.rebuild_graph(store.load_lead_ledger())
 
     at = AppTest.from_file(str(UI_PATH), default_timeout=30)
-    at.session_state["nav"] = "Graph"
+    at.session_state["_route"] = {"page": "Graph"}
     at.run()
     assert not at.exception, at.exception[0].message if at.exception else ""
     text = _page_text(at)
@@ -955,7 +968,7 @@ def test_graph_page_renders_map_and_hubs(tmp_path, monkeypatch) -> None:
 
 def test_graph_page_empty_state(tmp_path, monkeypatch) -> None:
     at = _app(tmp_path, monkeypatch)  # seeded leads, but no edges derived
-    at.session_state["nav"] = "Graph"
+    at.session_state["_route"] = {"page": "Graph"}
     at.run()
     assert not at.exception, at.exception[0].message if at.exception else ""
     # The shared empty-state shape: names what is empty AND the next step.
@@ -1031,18 +1044,18 @@ def test_fresh_install_renders_every_page(tmp_path, monkeypatch) -> None:
     at = AppTest.from_file(str(UI_PATH), default_timeout=30)
     at.run()
     assert not at.exception, at.exception[0].message if at.exception else ""
-    pages = ["Thesis", "Startups", "Longlist", "Shortlist", "Memos", "Activity",
-             "Graph", "Evidence", "Automation", "Settings"]
-    for page in pages:
-        at.session_state["nav"] = page
-        at.run()
-        assert not at.exception, (
-            f"{page}: {at.exception[0].message}" if at.exception else ""
-        )
-    at.session_state["nav"] = "Startups"
-    at.session_state["startups_view"] = "Database"
-    at.run()
-    assert not at.exception, at.exception[0].message if at.exception else ""
+    # Every page, and every view inside it — the map is the test's input,
+    # so a page or view added later is covered without editing this.
+    for page in nav.PAGES:
+        for view in nav.views(page) or [None]:
+            at.session_state["_route"] = {"page": page, "view": view}
+            at.run()
+            assert not at.exception, (
+                f"{page}/{view}: {at.exception[0].message}" if at.exception else ""
+            )
+            assert at.session_state["nav"] == page
+            if view:
+                assert at.session_state[nav.view_key(page)] == view
 
 
 def test_crm_write_back_surfaces_and_triage_queues_a_push(tmp_path, monkeypatch) -> None:
@@ -1068,6 +1081,7 @@ def test_crm_write_back_surfaces_and_triage_queues_a_push(tmp_path, monkeypatch)
     assert len(queued) == 1 and "smoke_founder" in queued[0]["payload_json"]
 
     at.session_state["nav"] = "Settings"
+    at.session_state["settings_view"] = "Integrations"
     at.run()
     assert not at.exception, at.exception[0].message if at.exception else ""
     text = _page_text(at)
@@ -1084,8 +1098,9 @@ def test_test_digest_sends_without_crashing(tmp_path, monkeypatch) -> None:
     sent: list[dict] = []
     monkeypatch.setattr("scout.notify._post", lambda url, payload: sent.append(payload))
     at = AppTest.from_file(str(UI_PATH), default_timeout=30)
-    at.session_state["nav"] = "Thesis"
+    at.session_state["_route"] = {"page": "Notifications"}  # an alias
     at.run()
+    assert at.session_state["settings_view"] == "Integrations"
     # The secret is never sent back to the browser.
     hook = next(t for t in at.text_input if t.key == "set_slack_hook")
     assert hook.value == "" and "hooks.slack.test" not in (hook.placeholder or "")
@@ -1121,7 +1136,7 @@ def test_schedules_show_when_they_will_run(tmp_path, monkeypatch) -> None:
     from scout.worker import bootstrap_schedules
     bootstrap_schedules(store)
     at = AppTest.from_file(str(UI_PATH), default_timeout=30)
-    at.session_state["nav"] = "Automation"
+    at.session_state["_route"] = {"page": "Automation"}
     at.run()
     assert not at.exception, at.exception[0].message if at.exception else ""
     text = _page_text(at)
@@ -1140,7 +1155,7 @@ def test_editing_a_resolve_schedule_keeps_it_a_resolve(tmp_path, monkeypatch) ->
     resolve = next(s for s in store.schedules() if s["kind"] == "resolve_unlinked")
     key = f"sched_{resolve['id']}"
     at = AppTest.from_file(str(UI_PATH), default_timeout=30)
-    at.session_state["nav"] = "Automation"
+    at.session_state["_route"] = {"page": "Automation"}
     at.run()
     at.button(key=f"sched_edit_{resolve['id']}").click().run()
     assert at.selectbox(key=f"{key}_kind").value == "resolve_unlinked"
@@ -1151,7 +1166,7 @@ def test_editing_a_resolve_schedule_keeps_it_a_resolve(tmp_path, monkeypatch) ->
     # And Cancel closes an open editor without saving (a fresh session:
     # AppTest can't re-open a widget tree it already tore down).
     at2 = AppTest.from_file(str(UI_PATH), default_timeout=30)
-    at2.session_state["nav"] = "Automation"
+    at2.session_state["_route"] = {"page": "Automation"}
     at2.run()
     at2.button(key=f"sched_edit_{resolve['id']}").click().run()
     assert any(b.key == f"{key}_save" for b in at2.button)
@@ -1169,6 +1184,7 @@ def test_allowlist_that_shuts_out_members_asks_first(tmp_path, monkeypatch) -> N
     store.ensure_user("sara@partner.vc", name="Sara")
     at = AppTest.from_file(str(UI_PATH), default_timeout=30)
     at.session_state["nav"] = "Settings"
+    at.session_state["settings_view"] = "Workspace"
     at.run()
     domain = next(t for t in at.text_input if t.label == "Allowed email domain")
     domain.set_value("firm.com")
@@ -1190,7 +1206,7 @@ def test_run_now_without_a_worker_acts_instead_of_queueing(tmp_path, monkeypatch
     sent: list[dict] = []
     monkeypatch.setattr("scout.notify._post", lambda url, payload: sent.append(payload))
     at = AppTest.from_file(str(UI_PATH), default_timeout=30)
-    at.session_state["nav"] = "Automation"
+    at.session_state["_route"] = {"page": "Automation"}
     at.run()
     # Verification spends X money: no token, no button.
     assert at.button(key="queue_verify").disabled
@@ -1261,3 +1277,107 @@ def test_filters_and_views_survive_a_trip_to_another_page(tmp_path, monkeypatch)
     assert not at.exception, at.exception[0].message if at.exception else ""
     assert at.selectbox(key="feed_sort").value == "Followers"
     assert at.toggle(key="f_hidepassed").value is False
+
+
+# --- six pages: the pipeline, aliases, views -----------------------------------
+
+
+def test_old_shortlist_link_opens_the_stage_the_startup_is_in(tmp_path, monkeypatch) -> None:
+    """A Slack digest from last week says p=Shortlist; the startup has since
+    moved to a meeting. The link opens it where it is now."""
+    at = _app(tmp_path, monkeypatch)
+    Store(tmp_path / "smoke.db").set_pipeline("nora_builds", status="meeting")
+    at.query_params["p"] = "Shortlist"
+    at.query_params["s"] = "nora_builds"
+    at.run()
+    assert not at.exception, at.exception[0].message if at.exception else ""
+    assert at.session_state["nav"] == "Pipeline"
+    assert at.session_state["pipeline_stage"] == "In talks"
+    assert at.session_state["pipe_selected"] == "nora_builds"
+    assert "Nora Vale" in _page_text(at)
+
+
+def test_pipeline_link_to_an_untriaged_startup_opens_the_feed(tmp_path, monkeypatch) -> None:
+    at = _linked(tmp_path, monkeypatch, p="Pipeline", s="smoke_founder")
+    assert at.session_state["nav"] == "Startups"
+    assert at.session_state["startups_view"] == "Feed"
+    assert at.session_state["feed_selected"] == "smoke_founder"
+
+
+def test_partner_meeting_covers_the_whole_funnel(tmp_path, monkeypatch) -> None:
+    """A split on a LONGLISTED startup is a meeting item too — the agenda
+    used to look only at the shortlist page's stages."""
+    db = tmp_path / "smoke.db"
+    at = _app(tmp_path, monkeypatch)
+    store = Store(db)
+    store.set_pipeline("smoke_founder", status="longlisted")
+    store.set_pipeline("nora_builds", status="shortlisted")
+    for actor, stance in (("alan@firm.com", "strong_yes"), ("sara@firm.com", "pass")):
+        store.actor = actor
+        store.ensure_user(actor)
+        store.set_vote("smoke_founder", stance)
+    at.session_state["_route"] = {"page": "Pipeline", "view": "Shortlist"}
+    at.run()
+    assert not at.exception, at.exception[0].message if at.exception else ""
+    assert any(b.key == "meet_open_smoke_founder" for b in at.button)
+    at.button(key="meet_open_smoke_founder").click().run()
+    assert not at.exception, at.exception[0].message if at.exception else ""
+    assert at.session_state["pipeline_stage"] == "Longlist"
+    assert at.session_state["pipe_selected"] == "smoke_founder"
+
+
+def test_every_page_and_view_renders_with_data(tmp_path, monkeypatch) -> None:
+    """The fresh-install loop again, over a workspace with something in
+    every pipeline stage, a split vote and a comment."""
+    db = tmp_path / "smoke.db"
+    at = _app(tmp_path, monkeypatch)
+    store = Store(db, actor="alan@firm.com")
+    store.ensure_user("alan@firm.com")
+    store.set_pipeline("smoke_founder", status="diligence")
+    store.set_pipeline("nora_builds", status="won")
+    store.set_vote("smoke_founder", "yes", "good team")
+    store.add_comment("smoke_founder", "Call Thursday")
+    for page in nav.PAGES:
+        for view in nav.views(page) or [None]:
+            at.session_state["_route"] = {"page": page, "view": view}
+            at.run()
+            assert not at.exception, (
+                f"{page}/{view}: {at.exception[0].message}" if at.exception else ""
+            )
+    at.session_state["_route"] = {"page": "Pipeline", "view": "Allocated"}
+    at.run()
+    assert "Nora Vale" in _page_text(at)
+
+
+def test_your_taste_lives_in_activity(tmp_path, monkeypatch) -> None:
+    at = _app(tmp_path, monkeypatch)
+    at.session_state["nav"] = "Activity"
+    at.session_state["activity_view"] = "Your taste"
+    at.run()
+    assert not at.exception, at.exception[0].message if at.exception else ""
+    assert "Vote on at least 5 startups" in _page_text(at)
+
+
+def test_roles_change_but_the_last_admin_stays(tmp_path, monkeypatch) -> None:
+    db = tmp_path / "roles.db"
+    monkeypatch.setenv("DB_PATH", str(db))
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "")
+    monkeypatch.setenv("SCOUT_DEV_USER", "alan@firm.com")
+    store = seed_store(db)
+    store.ensure_user("alan@firm.com", name="Alan")   # first user → admin
+    store.ensure_user("sara@firm.com", name="Sara")
+    at = AppTest.from_file(str(UI_PATH), default_timeout=30)
+    at.session_state["nav"] = "Settings"
+    at.session_state["settings_view"] = "Workspace"
+    at.run()
+    assert not at.exception, at.exception[0].message if at.exception else ""
+    # Demoting yourself as the only admin is refused, and said.
+    at.selectbox(key="ws_role_alan@firm.com_admin").set_value("member").run()
+    assert not at.exception, at.exception[0].message if at.exception else ""
+    assert Store(db).get_user("alan@firm.com")["role"] == "admin"
+    assert any("last admin" in t.value for t in at.toast)
+    # Promoting a member works, and is recorded.
+    at.selectbox(key="ws_role_sara@firm.com_member").set_value("admin").run()
+    assert not at.exception, at.exception[0].message if at.exception else ""
+    assert Store(db).get_user("sara@firm.com")["role"] == "admin"
+    assert any(e.verb == "role_changed" for e in Store(db).events(limit=5))

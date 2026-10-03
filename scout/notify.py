@@ -255,7 +255,7 @@ def digest_data(store: Store, since: datetime, window: str = "daily") -> dict:
                 f"{_actor_name(store, actor)}: {stance.replace('_', ' ')}"
                 for actor, stance in sorted(summary.by_actor.items())
             ),
-            "link": deep_link(store, handle, "Shortlist"),
+            "link": deep_link(store, handle, "Pipeline"),
         })
     contested = contested[:5]
 

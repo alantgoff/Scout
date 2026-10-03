@@ -738,6 +738,12 @@ def _inject_css() -> None:
         .st-key-topnav [role="radiogroup"] { margin:1.4rem auto 1.6rem; }
         .st-key-topnav [data-testid="stButtonGroup"] { display:flex;
           justify-content:center; }
+        /* Six pages on one row beside the wordmark: a touch tighter than the
+           rail's pills (those have room to spare). */
+        .st-key-topnav [data-testid="stButtonGroup"] button {
+          padding:0.18rem 0.62rem !important; }
+        .st-key-topnav [data-testid="stButtonGroup"] button p {
+          letter-spacing:0.05em; }
 
         /* Segmented controls → the same pill group as the tabs. The track is
            the inner radiogroup (the outer testid node also wraps the label). */
@@ -887,7 +893,7 @@ def _inject_css() -> None:
         @keyframes scanpulse { 0%,100% { opacity:1; transform:scale(1); }
           50% { opacity:0.35; transform:scale(0.8); } }
 
-        /* Run progress panel — the pipeline stepper (Thesis page) */
+        /* Run progress panel — the pipeline stepper (Startups page) */
         .runpanel { background:var(--surface); border:1px solid var(--hair);
           border-radius:var(--r-lg); padding:16px 20px 14px; box-shadow:var(--shadow);
           margin:14px 0 4px; }
@@ -1307,7 +1313,10 @@ if time.time() - st.session_state.get("user_seen_at", 0.0) > 60:
         ACTOR, name=getattr(_login_user, "name", "") or ""
     )
     st.session_state["user_seen_at"] = time.time()
-CURRENT_USER = st.session_state.get("current_user_row") or store.get_user(ACTOR) or {}
+# Read fresh every run (one primary-key lookup): the role is an
+# authorization decision, and a cached row kept a demoted admin's rights
+# alive in their open session.
+CURRENT_USER = store.get_user(ACTOR) or st.session_state.get("current_user_row") or {}
 IS_ADMIN = CURRENT_USER.get("role") == "admin"
 
 # --- status changes -----------------------------------------------------------
@@ -1582,7 +1591,7 @@ def _status_of(lead: Lead) -> str:
 
 # Top bar — wordmark + one-line thesis (left) and the page nav (right), on one
 # slim row. Session-state-driven nav (unlike st.tabs) so any button can route to
-# a page via nav_target + rerun. The full thesis lives on the Thesis page.
+# a page (_route below). The full thesis lives on the Thesis page.
 PAGES = nav_mod.PAGES
 
 # ---- Routing. Every way into a page goes through _route (buttons) or
@@ -1604,23 +1613,30 @@ def _route(page: str, view: str | None = None, *, handle: str | None = None,
         st.rerun()
 
 
-def _focus(handle: str, page: str) -> str:
-    """Open one startup on arrival. Returns the page it ends up on: a page
-    without a list (Activity, Settings…) opens it in the Startups feed."""
+def _focus(handle: str, page: str) -> tuple[str, str | None]:
+    """Open one startup on arrival. Returns (page, view) it ends up on: the
+    Pipeline opens the stage the startup is actually in (a Slack link says
+    "Shortlist" but the company may have moved on to a meeting since), and
+    a page without a list (Activity, Settings…) — or a Pipeline link to a
+    startup no longer in the pipeline — opens it in the Startups feed."""
     if page == "Memos":
         st.session_state["memo_pick"] = handle
-        return page
+        return page, None
+    view = None
+    if page == "Pipeline":
+        view = nav_mod.stage_for_status((pipeline.get(handle) or {}).get("status"))
+        if view is None:
+            page = "Startups"
     sel_key = nav_mod.SELECTION_KEYS.get(page)
-    if sel_key is None:
-        page, sel_key = "Startups", nav_mod.SELECTION_KEYS["Startups"]
-        st.session_state["startups_view"] = "Feed"
+    if sel_key is None or page == "Startups":
+        page, view, sel_key = "Startups", "Feed", nav_mod.SELECTION_KEYS["Startups"]
     st.session_state[sel_key] = handle
     # Explicit: if this startup isn't in the list, say so — never quietly
     # open the first row instead (deep links used to land on the wrong one).
     st.session_state[f"{sel_key}_explicit"] = handle
     if page == "Startups":
         st.session_state["feed_focus"] = handle
-    return page
+    return page, view
 
 
 def _apply_route() -> None:
@@ -1646,13 +1662,30 @@ def _apply_route() -> None:
     for key, value in state.items():
         st.session_state[key] = value
     if handle := (route.get("handle") or "").lstrip("@").lower():
-        page = _focus(handle, page)
+        page, focus_view = _focus(handle, page)
+        view = focus_view or view
     st.session_state["nav"] = page
     if view and (vk := nav_mod.view_key(page)):
         st.session_state[vk] = view
 
 
 _apply_route()
+
+
+def _rail_view(page: str, format_func=None) -> str:
+    """The page's title and view switch at the top of the rail; returns the
+    selected view. Seeded rather than defaulted (a widget with both a
+    default and a session value warns), and reset when a stored view no
+    longer exists."""
+    key, options = nav_mod.PAGE_VIEWS[page]
+    if st.session_state.get(key) not in options:
+        st.session_state[key] = options[0]
+    st.sidebar.markdown(f'<div class="rail-title">{_e(page)}</div>',
+                        unsafe_allow_html=True)
+    return st.sidebar.segmented_control(
+        "View", options, key=key, persist_state="session", required=True,
+        label_visibility="collapsed", format_func=format_func or str,
+    ) or options[0]
 
 
 def _open_memo(handle: str) -> None:
@@ -1680,7 +1713,7 @@ def _on_quickfind() -> None:
         _route("Startups", "Feed", state={**widen, "feed_q": term}, rerun=False)
 
 
-_hdr_l, _hdr_find, _hdr_r = st.columns([1, 0.42, 1.35],
+_hdr_l, _hdr_find, _hdr_r = st.columns([0.8, 0.36, 1.84],
                                        vertical_alignment="center")
 with _hdr_l:
     st.markdown(
@@ -1702,11 +1735,12 @@ with _hdr_find:
 
 with _hdr_r:
     with st.container(key="topnav"):
-        # Opening Activity (unfiltered) reads everything — mark it BEFORE the
-        # badge is counted, so the badge doesn't lag a click behind. The old
-        # cursor is kept so this visit still highlights what was new.
-        if (st.session_state.get("nav") == "Activity"
-                and st.session_state.get("nav_last") != "Activity"):
+        # Opening the Activity feed (unfiltered) reads everything — mark it
+        # BEFORE the badge is counted, so the badge doesn't lag a click
+        # behind. The old cursor is kept so this visit still highlights what
+        # was new. "Your taste" shows no events, so arriving there doesn't.
+        _here = (st.session_state.get("nav"), st.session_state.get("activity_view", "Feed"))
+        if _here == ("Activity", "Feed") and st.session_state.get("nav_last") != _here:
             st.session_state["act_seen_to"] = store.read_cursor(ACTOR)
             if (st.session_state.get("act_who", "Everyone") == "Everyone"
                     and st.session_state.get("act_kind", "Everything") == "Everything"):
@@ -1721,7 +1755,7 @@ with _hdr_r:
                 f"Activity ({_unread})" if p == "Activity" and _unread else p
             ),
         )
-st.session_state["nav_last"] = nav
+st.session_state["nav_last"] = (nav, st.session_state.get("activity_view", "Feed"))
 
 st.session_state.setdefault(
     "page_loaded_at", datetime.now(timezone.utc).isoformat()
@@ -1734,6 +1768,10 @@ def _scan_indicator() -> None:
     seconds (fragment rerun — the rest of the page is untouched). Shows a
     pulsing banner while a scan runs, and a refresh prompt when one finished
     after this page was loaded."""
+    # The Startups page shows the full run panel (progress, then the
+    # finished/failed state); a second banner there would say it twice.
+    if st.session_state.get("nav") == "Startups":
+        return
     scan = store.current_scan()
     if not scan:
         return
@@ -1744,7 +1782,7 @@ def _scan_indicator() -> None:
             f'<div class="scanbar"><span class="scandot"></span>'
             f'<b>{_e(label)} in progress</b> — {_e(scan.get("phase") or "…")}'
             f'{_e(detail)} · started {_ago(scan.get("started_at"))} · '
-            f'live progress on the <b>Thesis</b> page</div>',
+            f'live progress on the <b>Startups</b> page</div>',
             unsafe_allow_html=True,
         )
     elif (scan.get("finished_at") or "") > st.session_state["page_loaded_at"]:
@@ -1781,7 +1819,7 @@ def _phase_durations(plog: list[dict], finished_at: str | None) -> dict[str, flo
 
 @st.fragment(run_every="2s")
 def _run_panel() -> None:
-    """The run cockpit (Thesis page): a phase stepper with live progress bars,
+    """The run cockpit (Startups page): a phase stepper with live progress bars,
     per-phase timings, an ETA, the current detail line, a Stop button, and a
     tail of the console log. Polls the store every 2s."""
     scan = store.current_scan()
@@ -2176,8 +2214,8 @@ def _score_detail_html(lead: Lead, comps: dict) -> str:
                 f'legacy flat rubric, {known_n} of {len(weighted_dims)} dimensions '
                 'evidence-backed'
                 + (f", scored through the {_e(lens)} lens" if lens else "")
-                + '. <b>Reclassify latest run</b> on the Thesis page re-scores it '
-                'on the new readiness scorecard. Hover a dimension for what it '
+                + '. <b>Rescore latest run</b> (Startups → Run options) re-scores '
+                'it on the new readiness scorecard. Hover a dimension for what it '
                 'measures.</div>'
             )
             q_rows: list[str] = []
@@ -2208,8 +2246,8 @@ def _score_detail_html(lead: Lead, comps: dict) -> str:
         else:
             parts.append(
                 '<div class="subtle lead-in">No scorecard on '
-                'this verdict (older cache) — <b>Reclassify latest run</b> on the '
-                'Thesis page scores it on the readiness scorecard, or set the '
+                'this verdict (older cache) — <b>Rescore latest run</b> (Startups → '
+                'Run options) scores it on the readiness scorecard, or set the '
                 'section scores yourself in <b>Adjust scoring</b>.</div>'
             )
         # ---- Thesis fit (F): one number, with Claude's reasoning.
@@ -3017,30 +3055,13 @@ def _render_startup_feed() -> None:
     """The sourcing feed: startup-first lead cards over the latest run (or the
     all-runs ledger), with track / scope / filters and inline triage."""
     if not leads and not ledger:
-        st.markdown(
-            '<div class="section-title">No startups yet</div>'
-            '<div class="section-sub">Open <b>Thesis</b>, describe your thesis, and run discovery. '
-            'Or run <code>./scout-cli demo</code> for an offline sample.</div>',
-            unsafe_allow_html=True,
+        _empty_state(
+            "No startups yet",
+            "Press <b>Run scout</b> above — the free sources need no keys. Describe "
+            "what you're looking for on the <b>Thesis</b> page first to aim it, or "
+            "run <code>./scout-cli demo</code> for an offline sample.",
         )
     else:
-        # Cadence nudge: follow-graph diffing and bio-change tracking only work
-        # with regular runs — surface staleness instead of scheduling anything.
-        last_run = store.last_real_run_at()
-        if last_run is None:
-            st.markdown(
-                '<div class="nudge">No real discovery run yet — these are sample leads. '
-                'When your X cookies are set, open <b>Thesis → Run discovery</b>.</div>',
-                unsafe_allow_html=True,
-            )
-        elif (datetime.now(timezone.utc) - last_run).total_seconds() > 24 * 3600:
-            st.markdown(
-                f'<div class="nudge">Last discovery run {_ago(last_run.isoformat())} — '
-                'daily runs keep the follow-graph and bio-change signals meaningful. '
-                'Open <b>Thesis → Run discovery</b>.</div>',
-                unsafe_allow_html=True,
-            )
-
         # Controls live in the left rail (sidebar) so the feed column is just
         # results — not a stack of segmented toggles stacked above every card.
         # The rail header + Feed/Database switch are rendered by the
@@ -3348,7 +3369,7 @@ def _render_startup_feed() -> None:
         if not page:
             if track == "Startups":
                 st.markdown('<div class="subtle">No launched startups in view yet — try the '
-                            '<b>Pre-launch watch</b> track, widen the filters, or run discovery.</div>',
+                            '<b>Pre-launch watch</b> track, widen the filters, or run scout.</div>',
                             unsafe_allow_html=True)
             elif scope == "Latest run" and ledger:
                 st.markdown('<div class="subtle">No leads in the latest run — switch the scope '
@@ -3376,7 +3397,7 @@ def _render_startup_feed() -> None:
             )
 
 
-# ============================================================ LONGLIST · SHORTLIST
+# ============================================================ PIPELINE
 
 
 def _pick_label(h: str) -> str:
@@ -3392,100 +3413,105 @@ def _ranked(handles: list[str]) -> list[str]:
                   key=lambda h: -(lead_by_handle[h].score if h in lead_by_handle else 0))
 
 
-if nav == "Longlist":
-    longlist = _ranked([h for h, p in pipeline.items()
-                        if (p.get("status") or "") == "longlisted"])
-    if not longlist:
-        st.markdown(
-            '<div class="section-title">Nothing longlisted yet</div>'
-            '<div class="section-sub">Review the <b>Startups</b> feed and longlist the promising '
-            'ones — they collect here for a closer look before the shortlist cut.</div>',
-            unsafe_allow_html=True,
-        )
-    else:
-        st.markdown(
-            '<div class="section-sub" style="margin-top:14px">Pick a startup to open its '
-            'dossier — the <b>Score</b> and its parts (<b>Quality</b> product &amp; founder '
-            'strength, <b>Fit</b> thesis match, <b>Signals</b> smart-money follows this run) '
-            'are in the panel. Promote the best to the shortlist.</div>',
-            unsafe_allow_html=True,
-        )
-        ll_leads = [lead_by_handle[h] for h in longlist if h in lead_by_handle]
-        if len(ll_leads) < len(longlist):
-            st.markdown(f'<div class="subtle">{len(longlist) - len(ll_leads)} longlisted '
-                        'account(s) have no lead data (cleared or never scored) — find them in '
-                        'the <b>Database</b>.</div>', unsafe_allow_html=True)
-        _render_cockpit(ll_leads, sel_key="ll_selected")
+# Per Pipeline stage: (empty title, empty guidance, one-line purpose).
+_PIPELINE_COPY = {
+    "Longlist": ("Nothing longlisted yet",
+                 "Review the <b>Startups</b> feed and longlist the promising ones — "
+                 "they collect here for a closer look before the shortlist cut.",
+                 "A closer look before the shortlist cut — promote the best, "
+                 "remove the rest."),
+    "Shortlist": ("Nothing shortlisted yet",
+                  "Promote startups from the <b>Longlist</b> — they land here as "
+                  "“Shortlisted”, ready to work toward allocation.",
+                  "The decision queue — move each into a conversation, or pass."),
+    "In talks": ("No conversations yet",
+                 "Set a shortlisted startup's stage to Contacted, Meeting or "
+                 "Diligence in its dossier and it is tracked here.",
+                 "Contacted, meeting or in diligence — keep the stage and notes "
+                 "current in the dossier."),
+    "Allocated": ("No allocations yet",
+                  "Startups you back land here. They are your portfolio, and they "
+                  "turn every company they connect to into a warm path.",
+                  "Your portfolio — and the far end of every warm-intro path."),
+    "Passed": ("Nothing passed yet",
+               "Startups you pass on collect here, so a pass can be revisited.",
+               "Passed on — <b>Restore</b> puts one back in the feed."),
+}
 
 
-if nav == "Shortlist":
-    shortlist = _ranked([h for h, p in pipeline.items()
-                         if (p.get("status") or "") in WIN_STAGES])
-    if not shortlist:
-        st.markdown(
-            '<div class="section-title">Nothing shortlisted yet</div>'
-            '<div class="section-sub">Promote startups from the <b>Longlist</b> — they land here '
-            'as “Shortlisted”, ready to work toward allocation.</div>',
-            unsafe_allow_html=True,
-        )
-    else:
-        st.markdown(
-            '<div class="section-sub" style="margin-top:8px">Pick a startup to open its '
-            'dossier — move it through the funnel and keep notes right in the panel. '
-            'The full per-run scorecard for each is on the <b>Database</b> row.</div>',
-            unsafe_allow_html=True,
-        )
-        sl_leads = [lead_by_handle[h] for h in shortlist if h in lead_by_handle]
+def _page_pipeline() -> None:
+    """Pipeline: every startup the firm decided to look at, by stage — one
+    cockpit with the stage in the rail. Replaces the Longlist and Shortlist
+    pages, which were the same cockpit twice and hid the later stages."""
+    by_stage = {
+        stage: _ranked([h for h, p in pipeline.items()
+                        if (p.get("status") or "") in statuses])
+        for stage, statuses in nav_mod.PIPELINE_STAGES.items()
+    }
+    stage = _rail_view("Pipeline", format_func=lambda v: (
+        f"{v} ({len(by_stage[v])})" if by_stage.get(v) else v))
+    handles = by_stage[stage]
+    empty_title, empty_body, purpose = _PIPELINE_COPY[stage]
 
-        # Partner-meeting mode: the startups you disagree about, first.
-        # A unanimous yes needs no meeting; a 2-vs-2 split is the entire
-        # reason to have one, so the agenda writes itself.
-        contested = [
-            (h, sentence) for h, sentence in
-            disagreements(VOTE_SUMMARIES, USER_NAMES)
-            if h in {lead.account.handle.lower() for lead in sl_leads}
-        ]
-        if contested:
-            with st.expander(f"Partner meeting — {len(contested)} contested",
-                             expanded=False):
-                st.markdown(
-                    '<div class="subtle">Where you and your partners disagree, '
-                    'widest split first. Everything else is already settled.</div>',
+    # Partner-meeting mode: the startups you disagree about, first — over
+    # the whole funnel, not just this stage (a split on a longlisted startup
+    # is as much a meeting item as one in diligence). A unanimous yes needs
+    # no meeting; a 2-vs-2 split is the entire reason to have one.
+    in_funnel = {h for h, p in pipeline.items()
+                 if (p.get("status") or "") in FUNNEL_STAGES}
+    contested = [(h, sentence) for h, sentence in
+                 disagreements(VOTE_SUMMARIES, USER_NAMES) if h in in_funnel]
+    if contested:
+        with st.expander(f"Partner meeting — {len(contested)} contested", expanded=False):
+            st.markdown(
+                '<div class="subtle">Where you and your partners disagree, '
+                'widest split first. Everything else is already settled.</div>',
+                unsafe_allow_html=True,
+            )
+            for handle, sentence in contested:
+                lead = lead_by_handle.get(handle)
+                name = display_name(lead) if lead else f"@{handle}"
+                status = (pipeline.get(handle) or {}).get("status") or ""
+                c_l, c_r = st.columns([3, 1])
+                c_l.markdown(
+                    f'<div class="act-row"><div class="act-what">'
+                    f'<b>{_e(name)}</b> — {_e(sentence)} '
+                    f'<span class="subtle">({_e(STATUS_LABELS.get(status, status))})</span>'
+                    '</div></div>',
                     unsafe_allow_html=True,
                 )
-                for handle, sentence in contested:
-                    lead = lead_by_handle.get(handle)
-                    name = display_name(lead) if lead else f"@{handle}"
-                    c_l, c_r = st.columns([3, 1])
-                    c_l.markdown(
-                        f'<div class="act-row"><div class="act-what">'
-                        f'<b>{_e(name)}</b> — {_e(sentence)}</div></div>',
-                        unsafe_allow_html=True,
-                    )
-                    if c_r.button("Open", key=f"meet_open_{handle}",
-                                  use_container_width=True):
-                        _route("Shortlist", handle=handle)
+                if c_r.button("Open", key=f"meet_open_{handle}", use_container_width=True):
+                    _route("Pipeline", handle=handle)
 
-        sort_mode = st.sidebar.segmented_control(
-            "Sort", ["Score", "Contested"], default="Score", key="sl_sort", persist_state="session",
-        ) or "Score"
-        if sort_mode == "Contested":
-            sl_leads = sorted(
-                sl_leads,
-                key=lambda lead: contested_sort_key(
-                    VOTE_SUMMARIES.get(lead.account.handle.lower())
-                ),
-            )
-        _render_cockpit(sl_leads, sel_key="sl_selected")
-
-        st.write("")
-        # Built on click — nothing is written to the server per render.
-        st.download_button(
-            "Download pipeline CSV",
-            data=lambda: pipeline_csv_bytes(pipeline_rows(store, thesis)),
-            file_name=f"pipeline_{datetime.now():%Y%m%d}.csv",
-            mime="text/csv", on_click="ignore", key="pipeline_csv",
+    if not handles:
+        _empty_state(empty_title, empty_body)
+        return
+    st.markdown(f'<div class="section-sub" style="margin-top:8px">{purpose}</div>',
+                unsafe_allow_html=True)
+    stage_leads = [lead_by_handle[h] for h in handles if h in lead_by_handle]
+    if len(stage_leads) < len(handles):
+        st.markdown(f'<div class="subtle">{len(handles) - len(stage_leads)} startup(s) here '
+                    'have no scored data (cleared or never scored) — find them in the '
+                    '<b>Database</b>.</div>', unsafe_allow_html=True)
+    sort_mode = st.sidebar.segmented_control(
+        "Sort", ["Score", "Contested"], default="Score", key="pipe_sort",
+        persist_state="session",
+    ) or "Score"
+    if sort_mode == "Contested":
+        stage_leads = sorted(
+            stage_leads,
+            key=lambda lead: contested_sort_key(VOTE_SUMMARIES.get(lead.account.handle.lower())),
         )
+    _render_cockpit(stage_leads, sel_key=nav_mod.SELECTION_KEYS["Pipeline"])
+
+    st.write("")
+    # Built on click — nothing is written to the server per render.
+    st.download_button(
+        "Download pipeline CSV",
+        data=lambda: pipeline_csv_bytes(pipeline_rows(store, thesis)),
+        file_name=f"pipeline_{datetime.now():%Y%m%d}.csv",
+        mime="text/csv", on_click="ignore", key="pipeline_csv",
+    )
 
 
 # ============================================================ MEMO
@@ -3584,7 +3610,7 @@ def _generate_memo(handle: str) -> None:
     live — store the result + meta, and rerun with a startup-named toast."""
     lead = lead_by_handle.get(handle)
     if lead is None:
-        st.error("No lead data in the store for this startup — run discovery first.")
+        st.error("Scout has no scored data for this startup yet — run scout first.")
         return
     row = pipeline.get(handle, {})
     depth = _selected_depth()
@@ -3670,7 +3696,7 @@ def _generate_memo(handle: str) -> None:
     st.rerun()
 
 
-if nav == "Memos":
+def _page_memos() -> None:
     # A Memo / Write memo click arrives with memo_generate_for set (see
     # _open_memo); a deep link only preselects (memo_pick, via _focus).
     # Nothing but that explicit click spends on a memo — a Slack link used
@@ -3767,7 +3793,7 @@ if nav == "Memos":
                 f'{_e(d_time)} · {_e(d_cost)} per memo</div>',
                 unsafe_allow_html=True,
             )
-        focus_text = st.text_input(
+        st.text_input(
             "Focus", key="memo_focus", persist_state="session", label_visibility="collapsed",
             placeholder="Focus the memo on… (optional — e.g. competitive moat, "
                         "GTM motion, acquirer appetite)",
@@ -4034,20 +4060,19 @@ if nav == "Memos":
 
 
 def _render_run_controls() -> None:
-    """Start a run: source, size, the time estimate, the paid-run spend
-    confirmation, Run / Preview / Rescore, then the live run panel. Runs go
-    to the worker's queue when one is alive, otherwise launch from here."""
-    st.markdown('<div class="section-title">Run discovery</div>'
-                '<div class="section-sub">The free sources (GitHub, Hacker News, RSS, SEC '
-                'Form D, YC, arXiv), plus X when it\'s connected. Runs are incremental — '
-                'recently scored startups are skipped.</div>',
-                unsafe_allow_html=True)
-    r1, r2, r3, r4 = st.columns([1.4, 1, 1, 1])
+    """The run bar at the top of Startups: when the last run was, "Run
+    scout", and a Run options popover (source, size, the time estimate, the
+    paid-run spend confirmation, Preview and Rescore). Runs go to the
+    worker's queue when one is alive, otherwise launch from here. Then the
+    live run panel. (It used to live on the Thesis page — the most frequent
+    action, on the page visited least.)"""
     # Default to what will actually run: without X cookies the free X
     # scraper can't start, so "No X" is the honest default (it used to say
     # "twscrape (free)" and then explain it wouldn't use X).
     x_connected = bool(settings.tw_cookies and Path(settings.tw_cookies).exists())
-    with r1:
+    scan_active = ((store.current_scan() or {}).get("status") == "running")
+    info_col, opts_col, run_col = st.columns([4.2, 1.25, 1.1], vertical_alignment="center")
+    with opts_col.popover("Run options", use_container_width=True):
         source = st.segmented_control(
             "Source", ["X (free scraper)", "No X", "X API (paid)"],
             default="X (free scraper)" if x_connected else "No X",
@@ -4055,57 +4080,85 @@ def _render_run_controls() -> None:
             help="The free sources (GitHub, Hacker News, RSS, SEC Form D, YC, "
                  "arXiv) always run. X adds the query bank, bio search and the "
                  "investor follow graph.")
-    with r2:
-        max_accounts = st.number_input("Max accounts", 10, 2000, settings.max_accounts,
-                                       step=10, key="run_max", persist_state="session",
-                                       help="Most accounts this run reads from discovery.")
-    with r3:
-        min_score_run = st.number_input("Min score", 0, 100, 0, step=5, key="run_minscore", persist_state="session",
-                                        help="Startups scoring below this aren't saved "
-                                             "from this run.")
-    with r4:
-        ttl = st.number_input("Skip if scored < N days", 0, 90, settings.ttl_days,
-                              key="run_ttl", persist_state="session",
-                              help="Startups scored more recently than this are not "
-                                   "re-scored — runs stay incremental.")
-    paid_run = source == "X API (paid)"
-    run_source = "xapi" if paid_run else ("free" if source == "No X" else "twscrape")
-    if run_source == "twscrape" and not x_connected:
-        st.markdown('<div class="subtle">X isn\'t connected (no <code>TW_COOKIES</code>) — '
-                    'this run will use the free sources only.</div>',
-                    unsafe_allow_html=True)
-    scan_active = ((store.current_scan() or {}).get("status") == "running")
-    run_ready = not scan_active
-
-    # Time estimate up front — empirical after the first completed run,
-    # settings-derived before that.
-    est_lo, est_hi, _per, est_label = _estimate_scan("run", max_accounts=int(max_accounts))
-    st.markdown(
-        f'<div class="rp-est">Estimated <b>{_fmt_dur(est_lo)}–{_fmt_dur(est_hi)}</b> '
-        f'for this run · {_e(est_label)}. Runs happen in the background — you can '
-        'keep browsing while the pipeline reports progress below.</div>',
-        unsafe_allow_html=True,
-    )
-    if paid_run:
-        spent_now = store.xapi_spend_usd()
-        remaining = max(settings.xapi_spend_cap_usd - spent_now, 0.0)
-        est_profiles = int(max_accounts) * settings.xapi_cost_per_user_read
-        est_tweets = (int(max_accounts) * settings.tweets_per_account
-                      * settings.xapi_cost_per_post_read)
-        est_total = est_profiles + est_tweets
+        o1, o2, o3 = st.columns(3)
+        max_accounts = o1.number_input(
+            "Max accounts", 10, 2000, settings.max_accounts, step=10, key="run_max",
+            persist_state="session", help="Most accounts this run reads from discovery.")
+        min_score_run = o2.number_input(
+            "Min score", 0, 100, 0, step=5, key="run_minscore", persist_state="session",
+            help="Startups scoring below this aren't saved from this run.")
+        ttl = o3.number_input(
+            "Skip if scored < N days", 0, 90, settings.ttl_days, key="run_ttl",
+            persist_state="session",
+            help="Startups scored more recently than this are not re-scored — "
+                 "runs stay incremental.")
+        paid_run = source == "X API (paid)"
+        run_source = "xapi" if paid_run else ("free" if source == "No X" else "twscrape")
+        if run_source == "twscrape" and not x_connected:
+            st.markdown('<div class="subtle">X isn\'t connected (no <code>TW_COOKIES</code>) '
+                        '— this run will use the free sources only.</div>',
+                        unsafe_allow_html=True)
+        # Time estimate up front — empirical after the first completed run,
+        # settings-derived before that.
+        est_lo, est_hi, _per, est_label = _estimate_scan("run", max_accounts=int(max_accounts))
         st.markdown(
-            f'<div class="subtle">Worst case ≈ <b>${est_total:.2f}</b> '
-            f'(${est_profiles:.2f} profiles + up to ${est_tweets:.2f} tweets; the '
-            f'bio-signal gate usually cuts the tweet part sharply) · '
-            f'<b>${remaining:.2f}</b> left of the ${settings.xapi_spend_cap_usd:.0f} cap.</div>',
+            f'<div class="rp-est">Estimated <b>{_fmt_dur(est_lo)}–{_fmt_dur(est_hi)}</b> '
+            f'· {_e(est_label)}. Runs happen in the background — keep browsing.</div>',
             unsafe_allow_html=True,
         )
-        run_ready = run_ready and st.checkbox(
-            f"Spend up to ${est_total:.2f} of the X API budget",
-            key="confirm_run_spend",
-        )
-    run_col, preview_col, reclass_col, _sp = st.columns([1, 1.75, 1.75, 1.5])
-    if run_col.button("Run scout", type="primary", disabled=not run_ready):
+        run_ready = not scan_active
+        if paid_run:
+            spent_now = store.xapi_spend_usd()
+            remaining = max(settings.xapi_spend_cap_usd - spent_now, 0.0)
+            est_profiles = int(max_accounts) * settings.xapi_cost_per_user_read
+            est_tweets = (int(max_accounts) * settings.tweets_per_account
+                          * settings.xapi_cost_per_post_read)
+            est_total = est_profiles + est_tweets
+            st.markdown(
+                f'<div class="subtle">Worst case ≈ <b>${est_total:.2f}</b> '
+                f'(${est_profiles:.2f} profiles + up to ${est_tweets:.2f} tweets; the '
+                f'bio-signal gate usually cuts the tweet part sharply) · '
+                f'<b>${remaining:.2f}</b> left of the ${settings.xapi_spend_cap_usd:.0f} '
+                'cap.</div>',
+                unsafe_allow_html=True,
+            )
+            run_ready = run_ready and st.checkbox(
+                f"Spend up to ${est_total:.2f} of the X API budget",
+                key="confirm_run_spend",
+            )
+        st.divider()
+        if st.button("Preview discovery (free, no scoring)", key="run_preview",
+                     disabled=scan_active, use_container_width=True):
+            _launch_scan(["source", "--max-accounts", str(int(max_accounts))], "source",
+                         job_kind=jobs_mod.KIND_PREVIEW,
+                         payload={"max_accounts": int(max_accounts)})
+        if st.button(
+            "Rescore latest run", key="run_rescore", use_container_width=True,
+            disabled=scan_active or not (leads or ledger),
+            help="Re-run Claude classification + the adversarial audit on the latest "
+                 "run's startups — no discovery, cache-first, minutes not an hour. Use "
+                 "after editing the thesis, prompt, or weights.",
+        ):
+            _launch_scan(["reclassify"], "reclassify",
+                         job_kind=jobs_mod.KIND_RECLASSIFY, payload={"scope": "latest"})
+
+    # When the last real run was — and, once it is a day old, why that
+    # matters (follow-graph diffs and bio changes need regular runs).
+    last_run = store.last_real_run_at()
+    if last_run is None:
+        info = ("No run yet" + (" — these are sample startups" if (leads or ledger) else "")
+                + ". Press <b>Run scout</b>: the free sources need no keys.")
+    elif (datetime.now(timezone.utc) - last_run).total_seconds() > 24 * 3600:
+        info = (f"Last run {_ago(last_run.isoformat())} — daily runs keep the follow-graph "
+                "and bio-change signals meaningful; schedule them under "
+                "<b>Settings → Automation</b>.")
+    else:
+        info = f"Last run {_ago(last_run.isoformat())}."
+    if paid_run and not run_ready and not scan_active:
+        info += " Confirm the X API spend under <b>Run options</b> to start a paid run."
+    info_col.markdown(f'<div class="subtle">{info}</div>', unsafe_allow_html=True)
+    if run_col.button("Run scout", key="run_scout", type="primary",
+                      disabled=not run_ready, use_container_width=True):
         _launch_scan(["run", "--source", run_source,
                       "--max-accounts", str(int(max_accounts)),
                       "--min-score", str(int(min_score_run)), "--ttl-days", str(int(ttl))],
@@ -4115,19 +4168,6 @@ def _render_run_controls() -> None:
                               "max_accounts": int(max_accounts),
                               "min_score": int(min_score_run),
                               "ttl_days": int(ttl)})
-    if preview_col.button("Preview discovery (free, no scoring)", disabled=scan_active):
-        _launch_scan(["source", "--max-accounts", str(int(max_accounts))], "source",
-                     job_kind=jobs_mod.KIND_PREVIEW,
-                     payload={"max_accounts": int(max_accounts)})
-    if reclass_col.button(
-        "Rescore latest run", key="run_rescore",
-        disabled=scan_active or not (leads or ledger),
-        help="Re-run Claude classification + the adversarial audit on the latest "
-             "run's leads — no discovery, cache-first, minutes not an hour. Use "
-             "after editing the thesis, prompt, or weights.",
-    ):
-        _launch_scan(["reclassify"], "reclassify",
-                     job_kind=jobs_mod.KIND_RECLASSIFY, payload={"scope": "latest"})
 
     # The run cockpit — phase stepper, progress bars, ETA, log tail. Renders
     # only while a scan runs (or just finished) and polls on its own.
@@ -4137,7 +4177,9 @@ def _render_run_controls() -> None:
 # ============================================================ THESIS
 
 
-if nav == "Thesis":
+def _thesis_define() -> None:
+    """Thesis → Define: the library (switch, firm default), then the
+    statement and the AI strategy designer that turns it into a config."""
     # --- The library ----------------------------------------------------------
     # A thesis is a durable thing you return to, not a config file you
     # overwrite. Switching preserves the one you leave, so exploring a second
@@ -4350,16 +4392,14 @@ if nav == "Thesis":
                     st.session_state.pop(k, None)
                 st.rerun()
 
-    st.write("")
-    st.markdown("---")
 
-    # --- Run --------------------------------------------------------------------
-    _render_run_controls()
-
-    st.write("")
-    st.markdown("---")
-    st.markdown('<div class="section-title">Fine-tune</div>'
-                '<div class="section-sub">Everything the agent wrote is editable by hand.</div>',
+def _thesis_tune() -> None:
+    """Thesis → Tune: targeting, the query bank, the watchlist and the
+    scoring, each by hand."""
+    st.markdown('<div class="section-title">Tune the thesis</div>'
+                '<div class="section-sub">Everything the strategy agent wrote, editable '
+                'by hand — each editor beside the measured yield of what it '
+                'controls.</div>',
                 unsafe_allow_html=True)
 
     with st.expander("Targeting — stages, keywords, markers"):
@@ -4512,140 +4552,6 @@ if nav == "Thesis":
                     "lists": _from_lines(lists)}), SEEDS_PATH)
                 st.session_state["toast"] = "Watchlist & discovery saved."
                 st.rerun()
-
-    # ---- Your taste: the same contrast machinery, run over YOUR votes.
-    # Firm triage is shared state; a vote is a named judgment, so this is the
-    # only honest answer to "what do I actually like, and where does the
-    # model disagree with me".
-    with st.expander("Your taste — what your votes say, and where the model disagrees"):
-        mine = actor_stats(ledger, votes_by_handle, ACTOR)
-        if mine is None:
-            st.markdown(
-                '<div class="subtle">Vote on at least 5 startups (yes / strong '
-                'yes / pass) and your profile appears here: the sectors and '
-                'stages you actually back, and the calls where you and the '
-                'model saw it differently.</div>',
-                unsafe_allow_html=True,
-            )
-        else:
-            st.markdown(
-                f"**{_who(ACTOR)}** — {mine.shortlisted} backed · {mine.passed} passed"
-            )
-            for line in mine.findings or ["No strong contrasts yet — keep voting."]:
-                st.markdown(f'<div class="subtle">• {_e(line)}</div>',
-                            unsafe_allow_html=True)
-        gaps = model_disagreements(ledger, votes_by_handle, ACTOR)
-        if gaps:
-            st.write("")
-            st.markdown("**Where you and the model disagreed**")
-            for gap in gaps:
-                lean = (
-                    "model liked it, you passed"
-                    if gap.kind == "model_liked_you_passed"
-                    else "model was cool, you backed it"
-                )
-                st.markdown(
-                    f'<div class="act-row"><div class="act-what">'
-                    f'<b>{_e(gap.name)}</b> — score {gap.score:.0f}, '
-                    f'you voted {_e(STANCE_LABELS.get(gap.stance, gap.stance).lower())} '
-                    f'<span class="subtle">({_e(lean)})</span>'
-                    + (f' — “{_e(gap.rationale)}”' if gap.rationale else "")
-                    + "</div></div>",
-                    unsafe_allow_html=True,
-                )
-            st.markdown(
-                '<div class="subtle">The second kind is the interesting one: '
-                'conviction the scoring missed is what should eventually move '
-                'the weights.</div>',
-                unsafe_allow_html=True,
-            )
-
-    # ---- Notifications. Firm-wide settings live in the DB (not .env) so
-    # both partners share one configuration and either can change it.
-    with st.expander("Notifications — Slack digests, mentions, deep links"):
-        st.markdown(
-            '<div class="subtle">A digest is the handoff between timezones: '
-            'what needs a decision, what is new, and what your partner did '
-            'overnight. Mentions and assignments ping immediately.</div>',
-            unsafe_allow_html=True,
-        )
-        # The webhook is a secret: never sent back to the browser. The field
-        # starts empty; typing a URL replaces the saved one, leaving it blank
-        # keeps it. (It used to be pre-filled — the whole secret sat in the
-        # page as a password field's value.)
-        saved_hook = store.get_setting("slack_webhook_url") or ""
-        webhook = st.text_input(
-            "Slack incoming webhook URL", value="",
-            type="password", key="set_slack_hook",
-            placeholder=(f"saved · …{saved_hook[-4:]} — paste a new URL to replace it"
-                         if saved_hook else "https://hooks.slack.com/services/…"),
-            help="Slack → Apps → Incoming Webhooks. Stored server-side; "
-                 "never shown again once saved.",
-            disabled=not IS_ADMIN,
-        )
-        base_url = st.text_input(
-            "App base URL",
-            value=store.get_setting("app_base_url") or "",
-            placeholder="https://scout.yourfund.com", key="set_base_url",
-            help="Used to build deep links in Slack messages, so a digest "
-                 "line opens the right startup.",
-            disabled=not IS_ADMIN,
-        )
-        threshold = st.slider(
-            "Digest score threshold", 0, 100,
-            int(float(store.get_setting("digest_score_threshold") or 60)),
-            key="set_digest_threshold",
-            help="Only startups scoring at least this much appear in the "
-                 "digest as new candidates.",
-            disabled=not IS_ADMIN,
-        )
-        if not IS_ADMIN:
-            st.markdown('<div class="subtle">Firm-wide — an admin changes these.</div>',
-                        unsafe_allow_html=True)
-        n1, n2, n3, _nsp = st.columns([1, 1.2, 1, 2])
-        if n1.button("Save notifications", type="primary", key="save_notify",
-                     disabled=not IS_ADMIN):
-            if webhook.strip():
-                store.set_setting("slack_webhook_url", webhook.strip())
-            store.set_setting("app_base_url", base_url.strip())
-            store.set_setting("digest_score_threshold", str(threshold))
-            st.session_state["toast"] = "Notification settings saved"
-            st.rerun()
-        if n2.button("Send a test digest", key="test_digest", disabled=not saved_hook,
-                     help="Posts the last 24 hours to the saved webhook."):
-            since = datetime.now(timezone.utc) - timedelta(hours=24)
-            data = notify.digest_data(store, since)
-            ok = notify.post_slack(store, notify.digest_fallback_text(data),
-                                   notify.digest_blocks(data))
-            st.session_state["toast"] = (
-                "Test digest sent." if ok
-                else "Slack rejected it — check the webhook URL."
-            )
-            st.rerun()
-        if saved_hook and n3.button("Remove webhook", key="remove_slack_hook",
-                                    disabled=not IS_ADMIN):
-            store.set_setting("slack_webhook_url", "")
-            st.session_state["toast"] = "Slack webhook removed — digests stop posting."
-            st.rerun()
-
-        st.write("")
-        st.markdown("**Your Slack handle**")
-        st.markdown(
-            '<div class="subtle">Set your Slack member ID and @mentions of '
-            'you in Scout become real Slack pings rather than plain text. '
-            'Slack profile → More → Copy member ID.</div>',
-            unsafe_allow_html=True,
-        )
-        me = store.get_user(ACTOR) or {}
-        member_id = st.text_input(
-            "Slack member ID", value=me.get("slack_member_id") or "",
-            placeholder="U01ABCDEFGH", key="set_slack_member",
-            label_visibility="collapsed",
-        )
-        if st.button("Save my Slack ID", key="save_slack_member"):
-            store.update_user(ACTOR, slack_member_id=member_id.strip())
-            st.session_state["toast"] = "Saved"
-            st.rerun()
 
     with st.expander("Signals & scoring — weights, parameters, classifier prompt"):
         stats = triage_stats(ledger, pipeline)
@@ -4815,6 +4721,190 @@ if nav == "Thesis":
             )
             for lever in thesis.firm_value_add:
                 st.markdown(f"**{lever.label}** (`{lever.key}`) — {lever.description}")
+
+
+def _render_taste() -> None:
+    """Activity → Your taste: the triage-contrast machinery run over YOUR
+    votes. Firm triage is shared state; a vote is a named judgment, so this
+    is the only honest answer to "what do I actually like, and where does
+    the model disagree with me"."""
+    st.markdown('<div class="section-title">Your taste</div>'
+                '<div class="section-sub">What your votes say, and where you and '
+                'the model saw it differently.</div>', unsafe_allow_html=True)
+    mine = actor_stats(ledger, votes_by_handle, ACTOR)
+    if mine is None:
+        st.markdown(
+            '<div class="subtle">Vote on at least 5 startups (yes / strong '
+            'yes / pass) and your profile appears here: the sectors and '
+            'stages you actually back, and the calls where you and the '
+            'model saw it differently.</div>',
+            unsafe_allow_html=True,
+        )
+    else:
+        st.markdown(
+            f"**{_who(ACTOR)}** — {mine.shortlisted} backed · {mine.passed} passed"
+        )
+        for line in mine.findings or ["No strong contrasts yet — keep voting."]:
+            st.markdown(f'<div class="subtle">• {_e(line)}</div>',
+                        unsafe_allow_html=True)
+    gaps = model_disagreements(ledger, votes_by_handle, ACTOR)
+    if gaps:
+        st.write("")
+        st.markdown("**Where you and the model disagreed**")
+        for gap in gaps:
+            lean = (
+                "model liked it, you passed"
+                if gap.kind == "model_liked_you_passed"
+                else "model was cool, you backed it"
+            )
+            st.markdown(
+                f'<div class="act-row"><div class="act-what">'
+                f'<b>{_e(gap.name)}</b> — score {gap.score:.0f}, '
+                f'you voted {_e(STANCE_LABELS.get(gap.stance, gap.stance).lower())} '
+                f'<span class="subtle">({_e(lean)})</span>'
+                + (f' — “{_e(gap.rationale)}”' if gap.rationale else "")
+                + "</div></div>",
+                unsafe_allow_html=True,
+            )
+        st.markdown(
+            '<div class="subtle">The second kind is the interesting one: '
+            'conviction the scoring missed is what should eventually move '
+            'the weights.</div>',
+            unsafe_allow_html=True,
+        )
+
+
+def _render_notifications() -> None:
+    """Settings → Integrations → Slack. Firm-wide settings live in the DB
+    (not .env) so both partners share one configuration and either can
+    change it."""
+    st.markdown('<div class="section-title">Slack</div>', unsafe_allow_html=True)
+    st.markdown(
+        '<div class="subtle">A digest is the handoff between timezones: '
+        'what needs a decision, what is new, and what your partner did '
+        'overnight. Mentions and assignments ping immediately.</div>',
+        unsafe_allow_html=True,
+    )
+    # The webhook is a secret: never sent back to the browser. The field
+    # starts empty; typing a URL replaces the saved one, leaving it blank
+    # keeps it. (It used to be pre-filled — the whole secret sat in the
+    # page as a password field's value.)
+    saved_hook = store.get_setting("slack_webhook_url") or ""
+    webhook = st.text_input(
+        "Slack incoming webhook URL", value="",
+        type="password", key="set_slack_hook",
+        placeholder=(f"saved · …{saved_hook[-4:]} — paste a new URL to replace it"
+                     if saved_hook else "https://hooks.slack.com/services/…"),
+        help="Slack → Apps → Incoming Webhooks. Stored server-side; "
+             "never shown again once saved.",
+        disabled=not IS_ADMIN,
+    )
+    base_url = st.text_input(
+        "App base URL",
+        value=store.get_setting("app_base_url") or "",
+        placeholder="https://scout.yourfund.com", key="set_base_url",
+        help="Used to build deep links in Slack messages, so a digest "
+             "line opens the right startup.",
+        disabled=not IS_ADMIN,
+    )
+    threshold = st.slider(
+        "Digest score threshold", 0, 100,
+        int(float(store.get_setting("digest_score_threshold") or 60)),
+        key="set_digest_threshold",
+        help="Only startups scoring at least this much appear in the "
+             "digest as new candidates.",
+        disabled=not IS_ADMIN,
+    )
+    if not IS_ADMIN:
+        st.markdown('<div class="subtle">Firm-wide — an admin changes these.</div>',
+                    unsafe_allow_html=True)
+    n1, n2, n3, _nsp = st.columns([1, 1.2, 1, 2])
+    if n1.button("Save notifications", type="primary", key="save_notify",
+                 disabled=not IS_ADMIN):
+        if webhook.strip():
+            store.set_setting("slack_webhook_url", webhook.strip())
+        store.set_setting("app_base_url", base_url.strip())
+        store.set_setting("digest_score_threshold", str(threshold))
+        st.session_state["toast"] = "Notification settings saved"
+        st.rerun()
+    if n2.button("Send a test digest", key="test_digest", disabled=not saved_hook,
+                 help="Posts the last 24 hours to the saved webhook."):
+        since = datetime.now(timezone.utc) - timedelta(hours=24)
+        data = notify.digest_data(store, since)
+        ok = notify.post_slack(store, notify.digest_fallback_text(data),
+                               notify.digest_blocks(data))
+        st.session_state["toast"] = (
+            "Test digest sent." if ok
+            else "Slack rejected it — check the webhook URL."
+        )
+        st.rerun()
+    if saved_hook and n3.button("Remove webhook", key="remove_slack_hook",
+                                disabled=not IS_ADMIN):
+        store.set_setting("slack_webhook_url", "")
+        st.session_state["toast"] = "Slack webhook removed — digests stop posting."
+        st.rerun()
+
+
+def _render_phone_app() -> None:
+    """Settings → Integrations → Phone app: where the read-only phone app
+    publishes and when it last did. The hosts are configured on the server
+    (DIGEST_REPO for GitHub Pages, a linked project or VERCEL_TOKEN for
+    Vercel); this only reports and, with a worker, publishes now."""
+    st.markdown('<div class="section-title">Phone app</div>'
+                '<div class="section-sub">A read-only copy of the startups, the funnel, '
+                'the graph and alerts, for your phone. Startups, verdicts, statuses and '
+                'memos publish; notes, votes, comments, spend and settings never do.</div>',
+                unsafe_allow_html=True)
+    docs = PROJECT_ROOT / "docs"
+    hosts = [name for name, on in (
+        ("GitHub Pages", bool(settings.digest_repo)),
+        ("Vercel", (docs / ".vercel" / "project.json").exists() or bool(settings.vercel_token)),
+    ) if on]
+    index = docs / "index.html"
+    rendered = (_ago(datetime.fromtimestamp(index.stat().st_mtime, timezone.utc))
+                if index.exists() else "")
+    st.markdown(
+        '<div class="subtle">'
+        + (f"Publishes to <b>{_e(' + '.join(hosts))}</b>" if hosts else
+           "No host configured — publishing only renders <code>docs/</code>. Set "
+           "<code>DIGEST_REPO</code> (GitHub Pages) or <code>VERCEL_TOKEN</code> "
+           "(Vercel) on the server")
+        + (f" · last rendered {_e(rendered)}" if rendered else " · never rendered")
+        + "</div>", unsafe_allow_html=True)
+    worker = store.worker_status()
+    if worker and worker.get("alive"):
+        if st.button("Publish now", key="phone_publish"):
+            job_id = store.enqueue_job(jobs_mod.KIND_PUBLISH, {}, actor=ACTOR, dedupe=True)
+            st.session_state["toast"] = ("Publish queued for the worker." if job_id
+                                         else "A publish is already queued.")
+            st.rerun()
+    else:
+        st.markdown('<div class="subtle">Publishes each morning once the worker runs; '
+                    'from a terminal: <code>scout publish --auto</code>.</div>',
+                    unsafe_allow_html=True)
+
+
+def _render_my_slack() -> None:
+    """Settings → Workspace: your own Slack member id, so @mentions of you
+    become real pings."""
+    st.markdown('<div class="section-title">Your Slack handle</div>',
+                unsafe_allow_html=True)
+    st.markdown(
+        '<div class="subtle">Set your Slack member ID and @mentions of '
+        'you in Scout become real Slack pings rather than plain text. '
+        'Slack profile → More → Copy member ID.</div>',
+        unsafe_allow_html=True,
+    )
+    me = store.get_user(ACTOR) or {}
+    member_id = st.text_input(
+        "Slack member ID", value=me.get("slack_member_id") or "",
+        placeholder="U01ABCDEFGH", key="set_slack_member",
+        label_visibility="collapsed",
+    )
+    if st.button("Save my Slack ID", key="save_slack_member"):
+        store.update_user(ACTOR, slack_member_id=member_id.strip())
+        st.session_state["toast"] = "Saved"
+        st.rerun()
 
 
 # ============================================== STARTUPS · database sub-page
@@ -5123,9 +5213,8 @@ def _render_database() -> None:
     )
     if not ledger:
         st.markdown(
-            '<div class="subtle">Nothing tracked yet — run discovery on the '
-            '<b>Thesis</b> page, or <code>./scout-cli demo</code> for an offline '
-            'sample.</div>',
+            '<div class="subtle">Nothing tracked yet — press <b>Run scout</b> '
+            'above, or <code>./scout-cli demo</code> for an offline sample.</div>',
             unsafe_allow_html=True,
         )
     else:
@@ -5497,17 +5586,15 @@ def _render_raw_tables() -> None:
 # The Startups page: the sourcing feed + the startup database. A rail-level
 # switch (not st.tabs) renders only ONE body per run — st.tabs renders both
 # server-side, which leaked the feed's sidebar controls onto the Database view.
-if nav == "Startups":
-    st.sidebar.markdown('<div class="rail-title">Startups</div>', unsafe_allow_html=True)
-    # "Feed" (not "Latest run") so it doesn't collide with the feed's own
-    # Latest-run/All-runs Scope toggle below it in the same rail.
-    st.session_state.setdefault("startups_view", "Feed")
-    startups_view = st.sidebar.segmented_control(
-        "View", ["Feed", "Database"],
-        key="startups_view", persist_state="session", label_visibility="collapsed",
-    ) or "Feed"
-    if startups_view == "Database":
+def _page_startups() -> None:
+    """Startups: the run bar (every view — a run is how startups arrive),
+    then the Feed, the Database or the Graph."""
+    view = _rail_view("Startups")
+    _render_run_controls()
+    if view == "Database":
         _render_database()
+    elif view == "Graph":
+        _render_graph()
     else:
         _render_startup_feed()
 
@@ -5556,6 +5643,10 @@ _VERB_TEXT = {
     "attrs_changed": lambda p: f"updated {', '.join(p.get('keys', [])) or 'fields'}",
     "notes_edited": lambda p: "edited the notes",
     "thesis_switched": lambda p: f"switched the workspace thesis to {p.get('name', '')}",
+    "role_changed": lambda p: (
+        f"made {_who(p.get('member', ''))} "
+        + ("an admin" if p.get("role") == "admin" else "a member")
+    ),
     "handle_merged": lambda p: (
         f"merged @{p.get('from', '')} into this company"
         + (f" ({p['rows']} rows)" if p.get("rows") else "")
@@ -5579,7 +5670,7 @@ def _event_text(event) -> str:
     return fmt(event.payload) if fmt else event.verb.replace("_", " ")
 
 
-if nav == "Activity":
+def _render_activity_feed() -> None:
     st.markdown(
         '<div class="section-title">Activity</div>'
         '<div class="section-sub">Everything the firm has done, newest first — '
@@ -5645,6 +5736,13 @@ if nav == "Activity":
     # hidden events are not seen.
     if feed and who_filter == "Everyone" and kind_filter == "Everything":
         store.mark_read(ACTOR, up_to=feed[0].id)
+
+
+def _page_activity() -> None:
+    if _rail_view("Activity") == "Your taste":
+        _render_taste()
+    else:
+        _render_activity_feed()
 
 
 # ============================================================ EVIDENCE
@@ -6088,7 +6186,7 @@ def _render_evidence_trends(runs: list[dict], report) -> None:
 
 
 
-if nav == "Graph":
+def _render_graph() -> None:
     from scout import graph_view
     from scout.graph import REL_LABELS, hubs, node_key
 
@@ -6186,7 +6284,7 @@ if nav == "Graph":
                     )
 
 
-if nav == "Evidence":
+def _render_evidence() -> None:
     st.markdown(
         '<div class="section-title">Evidence</div>'
         '<div class="section-sub">Whether the scoring actually works, and '
@@ -6199,13 +6297,12 @@ if nav == "Evidence":
     if not _evidence_runs:
         _evidence_empty_state()
     else:
-        st.sidebar.markdown('<div class="rail-title">Evidence</div>',
-                            unsafe_allow_html=True)
         # Three questions, in the order they should be asked: did it work,
-        # what made it work, and is that still true.
+        # what made it work, and is that still true. (Under the Thesis
+        # page's own view switch in the rail.)
         _evidence_view = st.sidebar.segmented_control(
-            "View", ["Results", "Signals", "Over time"], default="Results",
-            key="evidence_view", persist_state="session", label_visibility="collapsed",
+            "Backtest", ["Results", "Signals", "Over time"], default="Results",
+            key="evidence_view", persist_state="session",
         ) or "Results"
         _evidence_row, _evidence_report = _evidence_pick_run(_evidence_runs)
         if _evidence_report is not None:
@@ -6337,7 +6434,7 @@ def _render_schedule_editor(row: dict | None, key: str) -> None:
         st.rerun()
 
 
-if nav == "Automation":
+def _render_automation() -> None:
     st.markdown(
         '<div class="section-title">Automation</div>'
         '<div class="section-sub">Scout sourcing on its own schedule. '
@@ -6464,7 +6561,7 @@ if nav == "Automation":
                                      notify.digest_blocks(data))
             st.session_state["toast"] = (
                 "Digest sent to Slack." if sent else
-                "Not sent — set a Slack webhook under Notifications.")
+                "Not sent — set a Slack webhook under Integrations.")
             st.rerun()
         elif kind == jobs_mod.KIND_RUN:
             x_on = bool(settings.tw_cookies and Path(settings.tw_cookies).exists())
@@ -6509,7 +6606,9 @@ if nav == "Automation":
 # ============================================================ SETTINGS
 
 
-if nav == "Settings":
+def _settings_general() -> None:
+    """Settings → General: today's spend against the cap, the worker,
+    readiness (the same checks as `scout doctor`), and the shared defaults."""
     spent = store.xapi_spend_usd()
     cap = settings.xapi_spend_cap_usd
     # The numbers that matter to a firm: what today cost against the daily
@@ -6597,42 +6696,12 @@ if nav == "Settings":
             st.session_state["toast"] = "Shared settings saved — applies to everyone."
             st.rerun()
 
-    # ---- your network: the other end of every warm-intro path. Editable by
-    # any member — relationship knowledge belongs to whoever has it, and
-    # (unlike the knobs above) nothing here can move spend.
-    st.markdown('<div class="section-title">Your network</div>'
-                '<div class="section-sub">Who you would ask for an intro. Portfolio '
-                'companies (Allocated), companies you are talking to, and their '
-                'co-investors come from the pipeline automatically; add what Scout '
-                'cannot see. Firm-private — never published.</div>',
-                unsafe_allow_html=True)
-    st.markdown(
-        f'<div class="subtle">Derived: <b>{len(NETWORK.portfolio)}</b> portfolio '
-        f'companies · <b>{len(NETWORK.met)}</b> in conversation · '
-        f'<b>{sum(1 for v in WARM.values() if intros_mod.warmth(v) >= 2)}</b> '
-        'companies with a strong warm path.</div>', unsafe_allow_html=True)
-    with st.form("network_form"):
-        n1, n2 = st.columns(2)
-        with n1:
-            net_investors = st.text_area(
-                "Funds & angels you know", store.get_setting("network_investors") or "",
-                height=120, help="One per line. Matched against the investors research "
-                                 "cites on each company's round.")
-        with n2:
-            net_people = st.text_area(
-                "People who'd make an intro", store.get_setting("network_people") or "",
-                height=120, help="One per line: 'Name', '@handle', or 'Name (@handle)'. "
-                                 "Names match founders and lab alumni; handles match "
-                                 "the watchlist's follow data.")
-        if st.form_submit_button("Save network", type="primary"):
-            store.set_setting("network_investors",
-                              "\n".join(intros_mod.parse_list(net_investors)))
-            store.set_setting("network_people",
-                              "\n".join(intros_mod.parse_list(net_people)))
-            st.session_state["toast"] = "Network saved — warm paths updated."
-            st.rerun()
-    st.write("")
 
+def _settings_integrations() -> None:
+    """Settings → Integrations: what Scout talks to — Slack, the CRM, and
+    the phone app."""
+    _render_notifications()
+    st.write("")
     # ---- CRM write-back: pursued startups land in the firm's CRM. The rule is
     # admin-only — it decides what Scout writes into another system — while
     # status and "sync now" are for everyone.
@@ -6688,10 +6757,24 @@ if nav == "Settings":
                 st.session_state["toast"] = f"CRM sync: {crm_mod.summarize(_results)}."
             st.rerun()
     st.write("")
+    _render_phone_app()
 
-    # ---- workspace: who's signed in, who's allowed in, member roles.
-    st.write("")
-    st.markdown('<div class="section-title">Workspace</div>', unsafe_allow_html=True)
+
+def _role_changed(member_id: str, key: str) -> None:
+    """Role select callback (admins only). The store refuses to demote the
+    last admin; say so rather than leave the select showing a lie."""
+    try:
+        store.set_user_role(member_id, st.session_state[key])
+        st.session_state["toast"] = (
+            f"{_who(member_id)} is now {'an admin' if st.session_state[key] == 'admin' else 'a member'}.")
+    except ValueError as exc:
+        st.session_state["toast"] = str(exc).capitalize() + "."
+
+
+def _settings_workspace() -> None:
+    """Settings → Workspace: who's signed in, the members and their roles,
+    who's allowed in, the firm's network, and your own Slack id."""
+    st.markdown('<div class="section-title">Members</div>', unsafe_allow_html=True)
     st.markdown(
         f'<div class="subtle">Signed in as <b>{_e(CURRENT_USER.get("name") or ACTOR)}</b> '
         f'({_e(ACTOR)}) · role: {_e(CURRENT_USER.get("role") or "member")}</div>',
@@ -6704,14 +6787,25 @@ if nav == "Settings":
     if _auth_live and st.button("Sign out", key="ws_signout"):
         st.logout()
     members = store.list_users()
-    if members:
-        st.markdown(
-            "\n".join(
-                f"- **{m['name']}** — {m['id']} · {m['role']} · "
-                f"last seen {_ago(m.get('last_seen_at'))}"
-                for m in members
-            )
-        )
+    for member in members:
+        m1, m2 = st.columns([4, 1.2], vertical_alignment="center")
+        m1.markdown(
+            f'<div class="act-row"><div class="act-what"><b>{_e(member["name"])}</b> '
+            f'<span class="subtle">{_e(member["id"])}</span></div>'
+            f'<div class="act-when">seen {_e(_ago(member.get("last_seen_at")) or "never")}'
+            '</div></div>', unsafe_allow_html=True)
+        if IS_ADMIN:
+            # Keyed on the stored role, so a change made elsewhere remounts
+            # the select instead of being overwritten by a stale value.
+            role_key = f"ws_role_{member['id']}_{member['role']}"
+            m2.selectbox("Role", ["admin", "member"],
+                         index=0 if member["role"] == "admin" else 1,
+                         format_func=str.capitalize, key=role_key,
+                         label_visibility="collapsed",
+                         on_change=_role_changed, args=(member["id"], role_key))
+        else:
+            m2.markdown(f'<div class="subtle">{_e(member["role"].capitalize())}</div>',
+                        unsafe_allow_html=True)
     if IS_ADMIN:
         with st.form("workspace_form"):
             domain_in = st.text_input(
@@ -6756,3 +6850,77 @@ if nav == "Settings":
             if c2.button("Cancel", key="ws_cancel"):
                 st.session_state.pop("ws_pending", None)
                 st.rerun()
+    st.write("")
+    # ---- your network: the other end of every warm-intro path. Editable by
+    # any member — relationship knowledge belongs to whoever has it, and
+    # (unlike the knobs above) nothing here can move spend.
+    st.markdown('<div class="section-title">Your network</div>'
+                '<div class="section-sub">Who you would ask for an intro. Portfolio '
+                'companies (Allocated), companies you are talking to, and their '
+                'co-investors come from the pipeline automatically; add what Scout '
+                'cannot see. Firm-private — never published.</div>',
+                unsafe_allow_html=True)
+    st.markdown(
+        f'<div class="subtle">Derived: <b>{len(NETWORK.portfolio)}</b> portfolio '
+        f'companies · <b>{len(NETWORK.met)}</b> in conversation · '
+        f'<b>{sum(1 for v in WARM.values() if intros_mod.warmth(v) >= 2)}</b> '
+        'companies with a strong warm path.</div>', unsafe_allow_html=True)
+    with st.form("network_form"):
+        n1, n2 = st.columns(2)
+        with n1:
+            net_investors = st.text_area(
+                "Funds & angels you know", store.get_setting("network_investors") or "",
+                height=120, help="One per line. Matched against the investors research "
+                                 "cites on each company's round.")
+        with n2:
+            net_people = st.text_area(
+                "People who'd make an intro", store.get_setting("network_people") or "",
+                height=120, help="One per line: 'Name', '@handle', or 'Name (@handle)'. "
+                                 "Names match founders and lab alumni; handles match "
+                                 "the watchlist's follow data.")
+        if st.form_submit_button("Save network", type="primary"):
+            store.set_setting("network_investors",
+                              "\n".join(intros_mod.parse_list(net_investors)))
+            store.set_setting("network_people",
+                              "\n".join(intros_mod.parse_list(net_people)))
+            st.session_state["toast"] = "Network saved — warm paths updated."
+            st.rerun()
+    st.write("")
+    _render_my_slack()
+
+
+def _page_settings() -> None:
+    view = _rail_view("Settings")
+    if view == "Integrations":
+        _settings_integrations()
+    elif view == "Automation":
+        _render_automation()
+    elif view == "Workspace":
+        _settings_workspace()
+    else:
+        _settings_general()
+
+
+def _page_thesis() -> None:
+    view = _rail_view("Thesis")
+    if view == "Tune":
+        _thesis_tune()
+    elif view == "Evidence":
+        _render_evidence()
+    else:
+        _thesis_define()
+
+
+# ============================================================ DISPATCH
+# Every page is a function defined above; this is the one place a page is
+# chosen (scout/nav.py is the map). A page added to nav.PAGES without a
+# renderer fails here, loudly, rather than rendering a blank body.
+_PAGE_RENDERERS = {
+    "Startups": _page_startups,
+    "Pipeline": _page_pipeline,
+    "Memos": _page_memos,
+    "Activity": _page_activity,
+    "Thesis": _page_thesis,
+    "Settings": _page_settings,
+}
+_PAGE_RENDERERS[nav]()
