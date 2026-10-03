@@ -1381,3 +1381,56 @@ def test_roles_change_but_the_last_admin_stays(tmp_path, monkeypatch) -> None:
     assert not at.exception, at.exception[0].message if at.exception else ""
     assert Store(db).get_user("sara@firm.com")["role"] == "admin"
     assert any(e.verb == "role_changed" for e in Store(db).events(limit=5))
+
+
+def test_database_dossier_is_the_one_dossier(tmp_path, monkeypatch) -> None:
+    """The Database's selected row renders the same dossier as the feed —
+    the ⚠ acquired chip first, connections, votes and triage, under its own
+    key namespace. AppTest can't click a dataframe row, so st.dataframe is
+    wrapped to report the row selected."""
+    from types import SimpleNamespace
+
+    import streamlit
+
+    db = tmp_path / "smoke.db"
+    at = _app(tmp_path, monkeypatch)
+    store = Store(db, actor="alan@firm.com")
+
+    def company(handle: str, name: str, **extra) -> Lead:
+        return Lead(
+            account=Account(id=handle, handle=handle, name=name, source="search"),
+            llm=LLMVerdict(handle=handle, account_type="startup", company_name=name,
+                           funding_stage="seed", funding_investors=["Accel"],
+                           funding_evidence="TechCrunch, 2026-09", stage="launched",
+                           thesis_fit=0.7, confidence=0.9, grounding="website", **extra),
+            score=50.0,
+        )
+
+    store.save_leads("20260930-100000-000000", [
+        company("goneco", "GoneCo", company_status="acquired",
+                company_status_note="bought by BigCo",
+                company_status_evidence="TechCrunch, 2026-09"),
+        company("sibco", "SibCo"),
+    ])
+    store.rebuild_graph(store.load_lead_ledger())
+
+    real = streamlit.dataframe
+
+    def selecting(data, *args, **kwargs):
+        result = real(data, *args, **{k: v for k, v in kwargs.items()
+                                      if k not in ("on_select", "selection_mode")})
+        if kwargs.get("on_select") and "handle" in getattr(data, "columns", []):
+            rows = [i for i, h in enumerate(data["handle"]) if h == "goneco"]
+            return SimpleNamespace(selection=SimpleNamespace(rows=rows))
+        return result
+
+    monkeypatch.setattr(streamlit, "dataframe", selecting)
+    at.session_state["_route"] = {"page": "Startups", "view": "Database"}
+    at.run()
+    assert not at.exception, at.exception[0].message if at.exception else ""
+    text = _page_text(at)
+    assert "⚠ Acquired — bought by BigCo" in text
+    assert "Accel</b> also backs SibCo" in text
+    keys = {b.key for b in at.button}
+    assert "dbdet_vote_strong_yes_goneco" in keys and "dbdet_long_goneco" in keys
+    assert "dbdet_memo_goneco" in keys

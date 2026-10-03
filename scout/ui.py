@@ -104,10 +104,7 @@ from scout.dbfields import (
 )
 
 # Pure helpers live in scout.dbfields (importable without executing this
-# Streamlit script) — aliased to the underscore names used throughout. Bound
-# here at import time so the page-rendering blocks below (Longlist / Shortlist
-# / Memos, which call _lead_card → _attr_display) see them regardless of which
-# nav page runs.
+# Streamlit script) — aliased to the underscore names used throughout.
 _slugify_key = slugify_key
 _editor_changes = editor_changes
 _attr_display = attr_display
@@ -292,7 +289,7 @@ def _render_crm_row(lead: Lead, key_ns: str) -> None:
 
 
 def _connections_html(lead: Lead) -> str:
-    """The card's knowledge-graph block: this startup's cross-links to the
+    """The dossier's knowledge-graph block: this startup's cross-links to the
     REST of the database. Per-company facts (its own investors, founders)
     already render as chips; what earns space here is what links sideways —
     a backer with other portfolio companies in the pipeline, the acquirer
@@ -347,8 +344,7 @@ def _connections_html(lead: Lead) -> str:
     if not lines:
         return ""
     items = "".join(f"<div>· {line}</div>" for line in lines[:6])
-    return (f'<div class="subtle" style="margin-top:6px">'
-            f'<b>Connections</b>{items}</div>')
+    return f'<h4 class="dpane-h">Connections</h4><div class="subtle">{items}</div>'
 
 
 def _grounding_chip(verdict: LLMVerdict) -> tuple[str, str] | None:
@@ -488,7 +484,6 @@ def _inject_css() -> None:
           padding-top:0.6rem; }
         .rail-title { font-family:var(--serif); font-size:1.35rem; font-weight:600;
           color:var(--ink); line-height:1.1; }
-        .rail-note { color:var(--muted); font-size:0.82rem; margin:1px 0 10px; }
         section[data-testid="stSidebar"] [data-testid="stSegmentedControl"],
         section[data-testid="stSidebar"] [role="radiogroup"] { width:100%;
           flex-wrap:wrap; }
@@ -627,8 +622,6 @@ def _inject_css() -> None:
         .cmt-head { font-size:11.5px; color:var(--muted); margin-bottom:4px; }
         .cmt-body { font-size:13.5px; line-height:1.5; color:var(--ink-2);
           white-space:pre-wrap; }
-        .presence-dot { display:inline-block; width:7px; height:7px; border-radius:50%;
-          background:var(--good); margin-right:5px; vertical-align:middle; }
         /* Status tones. Application code names the MEANING ("good", "bad"),
            never a colour — so a palette change is a CSS edit, not a Python
            one, and no surface can drift to its own private hex. */
@@ -780,22 +773,6 @@ def _inject_css() -> None:
           font-weight:600; letter-spacing:-0.01em; line-height:1.15; margin-top:4px; }
         .tile .sub { color:var(--muted); font-size:0.8rem; margin-top:2px; }
 
-        /* Lead card internals — startup names in serif, like the portfolio page */
-        .lead-name { font-family:var(--serif); font-size:1.16rem; font-weight:600;
-          color:var(--ink); letter-spacing:-0.005em; }
-        .lead-name a { color:var(--ink); text-decoration:none; }
-        .lead-name a:hover { text-decoration:underline;
-          text-underline-offset:3px; text-decoration-thickness:1px; }
-        .lead-handle { font-family:var(--sans); color:var(--muted); font-weight:400;
-          font-size:0.85rem; letter-spacing:0; }
-        .lead-summary { color:var(--ink-2); font-size:0.92rem; line-height:1.45;
-          margin-top:3px; }
-        .avatar { width:40px; height:40px; border-radius:50%; background:var(--butter);
-          color:var(--ink); display:flex; align-items:center; justify-content:center;
-          font-family:var(--serif); font-weight:600; font-size:0.95rem;
-          letter-spacing:0; flex:0 0 40px; }
-        .lead-row { display:flex; gap:13px; align-items:flex-start; }
-
         /* Chips — uppercase tracked micro-labels in tonal pills
            ("INFRASTRUCTURE" / "FINTECH" on the Headline portfolio page) */
         .chiprow { display:flex; flex-wrap:wrap; gap:6px; margin-top:9px; }
@@ -807,25 +784,8 @@ def _inject_css() -> None:
         .chip.status { background:var(--ink); color:var(--bg); }
         .chip.invalid { text-decoration:line-through; opacity:0.55; }
 
-        .scoreblock { text-align:right; }
-        .scorenum { font-family:var(--serif); font-size:1.7rem; font-weight:600;
-          letter-spacing:-0.01em; color:var(--ink); line-height:1; }
         .scorecap { color:var(--muted); font-size:0.66rem; text-transform:uppercase;
           letter-spacing:0.1em; font-weight:600; margin-top:2px; }
-        .scoretrack { width:92px; height:4px; border-radius:var(--r-pill); background:var(--track);
-          margin:8px 0 10px auto; }
-        /* deep mustard — the butter accent, dark enough to read on the track */
-        .scorefill { height:4px; border-radius:var(--r-pill); background:var(--fill); }
-        /* Score breakdown — labeled rows (Qual/Fit/Sig) instead of a cryptic
-           "Q·F·S" glyph. Right-aligned to sit under the score number. */
-        .scoredims { margin-top:7px; display:flex; flex-direction:column; gap:2px;
-          cursor:help; }
-        .scoredims > div { display:flex; justify-content:flex-end; gap:6px;
-          align-items:baseline; font-size:0.6rem; color:var(--muted);
-          text-transform:uppercase; letter-spacing:0.08em; font-weight:600; }
-        .scoredims b { font-family:var(--serif); font-size:0.86rem; color:var(--ink);
-          font-weight:600; letter-spacing:0; text-transform:none; min-width:15px;
-          text-align:right; }
 
         /* Signal bars (single hue — magnitude) */
         .sigrow { display:flex; align-items:center; gap:10px; margin:5px 0; }
@@ -849,10 +809,6 @@ def _inject_css() -> None:
           font-weight:500; }
         [data-testid="stExpander"] summary:hover { color:var(--ink);
           text-decoration:underline; text-underline-offset:3px; }
-
-        .nudge { background:var(--accent-soft); border-radius:var(--r-card); padding:10px 16px;
-          font-size:0.88rem; color:var(--ink-2); margin:0 0 16px; }
-        .nudge b { color:var(--ink); }
 
         /* Memo document — editorial reading layout inside the memo container */
         .memo-title { font-family:var(--serif); font-size:1.5rem; font-weight:600;
@@ -2455,320 +2411,6 @@ def _assign_changed(lead: Lead, widget_key: str) -> None:
     st.session_state["toast"] = f"Assigned to {_who(picked)}" if picked else "Owner cleared"
 
 
-def _lead_card(
-    lead: Lead,
-    entry: LedgerEntry | None = None,
-    fresh: bool = True,
-    view_max: float = 100.0,
-    pct_label: str = "",
-    secondary: list[Lead] | None = None,
-    details_open: bool = False,
-    key_ns: str = "feed",
-) -> None:
-    """One lead card. `entry` carries cross-run movement (delta / new); `fresh`
-    means the lead is from the latest run — run-scoped signals like new
-    watchlist follows are suppressed on stale entries. `view_max` normalizes
-    the score bar to the strongest lead in view; `pct_label` is an optional
-    percentile caption ("top 12%"). `secondary` holds other X accounts folded
-    into this startup (Startups track) — the card is titled by the company.
-    `details_open` renders the per-dimension scoring expanded (Longlist /
-    Shortlist pages); `key_ns` namespaces widget keys so the same lead can
-    render on more than one page."""
-    account, verdict = lead.account, lead.llm
-    handle_key = account.handle.lower()
-    status = _status_of(lead)
-    secondary = secondary or []
-    # One components pass per card — the face caption, band chip, and the
-    # Details expander all read from it.
-    comps = score_components(lead, thesis)
-
-    chips: list[tuple[str, str]] = []
-    # FIRST, ahead of everything: a company that is no longer its own company.
-    # An acquired or wound-down company keeps its site, its X account and its
-    # press, so every other chip on this card can look healthy while the deal
-    # does not exist. Face-position is deliberate — this must not be one of
-    # the chips that overflows into Details.
-    if verdict and verdict.company_status in ("acquired", "merged", "shut_down"):
-        label = COMPANY_STATUS_LABELS[verdict.company_status]
-        note = verdict.company_status_note.strip()
-        chips.append((f"⚠ {label}" + (f" — {note}" if note else ""), "status"))
-    if verdict and verdict.thesis_fit is not None:
-        chips.append((f"Fit {verdict.thesis_fit:.0%}", "accent"))
-    if verdict is not None and (g_chip := _grounding_chip(verdict)) is not None:
-        chips.append(g_chip)
-    if verdict and verdict.customer_type:
-        chips.append((CUSTOMER_TYPE_LABEL.get(verdict.customer_type,
-                                              verdict.customer_type), ""))
-    if comps["scorecard"] is not None:
-        band = comps["scorecard"][0].band
-        chips.append((f"{BAND_LABELS[band]} {comps['scorecard'][0].total:.0f}",
-                      "accent" if band == "strong" else ""))
-    if verdict and verdict.value_add_fit is not None:
-        chips.append((f"{thesis.firm_name or 'Firm'} lift {verdict.value_add_fit:.0%}", "accent"))
-    if status != "new":
-        chips.append((STATUS_LABELS.get(status, status), "status"))
-    if overrides.get(handle_key):
-        chips.append(("Adjusted", "accent"))
-    if (_warm := _warm_paths_of(lead)) and _warm[0].strength >= 2:
-        chips.append((f"🤝 via {_warm[0].via}", "accent"))
-    if filed := filings_on_file.get(handle_key):
-        # A government record of a raise: the one funding chip that is not
-        # a model's reading of a bio.
-        from scout.ingest.sec_src import money
-
-        latest = filed[0]
-        amount = latest.get("amount_sold") or latest.get("amount_offered")
-        chips.append(("🏛 Form D" + (f" {money(amount)}" if amount else "")
-                      + (f" · {latest['first_sale']}" if latest.get("first_sale") else ""),
-                      "accent"))
-    if entry and entry.is_new:
-        chips.append(("New", "accent"))
-    if entry and entry.score_delta is not None and abs(entry.score_delta) >= 1:
-        arrow = "▲" if entry.score_delta > 0 else "▼"
-        chips.append(
-            (f"{arrow} {abs(entry.score_delta):.0f}",
-             "accent" if entry.score_delta > 0 else "")
-        )
-    if verdict and verdict.account_type:
-        chips.append((TYPE_LABEL.get(verdict.account_type, ""), ""))
-    if verdict and verdict.stage:
-        chips.append((STAGE_LABEL.get(verdict.stage, verdict.stage), ""))
-    sector = " · ".join(x for x in [verdict.sector if verdict else "", verdict.subsector if verdict else ""] if x)
-    if sector:
-        chips.append((sector, ""))
-    if verdict and verdict.business_model:
-        chips.append((verdict.business_model, ""))
-    if fresh and account.recent_followed_by:
-        chips.append((f"New follows: {', '.join(account.recent_followed_by[:3])}", "accent"))
-    # Keep the card face calm; tags, provenance, and any overflow live in Details.
-    face_chips = chips[:7]
-    detail_chips: list[tuple[str, str]] = [(t, "") for t in (verdict.tags if verdict else [])]
-    if verdict and verdict.hq:
-        detail_chips.append((verdict.hq, ""))
-    if verdict and verdict.founded_year:
-        detail_chips.append((f"founded {verdict.founded_year}", ""))
-    detail_chips += [(f, "") for f in (verdict.founders if verdict else [])[:4]]
-    if len({s for s in account.sources if s}) > 1:
-        detail_chips.append((f"sources: {', '.join(sorted({s for s in account.sources if s}))}", ""))
-    detail_chips += chips[7:]
-
-    # Product truth first: the grounded product_summary beats the one-liner,
-    # which beats the bio.
-    summary = ((verdict.product_summary if verdict else "")
-               or (verdict.one_line_summary if verdict else "")
-               or account.bio or "—")
-
-    # STARTUP-FIRST identity: every founder-like lead is titled by its startup
-    # — the classifier's company when named, otherwise a synthesized stealth
-    # identity tied to the founder ("Ada Lin's stealth startup"). Only
-    # corporate/commentator accounts keep a person/account title.
-    company_url = (verdict.company_url or "").strip() if verdict else ""
-    identity = startup_identity(lead)
-    if identity:
-        startup_title, synthesized = identity
-        # A synthesized title already carries the founder's name — the byline
-        # drops it rather than repeat it.
-        byline = (
-            f'@{_e(account.handle)} · {account.followers:,} followers'
-            if synthesized else
-            f'{_e(account.name or account.handle)} · @{_e(account.handle)} · '
-            f'{account.followers:,} followers'
-        )
-        title_href = _e(company_url or account.url)
-        title_html = (
-            f'<a href="{title_href}" target="_blank">{_e(startup_title)}</a> '
-            f'<span class="lead-handle">{byline}</span>'
-        )
-        avatar_text = _initials(account.name if synthesized else startup_title,
-                                account.handle)
-    else:
-        title_html = (
-            f'<a href="{account.url}" target="_blank">{_e(account.name or account.handle)}</a> '
-            f'<span class="lead-handle">@{_e(account.handle)} · {account.followers:,} followers</span>'
-        )
-        avatar_text = _initials(account.name, account.handle)
-
-    secondary_html = ""
-    if secondary:
-        others = ", ".join(f"@{_e(x.account.handle)}" for x in secondary)
-        secondary_html = (
-            f'<div class="chiprow"><span class="chip">Also tracking: {others}</span></div>'
-        )
-
-    with st.container(border=True):
-        col_main, col_score = st.columns([5.2, 1.1])
-        with col_main:
-            st.markdown(
-                f"""
-                <div class="lead-row">
-                  <div class="avatar">{_e(avatar_text)}</div>
-                  <div style="min-width:0">
-                    <div class="lead-name">{title_html}</div>
-                    <div class="lead-summary">{_e(summary)}</div>
-                    {_chips(face_chips)}
-                    {secondary_html}
-                  </div>
-                </div>
-                """,
-                unsafe_allow_html=True,
-            )
-        with col_score:
-            bar_pct = min(max(lead.score / (view_max or 1.0) * 100, 0), 100)
-            pct_html = (f'<div class="scorecap" style="margin-top:5px">{_e(pct_label)}</div>'
-                        if pct_label else "")
-            # Score breakdown: labeled Qual / Fit / Sig rows (present components
-            # only), with a tooltip spelling out what each dimension means —
-            # replaces the unlabeled "Q·F·S" glyph nobody could read.
-            comp_html = ""
-            if verdict is not None:
-                dims = [(label, value)
-                        for label, value in (("Qual", comps["quality"]),
-                                             ("Fit", comps["fit"]),
-                                             ("Sig", comps["signals"]))
-                        if value is not None]
-                if dims:
-                    rows = "".join(f'<div><span>{l}</span><b>{v:.0f}</b></div>'
-                                   for l, v in dims)
-                    comp_html = (
-                        '<div class="scoredims" title="Score breakdown — '
-                        'Quality: product &amp; founder strength · '
-                        'Fit: match to your thesis · '
-                        'Signals: smart-money follows this run">' + rows + '</div>'
-                    )
-            st.markdown(
-                f"""
-                <div class="scoreblock">
-                  <div class="scorenum">{lead.score:.0f}</div>
-                  <div class="scorecap">score</div>
-                  <div class="scoretrack"><div class="scorefill" style="width:{bar_pct:.0f}%"></div></div>
-                  {comp_html}
-                  {pct_html}
-                </div>
-                """,
-                unsafe_allow_html=True,
-            )
-            # Triage lives on the card face — no expanding needed to act.
-            # The funnel: new → Longlist → Shortlist (→ stages to allocation).
-            if status == "longlisted":
-                if st.button("Shortlist", key=f"{key_ns}_short_{handle_key}", type="primary",
-                             use_container_width=True):
-                    _set_status(account.handle, status="shortlisted")
-                    st.session_state["toast"] = f"Shortlisted @{account.handle}"
-                    st.rerun()
-                if st.button("Remove", key=f"{key_ns}_rm_{handle_key}", use_container_width=True):
-                    _set_status(account.handle, status="new")
-                    st.session_state["toast"] = f"Removed @{account.handle} from the longlist"
-                    st.rerun()
-            elif status == "shortlisted":
-                if st.button("To longlist", key=f"{key_ns}_demote_{handle_key}",
-                             use_container_width=True):
-                    _set_status(account.handle, status="longlisted")
-                    st.session_state["toast"] = f"Moved @{account.handle} back to the longlist"
-                    st.rerun()
-            elif status in WIN_STAGES:  # contacted and beyond — manage on Shortlist
-                if st.button("Remove", key=f"{key_ns}_rm_{handle_key}", use_container_width=True):
-                    _set_status(account.handle, status="new")
-                    st.session_state["toast"] = f"Removed @{account.handle} from the shortlist"
-                    st.rerun()
-            elif status == "passed":
-                if st.button("Restore", key=f"{key_ns}_restore_{handle_key}",
-                             use_container_width=True):
-                    _set_status(account.handle, status="new")
-                    st.session_state["toast"] = f"Restored @{account.handle}"
-                    st.rerun()
-            else:
-                if st.button("Longlist", key=f"{key_ns}_long_{handle_key}", type="primary",
-                             use_container_width=True):
-                    _set_status(account.handle, status="longlisted")
-                    st.session_state["toast"] = f"Longlisted @{account.handle}"
-                    st.rerun()
-                if st.button("Pass", key=f"{key_ns}_pass_{handle_key}", use_container_width=True):
-                    _set_status(account.handle, status="passed")
-                    st.session_state["toast"] = f"Passed on @{account.handle}"
-                    st.rerun()
-
-        # Stateless expander: the `expanded` prop is re-applied only when its
-        # value CHANGES between reruns, so user toggles persist.
-        with st.expander("Details", expanded=details_open):
-            ov = overrides.get(handle_key) or {}
-            if verdict and verdict.why_interesting:
-                st.markdown(f'<div class="lead-summary">{_e(verdict.why_interesting)}</div>',
-                            unsafe_allow_html=True)
-            if verdict and verdict.verification_note:
-                st.markdown(f'<div class="subtle" style="margin-top:6px">Audit — {_e(verdict.verification_note)}</div>',
-                            unsafe_allow_html=True)
-            if warm := _warm_paths_html(lead):
-                st.markdown(warm, unsafe_allow_html=True)
-            if connections := _connections_html(lead):
-                st.markdown(connections, unsafe_allow_html=True)
-            if ov:
-                ov_note = f" — “{ov['note']}”" if ov.get("note") else ""
-                st.markdown(
-                    f'<div class="subtle" style="margin-top:6px">✎ Manually adjusted'
-                    f'{_e(ov_note)} · your numbers are folded into everything below; '
-                    'revisit them in <b>Adjust scoring</b>.</div>',
-                    unsafe_allow_html=True,
-                )
-            # ---- The per-dimension breakdown (Q scorecard + criteria, thesis
-            # fit, X signals, firm value-add) — shared with the cockpit detail
-            # pane via _score_detail_html so the two never drift.
-            st.markdown(_score_detail_html(lead, comps), unsafe_allow_html=True)
-            if entry and entry.times_seen > 1 and entry.first_seen_at:
-                st.markdown(
-                    f'<div class="subtle" style="margin-top:6px">Seen {entry.times_seen}× '
-                    f'since {entry.first_seen_at:%b %d}'
-                    + (f" · previous score {entry.prev_score:.0f}" if entry.prev_score is not None else "")
-                    + "</div>",
-                    unsafe_allow_html=True,
-                )
-
-            # ---- The score math, step by step. The last line IS the score.
-            st.markdown(_score_math_html(lead, ov.get("score")), unsafe_allow_html=True)
-
-            link_urls = list(lead.evidence_links)
-            if company_url and company_url not in link_urls:
-                link_urls.insert(1, company_url)
-            links = " · ".join(
-                f'<a href="{_e(u)}" target="_blank">{_e(u.removeprefix("https://").removeprefix("http://"))}</a>'
-                for u in link_urls
-            )
-            st.markdown(f'<div class="subtle" style="margin-top:8px">{links}</div>',
-                        unsafe_allow_html=True)
-            if detail_chips:
-                st.markdown(_chips(detail_chips), unsafe_allow_html=True)
-            # The investor's own categorization (Database columns).
-            attr_chips = [
-                (f'{col["label"]}: {text}', "")
-                for col in db_columns
-                if (text := _attr_display(
-                    (attrs_by_handle.get(handle_key) or {}).get(col["key"])))
-            ]
-            if attr_chips:
-                st.markdown(_chips(attr_chips), unsafe_allow_html=True)
-            st.write("")
-
-            row = pipeline.get(handle_key, {})
-            b1, b2, b3, _sp = st.columns([1.4, 1.9, 1.5, 1.2])
-            memo_label = "Open memo" if row.get("brief") else "Memo"
-            if b1.button(memo_label, key=f"{key_ns}_brief_{handle_key}",
-                         help="The full investment memo lives on the Memos page — "
-                              "this writes one (or opens the existing one) there."):
-                _open_memo(handle_key)
-            with b2.popover("Adjust scoring"):
-                _override_editor(lead, ov, key_ns)
-            n_comments = comment_counts.get(handle_key, 0)
-            with b3.popover(f"Discuss{f' ({n_comments})' if n_comments else ''}"):
-                st.markdown('<div class="section-title">Your call</div>',
-                            unsafe_allow_html=True)
-                _render_vote_row(lead, key_ns)
-                st.write("")
-                _render_assignment(lead, key_ns)
-                st.write("")
-                st.markdown('<div class="section-title">Discussion</div>',
-                            unsafe_allow_html=True)
-                _render_comments(lead, key_ns)
-
-
 def _feed_row(lead: Lead, selected: bool) -> bool:
     """One compact, clickable lead row for the cockpit list (left column). The
     whole row is a real st.button (reliable click target); the warm-row visual
@@ -2828,15 +2470,115 @@ def _feed_row(lead: Lead, selected: bool) -> bool:
     return clicked
 
 
-def _detail_pane(lead: Lead) -> None:
-    """The selected lead's full dossier in the cockpit's right pane: header,
-    score readout, why, then the complete per-dimension breakdown (How it
-    scored — readiness scorecard, thesis fit, X signals, firm lift, score math,
-    shared with the Database dossier via _score_detail_html), audit, and
-    status-aware triage. Laid out full-width so nothing squishes — unlike
-    _lead_card, whose narrow score sub-column wraps inside a half column."""
+def _dossier_chips(lead: Lead, entry: LedgerEntry | None, fresh: bool) -> list[tuple[str, str]]:
+    """The dossier's state chips, most consequential first. A company that
+    is no longer its own company leads — an acquired or wound-down company
+    keeps its site, its X account and its press, so everything else here
+    can look healthy while the deal does not exist. Then whether the
+    product claim traced to evidence, where it sits in the funnel, and
+    what changed since the last run."""
     account, verdict = lead.account, lead.llm
     hk = account.handle.lower()
+    chips: list[tuple[str, str]] = []
+    if verdict and verdict.company_status in ("acquired", "merged", "shut_down"):
+        label = COMPANY_STATUS_LABELS[verdict.company_status]
+        note = verdict.company_status_note.strip()
+        chips.append((f"⚠ {label}" + (f" — {note}" if note else ""), "status"))
+    if verdict is not None and (g_chip := _grounding_chip(verdict)) is not None:
+        chips.append(g_chip)
+    status = _status_of(lead)
+    if status != "new":
+        chips.append((STATUS_LABELS.get(status, status), "status"))
+    if overrides.get(hk):
+        chips.append(("Adjusted", "accent"))
+    if filed := filings_on_file.get(hk):
+        # A government record of a raise: the one funding chip that is not
+        # a model's reading of a bio.
+        from scout.ingest.sec_src import money
+
+        latest = filed[0]
+        amount = latest.get("amount_sold") or latest.get("amount_offered")
+        chips.append(("🏛 Form D" + (f" {money(amount)}" if amount else "")
+                      + (f" · {latest['first_sale']}" if latest.get("first_sale") else ""),
+                      "accent"))
+    if entry and entry.is_new:
+        chips.append(("New", "accent"))
+    if entry and entry.score_delta is not None and abs(entry.score_delta) >= 1:
+        arrow = "▲" if entry.score_delta > 0 else "▼"
+        chips.append((f"{arrow} {abs(entry.score_delta):.0f} since last run",
+                      "accent" if entry.score_delta > 0 else ""))
+    # Run-scoped: only meaningful on a startup from the latest run.
+    if fresh and account.recent_followed_by:
+        chips.append((f"New follows: {', '.join(account.recent_followed_by[:3])}", "accent"))
+    return chips
+
+
+def _triage_actions(lead: Lead, ns: str) -> None:
+    """The funnel move for this startup — one state machine wherever a
+    dossier renders: new → Longlist / Pass; longlisted → Shortlist /
+    Remove; in the pipeline → stage + notes; passed → Restore. Every move
+    goes through _set_status (the CRM hook)."""
+    account = lead.account
+    hk = account.handle.lower()
+    name = display_name(lead)
+    status = _status_of(lead)
+
+    def move(new_status: str, toast: str, **fields) -> None:
+        _set_status(account.handle, status=new_status, **fields)
+        st.session_state["toast"] = toast
+        st.rerun()
+
+    if status == "longlisted":
+        c1, c2 = st.columns(2)
+        if c1.button("Shortlist", key=f"{ns}_short_{hk}", type="primary", use_container_width=True):
+            move("shortlisted", f"Shortlisted {name}")
+        if c2.button("Remove", key=f"{ns}_rm_{hk}", use_container_width=True):
+            move("new", f"Removed {name} from the longlist")
+    elif status in WIN_STAGES:
+        # In the funnel: move the stage (including back to Longlist) and keep
+        # notes right here.
+        stage_opts = [STATUS_LABELS["longlisted"]] + [STATUS_LABELS[s] for s in WIN_STAGES]
+        cur_label = STATUS_LABELS.get(status, STATUS_LABELS["shortlisted"])
+        new_stage = st.selectbox("Pipeline stage", stage_opts,
+                                 index=stage_opts.index(cur_label) if cur_label in stage_opts else 0,
+                                 key=f"{ns}_stage_{hk}")
+        notes = st.text_area("Notes", value=(pipeline.get(hk, {}).get("notes") or ""),
+                             key=f"{ns}_notes_{hk}", height=84,
+                             placeholder="Call notes, next step, owner…")
+        c1, c2 = st.columns(2)
+        if c1.button("Save", key=f"{ns}_save_{hk}", type="primary", use_container_width=True):
+            move(LABEL_TO_STATUS.get(new_stage, "shortlisted"), f"Saved {name}", notes=notes)
+        if c2.button("Remove", key=f"{ns}_rm_{hk}", use_container_width=True):
+            move("new", f"Removed {name} from the pipeline")
+    elif status == "passed":
+        if st.button("Restore", key=f"{ns}_restore_{hk}", use_container_width=True):
+            move("new", f"Restored {name}")
+    else:
+        c1, c2 = st.columns(2)
+        if c1.button("Longlist", key=f"{ns}_long_{hk}", type="primary", use_container_width=True):
+            move("longlisted", f"Longlisted {name}")
+        if c2.button("Pass on it", key=f"{ns}_pass_{hk}", use_container_width=True):
+            move("passed", f"Passed on {name}")
+
+
+def _detail_pane(lead: Lead, *, entry: LedgerEntry | None = None, key_ns: str = "feeddet",
+                 secondary: list[Lead] | None = None) -> None:
+    """THE dossier — the cockpit's right pane (Startups feed, Pipeline) and
+    the Database's selected row render this one function, so the two can
+    no longer disagree about what a startup is or how to move it (they used
+    to: the Database card had its own triage rules and chips).
+
+    Order is the order of questions: what is it and is it still a company
+    (header, state chips, summary), how good (score readout), can we reach
+    them (warm paths), what do I think (vote), what do we do (triage, memo,
+    scoring), what does the firm think (discussion) — then the reasoning
+    for whoever wants it: why, how it scored, connections, audit, evidence,
+    and what it scored under earlier theses. `key_ns` namespaces widget
+    keys; `entry` (cross-run movement) defaults to the ledger's."""
+    account, verdict = lead.account, lead.llm
+    hk = account.handle.lower()
+    ns = key_ns
+    entry = entry or entry_by_handle.get(hk)
     status = _status_of(lead)
     comps = score_components(lead, thesis)
     identity = startup_identity(lead)
@@ -2854,20 +2596,28 @@ def _detail_pane(lead: Lead) -> None:
     link = f'<a href="{_e(company_url or account.url)}" target="_blank">↗ site</a>'
     summary = ((verdict.product_summary if verdict else "")
                or (verdict.one_line_summary if verdict else "") or account.bio or "")
-    # Sector context, lost when the feed moved from chip-laden cards to dense
-    # rows. "What space is this in" is the first question asked of any lead,
-    # and the dense row has no room for it — so it belongs here, right under
-    # the summary and above the score.
+    # Sector context: "what space is this in" is the first question asked
+    # of any startup, and the dense list row has no room for it.
     funding = _funding_label(verdict)
+    model = (verdict.business_model if verdict else "") or ""
+    customers = (CUSTOMER_TYPE_LABEL.get(verdict.customer_type, verdict.customer_type)
+                 if verdict and verdict.customer_type else "")
+    if customers and customers.lower() in model.lower():
+        customers = ""  # "B2B SaaS · B2B" says it twice
     meta_line = " · ".join(
         x for x in (
             (verdict.stage if verdict else "") or "",
             funding,
             (verdict.sector if verdict else "") or "",
             (verdict.subsector if verdict else "") or "",
-            (verdict.business_model if verdict else "") or "",
+            model,
+            customers,
         ) if x
     )
+    chips = _dossier_chips(lead, entry, fresh=hk in latest_handles)
+    also = ('<div class="dpane-meta">Also tracking: '
+            + ", ".join(f"@{_e(x.account.handle)}" for x in secondary) + "</div>"
+            if secondary else "")
     why = (verdict.why_interesting if verdict else "") or ""
     audit = (verdict.verification_note if verdict else "") or ""
     st.markdown(
@@ -2876,8 +2626,10 @@ def _detail_pane(lead: Lead) -> None:
         f'<div style="min-width:0"><div class="dpane-nm">{_e(title)}</div>'
         f'<div class="dpane-sub">@{_e(account.handle)} · {account.followers:,} followers · {link}</div>'
         f'</div></div>'
+        + (_chips(chips) if chips else "")
         + (f'<div class="dpane-summary">{_e(summary)}</div>' if summary else "")
         + (f'<div class="dpane-meta">{_e(meta_line)}</div>' if meta_line else "")
+        + also
         + '<div class="dpane-readout"><div class="dpane-top">'
         f'<div class="dpane-big">{lead.score:.0f}<small> / 100</small></div>'
         '<div style="text-align:right"><div class="scorecap">Thesis fit</div>'
@@ -2895,57 +2647,22 @@ def _detail_pane(lead: Lead) -> None:
     # Your stance, above the funnel move: what YOU think is a separate
     # question from where the startup sits in the firm's pipeline, and it is
     # the one only you can answer.
-    ns = "feeddet"
     st.markdown('<div class="dpane-meta">Your call</div>', unsafe_allow_html=True)
     _render_vote_row(lead, ns)
     st.write("")
 
-    # Triage — status-dependent, full-width. Placed directly under the score so
-    # you can act the instant you select a startup, without scrolling past the
-    # reasoning below. Same funnel moves as the card face.
-    if status == "longlisted":
-        c1, c2 = st.columns(2)
-        if c1.button("Shortlist", key=f"{ns}_short_{hk}", type="primary", use_container_width=True):
-            _set_status(account.handle, status="shortlisted")
-            st.session_state["toast"] = f"Shortlisted @{account.handle}"; st.rerun()
-        if c2.button("Remove", key=f"{ns}_rm_{hk}", use_container_width=True):
-            _set_status(account.handle, status="new")
-            st.session_state["toast"] = f"Removed @{account.handle} from the longlist"; st.rerun()
-    elif status in WIN_STAGES:
-        # In the funnel: move the stage (including back to Longlist) and keep
-        # notes right here — this replaces the old separate pipeline table.
-        stage_opts = [STATUS_LABELS["longlisted"]] + [STATUS_LABELS[s] for s in WIN_STAGES]
-        cur_label = STATUS_LABELS.get(status, STATUS_LABELS["shortlisted"])
-        new_stage = st.selectbox("Pipeline stage", stage_opts,
-                                 index=stage_opts.index(cur_label) if cur_label in stage_opts else 0,
-                                 key=f"{ns}_stage_{hk}")
-        notes = st.text_area("Notes", value=(pipeline.get(hk, {}).get("notes") or ""),
-                             key=f"{ns}_notes_{hk}", height=84,
-                             placeholder="Call notes, next step, owner…")
-        c1, c2 = st.columns(2)
-        if c1.button("Save", key=f"{ns}_save_{hk}", type="primary", use_container_width=True):
-            _set_status(account.handle, status=LABEL_TO_STATUS.get(new_stage, "shortlisted"),
-                        notes=notes)
-            st.session_state["toast"] = f"Saved @{account.handle}"; st.rerun()
-        if c2.button("Remove", key=f"{ns}_rm_{hk}", use_container_width=True):
-            _set_status(account.handle, status="new")
-            st.session_state["toast"] = f"Removed @{account.handle} from the shortlist"; st.rerun()
-        # Thread to the next funnel stage: draft/open the outreach memo.
-        memo_label = "Open memo →" if pipeline.get(hk, {}).get("brief") else "Write memo →"
-        if st.button(memo_label, key=f"{ns}_memo_{hk}", use_container_width=True):
-            _open_memo(hk)
-    elif status == "passed":
-        if st.button("Restore", key=f"{ns}_restore_{hk}", use_container_width=True):
-            _set_status(account.handle, status="new")
-            st.session_state["toast"] = f"Restored @{account.handle}"; st.rerun()
-    else:
-        c1, c2 = st.columns(2)
-        if c1.button("Longlist", key=f"{ns}_long_{hk}", type="primary", use_container_width=True):
-            _set_status(account.handle, status="longlisted")
-            st.session_state["toast"] = f"Longlisted @{account.handle}"; st.rerun()
-        if c2.button("Pass", key=f"{ns}_pass_{hk}", use_container_width=True):
-            _set_status(account.handle, status="passed")
-            st.session_state["toast"] = f"Passed on @{account.handle}"; st.rerun()
+    # Triage directly under the score, so you can act the instant you select
+    # a startup, without scrolling past the reasoning below.
+    _triage_actions(lead, ns)
+    ov = overrides.get(hk) or {}
+    m1, m2 = st.columns(2)
+    memo_label = "Open memo" if pipeline.get(hk, {}).get("brief") else "Write memo"
+    if m1.button(memo_label, key=f"{ns}_memo_{hk}", use_container_width=True,
+                 help="The investment memo lives on the Memos page — this opens "
+                      "it there, or starts one."):
+        _open_memo(hk)
+    with m2.popover("Adjust scoring", use_container_width=True):
+        _override_editor(lead, ov, ns)
 
     # Where it stands in the firm's CRM — only for startups in the funnel.
     if CRM_LABELS and status in crm_mod.THRESHOLDS + ["won"]:
@@ -2960,24 +2677,70 @@ def _detail_pane(lead: Lead) -> None:
         _render_comments(lead, ns)
 
     # Reasoning lives BELOW the action: why this score, the full per-dimension
-    # breakdown (readiness scorecard + criteria, thesis fit, X signals, firm
-    # lift, score math — same renderer as the Database dossier so the two never
-    # drift), then the audit. Read it when you want it; act above when you don't.
+    # breakdown (readiness scorecard + criteria, thesis fit, signals, firm
+    # lift, score math), then connections, the audit and the evidence. Read
+    # it when you want it; act above when you don't.
     if why:
         st.markdown(f'<h4 class="dpane-h">Why this score</h4><p class="dpane-p">{_e(why)}</p>',
                     unsafe_allow_html=True)
     detail_html = _score_detail_html(lead, comps)
     if detail_html:
-        manual_score = (overrides.get(hk) or {}).get("score")
+        adjusted = (
+            '<div class="subtle" style="margin-bottom:6px">✎ Manually adjusted'
+            + (f' — “{_e(ov["note"])}”' if ov.get("note") else "")
+            + ' · your numbers are folded into everything below; revisit them '
+            'in <b>Adjust scoring</b>.</div>' if ov else "")
         st.markdown(
             '<h4 class="dpane-h">How it scored</h4>'
-            f'<div class="dscore">{detail_html}'
-            f'{_score_math_html(lead, manual_score)}</div>',
+            f'<div class="dscore">{adjusted}{detail_html}'
+            f'{_score_math_html(lead, ov.get("score"))}</div>',
             unsafe_allow_html=True,
         )
+    if connections := _connections_html(lead):
+        st.markdown(connections, unsafe_allow_html=True)
     if audit:
         st.markdown(f'<h4 class="dpane-h">Audit</h4><p class="dpane-p">{_e(audit)}</p>',
                     unsafe_allow_html=True)
+
+    # Evidence: the links the verdict rests on, what else is known, the
+    # firm's own categorization (Database columns), and how long it has been
+    # on the radar.
+    link_urls = list(lead.evidence_links)
+    if company_url and company_url not in link_urls:
+        link_urls.insert(1, company_url)
+    facts = [(t, "") for t in (verdict.tags if verdict else [])]
+    if verdict and verdict.hq:
+        facts.append((verdict.hq, ""))
+    if verdict and verdict.founded_year:
+        facts.append((f"founded {verdict.founded_year}", ""))
+    facts += [(f, "") for f in (verdict.founders if verdict else [])[:4]]
+    sources = sorted({x for x in account.sources if x})
+    if len(sources) > 1:
+        facts.append((f"sources: {', '.join(sources)}", ""))
+    attr_chips = [
+        (f'{col["label"]}: {text}', "")
+        for col in db_columns
+        if (text := _attr_display((attrs_by_handle.get(hk) or {}).get(col["key"])))
+    ]
+    seen = ""
+    if entry and entry.times_seen > 1 and entry.first_seen_at:
+        seen = (f'<div class="subtle">Seen {entry.times_seen}× since '
+                f'{entry.first_seen_at:%b %d}'
+                + (f" · previous score {entry.prev_score:.0f}"
+                   if entry.prev_score is not None else "") + "</div>")
+    if link_urls or facts or attr_chips or seen:
+        links = " · ".join(
+            f'<a href="{_e(u)}" target="_blank">'
+            f'{_e(u.removeprefix("https://").removeprefix("http://"))}</a>'
+            for u in link_urls)
+        st.markdown(
+            '<h4 class="dpane-h">Evidence</h4>'
+            + (f'<div class="subtle">{links}</div>' if links else "")
+            + (_chips(facts) if facts else "")
+            + (_chips(attr_chips) if attr_chips else "")
+            + seen,
+            unsafe_allow_html=True,
+        )
     # What this company scored under earlier theses. A verdict is overwritten
     # on every rescore, so without this the fact that a company was judged
     # 0.20 under one thesis and 0.75 under the next simply disappears — and
@@ -3006,7 +2769,8 @@ def _detail_pane(lead: Lead) -> None:
             )
 
 
-def _render_cockpit(leads: list[Lead], sel_key: str, more=None) -> None:
+def _render_cockpit(leads: list[Lead], sel_key: str, more=None,
+                    secondaries: dict[str, list[Lead]] | None = None) -> None:
     """Shared triage cockpit: a scannable warm-row list (left) drives the
     selected lead's dossier (right). `sel_key` persists the selection per page,
     so the Feed, Longlist, and Shortlist each keep their own. `more`, when set,
@@ -3048,7 +2812,8 @@ def _render_cockpit(leads: list[Lead], sel_key: str, more=None) -> None:
                     cb()
     with detail_col:
         with st.container(height=640, border=False):
-            _detail_pane(by_handle[sel])
+            _detail_pane(by_handle[sel], key_ns="pipedet" if sel_key == "pipe_selected"
+                         else "feeddet", secondary=(secondaries or {}).get(sel))
 
 
 def _render_startup_feed() -> None:
@@ -3383,7 +3148,8 @@ def _render_startup_feed() -> None:
                     st.session_state["leads_limit"] = limit + page_size
                     st.rerun()
                 more = (f"Show more ({len(display) - limit} remaining)", _show_more)
-            _render_cockpit(page_leads, "feed_selected", more=more)
+            _render_cockpit(page_leads, "feed_selected", more=more, secondaries={
+                lead.account.handle.lower(): others for lead, _entry, others in page if others})
             # The view as you filtered it, built only when clicked. (This used
             # to list the newest files in the server's out/ folder — files a
             # deployed workspace's members never produced or asked for.)
@@ -5409,9 +5175,7 @@ def _render_database() -> None:
                     st.write("")
                     st.markdown('<div class="section-title" style="font-size:1.15rem">Dossier</div>',
                                 unsafe_allow_html=True)
-                    _lead_card(sel_lead, entry_by_handle.get(sel_handle),
-                               fresh=sel_handle in latest_handles,
-                               details_open=True, key_ns="db")
+                    _detail_pane(sel_lead, key_ns="dbdet")
 
         fcsv, fcat, _fsp = st.columns([1.9, 1.05, 3.05])
         view_df = pd.DataFrame(view_rows)
