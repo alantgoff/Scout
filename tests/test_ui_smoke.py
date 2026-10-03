@@ -225,14 +225,14 @@ def test_warm_paths_show_on_the_card_and_the_network_form(tmp_path, monkeypatch)
 
 
 def test_memo_button_routes_and_generates_named_by_startup(tmp_path, monkeypatch) -> None:
-    """The card's Memo button routes to the Memos page (nav_target +
-    memo_target) and writes the memo there on arrival — named after the
-    STARTUP, not the handle, and with the full section skeleton."""
+    """The Memo button routes to the Memos page and writes the memo there on
+    arrival — named after the STARTUP, not the handle, and with the full
+    section skeleton."""
     db = tmp_path / "smoke.db"
     at = _app(tmp_path, monkeypatch)
-    # Simulate the card button's routing state, exactly as _lead_card sets it.
-    at.session_state["nav_target"] = "Memos"
-    at.session_state["memo_target"] = "smoke_founder"
+    # Exactly the route _open_memo sets for a startup with no memo yet.
+    at.session_state["_route"] = {"page": "Memos", "handle": "smoke_founder",
+                                  "state": {"memo_generate_for": "smoke_founder"}}
     at.run()
 
     assert not at.exception, at.exception[0].message if at.exception else ""
@@ -556,7 +556,7 @@ def test_memo_regeneration_keeps_the_edit_restorable(tmp_path, monkeypatch) -> N
 
     at = AppTest.from_file(str(UI_PATH), default_timeout=30)
     at.session_state["nav"] = "Memos"
-    at.session_state["memo_target"] = "smoke_founder"
+    at.session_state["memo_pick"] = "smoke_founder"
     at.run()
     assert not at.exception, at.exception[0].message if at.exception else ""
     assert any(b.key.startswith("memo_restore_") for b in at.button)
@@ -972,11 +972,22 @@ def test_quickfind_routes_to_startups_with_the_search_applied(tmp_path, monkeypa
     at.run()
     assert not at.exception, at.exception[0].message if at.exception else ""
 
+    # A partial term searches the feed across every run and track…
     quickfind = next(i for i in at.text_input if i.key == "quickfind")
-    quickfind.set_value("SmokeCo").run()
+    quickfind.set_value("Smoke").run()
     assert not at.exception, at.exception[0].message if at.exception else ""
     assert at.session_state["nav"] == "Startups"
-    assert at.session_state["feed_q"] == "SmokeCo"
+    assert at.session_state["feed_q"] == "Smoke"
+    assert at.session_state["leads_time_scope"] == "All runs"
+    # …the box clears, so the next search works from anywhere…
+    assert next(i for i in at.text_input if i.key == "quickfind").value == ""
+    # …and an exact name opens that startup, even from the Database view.
+    at.session_state["startups_view"] = "Database"
+    at.run()
+    next(i for i in at.text_input if i.key == "quickfind").set_value("SmokeCo").run()
+    assert not at.exception, at.exception[0].message if at.exception else ""
+    assert at.session_state["startups_view"] == "Feed"
+    assert at.session_state["feed_selected"] == "smoke_founder"
 
 
 def test_bulk_triage_moves_every_selected_row(tmp_path, monkeypatch) -> None:
@@ -1186,3 +1197,67 @@ def test_run_now_without_a_worker_acts_instead_of_queueing(tmp_path, monkeypatch
     at.button(key="queue_digest").click().run()
     assert not at.exception, at.exception[0].message if at.exception else ""
     assert sent and Store(db).jobs() == []   # sent now, nothing queued
+
+
+# --- routing: deep links land on the startup they name ------------------------
+
+
+def _linked(tmp_path, monkeypatch, **params) -> AppTest:
+    at = _app(tmp_path, monkeypatch)
+    for k, v in params.items():
+        at.query_params[k] = v
+    at.run()
+    assert not at.exception, at.exception[0].message if at.exception else ""
+    return at
+
+
+def test_deep_link_opens_the_named_startup(tmp_path, monkeypatch) -> None:
+    at = _linked(tmp_path, monkeypatch, p="Startups", s="nora_builds")
+    assert at.session_state["nav"] == "Startups"
+    assert at.session_state["feed_selected"] == "nora_builds"
+    assert "Nora Vale" in _page_text(at)
+
+
+def test_deep_link_widens_a_view_that_hides_the_startup(tmp_path, monkeypatch) -> None:
+    """A passed startup is hidden by default; the link must still open it."""
+    db = tmp_path / "smoke.db"
+    Store(seed_store(db).db_path).set_pipeline("nora_builds", status="passed")
+    at = _linked(tmp_path, monkeypatch, s="nora_builds")
+    assert at.session_state["feed_selected"] == "nora_builds"
+    assert at.session_state["leads_time_scope"] == "All runs"
+    assert any("Showing every run and track" in t.value for t in at.toast)
+
+
+def test_deep_link_to_an_unknown_startup_says_so(tmp_path, monkeypatch) -> None:
+    at = _linked(tmp_path, monkeypatch, p="Startups", s="ghost_co")
+    assert "isn't in this list" in _page_text(at)
+    assert at.session_state["feed_selected"] != "ghost_co"
+
+
+def test_deep_link_to_memos_never_spends_on_a_memo(tmp_path, monkeypatch) -> None:
+    db = tmp_path / "smoke.db"
+    at = _linked(tmp_path, monkeypatch, p="Memos", s="smoke_founder")
+    assert at.session_state["nav"] == "Memos"
+    assert at.session_state["memo_pick"] == "smoke_founder"
+    assert not Store(db).get_pipeline("smoke_founder").get("brief")
+    # …and a later visit to Memos doesn't either.
+    at.session_state["nav"] = "Startups"
+    at.run()
+    at.session_state["nav"] = "Memos"
+    at.run()
+    assert not Store(db).get_pipeline("smoke_founder").get("brief")
+
+
+def test_filters_and_views_survive_a_trip_to_another_page(tmp_path, monkeypatch) -> None:
+    at = _app(tmp_path, monkeypatch)
+    at.session_state["nav"] = "Startups"
+    at.run()
+    at.selectbox(key="feed_sort").set_value("Followers").run()
+    at.toggle(key="f_hidepassed").set_value(False).run()
+    at.session_state["nav"] = "Memos"
+    at.run()
+    at.session_state["nav"] = "Startups"
+    at.run()
+    assert not at.exception, at.exception[0].message if at.exception else ""
+    assert at.selectbox(key="feed_sort").value == "Followers"
+    assert at.toggle(key="f_hidepassed").value is False

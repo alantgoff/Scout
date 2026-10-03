@@ -33,6 +33,7 @@ scout.db. The UI never stores secrets. Launch with `./scout-cli ui`.
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import html
 import json
 import math
@@ -126,6 +127,7 @@ from scout.insights import (
 from scout import jobs as jobs_mod
 from scout import crm as crm_mod
 from scout import intros as intros_mod
+from scout import nav as nav_mod
 from scout import notify
 from scout import theses as theses_mod
 from scout.models import (
@@ -1581,22 +1583,103 @@ def _status_of(lead: Lead) -> str:
 # Top bar — wordmark + one-line thesis (left) and the page nav (right), on one
 # slim row. Session-state-driven nav (unlike st.tabs) so any button can route to
 # a page via nav_target + rerun. The full thesis lives on the Thesis page.
-PAGES = ["Thesis", "Startups", "Longlist", "Shortlist", "Memos", "Activity",
-         "Graph", "Evidence", "Automation", "Settings"]
-# Slack deep links (?s=<handle>&p=<page>) land here: translate them into the
-# existing nav_target/selection mechanism once, then clear the params so a
-# later rerun doesn't keep forcing the same page.
-if (_qp_page := st.query_params.get("p")) or st.query_params.get("s"):
-    if _qp_page in PAGES:
-        st.session_state["nav_target"] = _qp_page
-    if _qp_handle := st.query_params.get("s"):
-        for _sel_key in ("feed_selected", "ll_selected", "sl_selected"):
-            st.session_state[_sel_key] = _qp_handle.lower()
-        st.session_state["memo_target"] = _qp_handle.lower()
-    st.query_params.clear()
-if (_nav_target := st.session_state.pop("nav_target", None)) in PAGES:
-    st.session_state["nav"] = _nav_target
-st.session_state.setdefault("nav", "Thesis")
+PAGES = nav_mod.PAGES
+
+# ---- Routing. Every way into a page goes through _route (buttons) or
+# _apply_route (links): a Slack deep link ?p=<page>&s=<handle>, a button that
+# jumps across pages, an alias (an old page name) set in `nav`. Routes are
+# applied at the top of the NEXT run, before any widget renders — the only
+# moment widget-backed state (the nav itself, a view switch, a filter) may be
+# written.
+
+
+def _route(page: str, view: str | None = None, *, handle: str | None = None,
+           state: dict | None = None, rerun: bool = True) -> None:
+    """Go to `page` (a page name or alias), optionally a `view` inside it,
+    opening `handle`, with extra session `state` set on arrival. Callbacks
+    pass rerun=False (Streamlit reruns after a callback anyway)."""
+    st.session_state["_route"] = {"page": page, "view": view, "handle": handle,
+                                  "state": state or {}}
+    if rerun:
+        st.rerun()
+
+
+def _focus(handle: str, page: str) -> str:
+    """Open one startup on arrival. Returns the page it ends up on: a page
+    without a list (Activity, Settings…) opens it in the Startups feed."""
+    if page == "Memos":
+        st.session_state["memo_pick"] = handle
+        return page
+    sel_key = nav_mod.SELECTION_KEYS.get(page)
+    if sel_key is None:
+        page, sel_key = "Startups", nav_mod.SELECTION_KEYS["Startups"]
+        st.session_state["startups_view"] = "Feed"
+    st.session_state[sel_key] = handle
+    # Explicit: if this startup isn't in the list, say so — never quietly
+    # open the first row instead (deep links used to land on the wrong one).
+    st.session_state[f"{sel_key}_explicit"] = handle
+    if page == "Startups":
+        st.session_state["feed_focus"] = handle
+    return page
+
+
+def _apply_route() -> None:
+    route = st.session_state.pop("_route", None)
+    qp_page, qp_handle = st.query_params.get("p"), st.query_params.get("s")
+    if qp_page or qp_handle:
+        route = {"page": qp_page or "Startups", "handle": qp_handle}
+        st.query_params.clear()
+    legacy = st.session_state.pop("nav_target", None)
+    if legacy and not route:
+        route = {"page": legacy}
+    current = st.session_state.get("nav")
+    if not route and current and current not in PAGES:
+        route = {"page": current}  # an alias set directly
+    if not route:
+        st.session_state.setdefault("nav", nav_mod.LANDING)
+        return
+    page, view = nav_mod.resolve(route.get("page")) or (nav_mod.LANDING, None)
+    view = route.get("view") or view
+    state = dict(route.get("state") or {})
+    if message := state.pop("toast", None):
+        st.toast(message)  # the queued-toast pop has already run this pass
+    for key, value in state.items():
+        st.session_state[key] = value
+    if handle := (route.get("handle") or "").lstrip("@").lower():
+        page = _focus(handle, page)
+    st.session_state["nav"] = page
+    if view and (vk := nav_mod.view_key(page)):
+        st.session_state[vk] = view
+
+
+_apply_route()
+
+
+def _open_memo(handle: str) -> None:
+    """The Memo / Write memo buttons: open the startup on Memos, and when it
+    has no memo yet, start one — an explicit click is the only thing that
+    spends on a memo (a deep link merely opens the page)."""
+    has_memo = bool((pipeline.get(handle) or {}).get("brief"))
+    _route("Memos", handle=handle,
+           state={} if has_memo else {"memo_generate_for": handle})
+def _on_quickfind() -> None:
+    """Quick-find, from any page: one exact match opens that startup; any
+    other term searches the feed across every run and track. A callback, so
+    the box clears and the same name typed twice still works."""
+    term = (st.session_state.get("quickfind") or "").strip()
+    st.session_state["quickfind"] = ""
+    if not term:
+        return
+    needle = term.lower().lstrip("@")
+    exact = [h for h, lead in lead_by_handle.items()
+             if needle in (h, display_name(lead).lower())]
+    widen = {"leads_time_scope": "All runs", "leads_track": "Everything"}
+    if len(exact) == 1:
+        _route("Startups", "Feed", handle=exact[0], state=widen, rerun=False)
+    else:
+        _route("Startups", "Feed", state={**widen, "feed_q": term}, rerun=False)
+
+
 _hdr_l, _hdr_find, _hdr_r = st.columns([1, 0.42, 1.35],
                                        vertical_alignment="center")
 with _hdr_l:
@@ -1612,15 +1695,10 @@ with _hdr_find:
     # re-filter. Routes to the feed with the search applied. It sits in the
     # masthead ROW (its own column) rather than above the nav, so finding a
     # company never pushes the wordmark and nav down the page.
-    _jump = st.text_input(
+    st.text_input(
         "Find a startup", key="quickfind", label_visibility="collapsed",
-        placeholder="⌕ Find…",
+        placeholder="⌕ Find…", on_change=_on_quickfind,
     )
-    if _jump and _jump != st.session_state.get("quickfind_last", ""):
-        st.session_state["quickfind_last"] = _jump
-        st.session_state["feed_q"] = _jump
-        st.session_state["nav_target"] = "Startups"
-        st.rerun()
 
 with _hdr_r:
     with st.container(key="topnav"):
@@ -1635,7 +1713,7 @@ with _hdr_r:
                 store.mark_read(ACTOR)
         _unread = store.unread_count(ACTOR)
         nav = st.segmented_control(
-            "Page", PAGES, key="nav", label_visibility="collapsed",
+            "Page", PAGES, key="nav", label_visibility="collapsed", required=True,
             # The only decoration in the nav: how much happened while you
             # were asleep. With partners eight hours apart that is the first
             # question on opening the app.
@@ -1643,9 +1721,6 @@ with _hdr_r:
                 f"Activity ({_unread})" if p == "Activity" and _unread else p
             ),
         )
-if nav is None:  # clicking the active pill deselects — snap back
-    st.session_state["nav_target"] = st.session_state.get("nav_last", "Thesis")
-    st.rerun()
 st.session_state["nav_last"] = nav
 
 st.session_state.setdefault(
@@ -1872,9 +1947,7 @@ def _run_panel() -> None:
             st.session_state["page_loaded_at"] = datetime.now(timezone.utc).isoformat()
             # Land on the lead feed showing this run — the whole point of the
             # button. Clearing the scope key snaps it back to "Latest run".
-            st.session_state["nav_target"] = "Startups"
-            st.session_state.pop("leads_time_scope", None)
-            st.rerun(scope="app")
+            _route("Startups", "Feed", state={"leads_time_scope": "Latest run"})
     log_path = scan.get("log_path") or st.session_state.get("last_log_path", "")
     tail = _tail_log(log_path)
     if tail:
@@ -2642,9 +2715,7 @@ def _lead_card(
             if b1.button(memo_label, key=f"{key_ns}_brief_{handle_key}",
                          help="The full investment memo lives on the Memos page — "
                               "this writes one (or opens the existing one) there."):
-                st.session_state["nav_target"] = "Memos"
-                st.session_state["memo_target"] = handle_key
-                st.rerun()
+                _open_memo(handle_key)
             with b2.popover("Adjust scoring"):
                 _override_editor(lead, ov, key_ns)
             n_comments = comment_counts.get(handle_key, 0)
@@ -2824,9 +2895,7 @@ def _detail_pane(lead: Lead) -> None:
         # Thread to the next funnel stage: draft/open the outreach memo.
         memo_label = "Open memo →" if pipeline.get(hk, {}).get("brief") else "Write memo →"
         if st.button(memo_label, key=f"{ns}_memo_{hk}", use_container_width=True):
-            st.session_state["nav_target"] = "Memos"
-            st.session_state["memo_target"] = hk
-            st.rerun()
+            _open_memo(hk)
     elif status == "passed":
         if st.button("Restore", key=f"{ns}_restore_{hk}", use_container_width=True):
             _set_status(account.handle, status="new")
@@ -2908,7 +2977,21 @@ def _render_cockpit(leads: list[Lead], sel_key: str, more=None) -> None:
         return
     handles = [l.account.handle.lower() for l in leads]
     sel = st.session_state.get(sel_key)
+    explicit = st.session_state.pop(f"{sel_key}_explicit", None)
     if sel not in handles:
+        if explicit and explicit == sel:
+            # Asked for by name (a link, an Open button) but not in this
+            # list: say so, and offer the way to it — never silently open
+            # the first row as if it were the one asked for.
+            missing = lead_by_handle.get(sel)
+            name = display_name(missing) if missing else f"@{sel}"
+            c1, c2 = st.columns([4, 1.2], vertical_alignment="center")
+            c1.markdown(f'<div class="notice"><b>{_e(name)}</b> isn\'t in this list.'
+                        + ("" if missing else " Scout has no data on it yet.")
+                        + '</div>', unsafe_allow_html=True)
+            if missing is not None and c2.button("Show it", key=f"{sel_key}_showit",
+                                                 use_container_width=True):
+                _route("Startups", "Feed", handle=sel)
         sel = handles[0]
         st.session_state[sel_key] = sel
     by_handle = {l.account.handle.lower(): l for l in leads}
@@ -2968,11 +3051,11 @@ def _render_startup_feed() -> None:
             # system expects to launch soon are the completeness track.
             track = st.segmented_control(
                 "Track", ["Startups", "Pre-launch watch", "Everything"],
-                default="Startups", key="leads_track",
+                default="Startups", key="leads_track", persist_state="session",
             ) or "Startups"
             scope = st.segmented_control(
                 "Scope", ["Latest run", "All runs"], default="Latest run",
-                key="leads_time_scope",
+                key="leads_time_scope", persist_state="session",
             ) or "Latest run"
             # Thesis, not strategy. A strategy is one exact configuration, so
             # every weight tweak minted a new one and a single thesis
@@ -2991,7 +3074,7 @@ def _render_startup_feed() -> None:
                     return f"{name[:44]} · {row['lead_count']} startups"
                 thesis_filter = st.selectbox(
                     "Thesis", [None] + [x["id"] for x in _THESIS_ROWS],
-                    format_func=_thesis_label, key="leads_thesis",
+                    format_func=_thesis_label, key="leads_thesis", persist_state="session",
                     help="Every run of that thesis, across all its tuning.",
                 )
                 versions = (
@@ -3005,7 +3088,7 @@ def _render_startup_feed() -> None:
                         return f"v{v['n']} · {v['run_count']} run(s)"
                     strategy_hash = st.selectbox(
                         "Version", [None] + [v["version"] for v in versions],
-                        format_func=_version_label, key="leads_version",
+                        format_func=_version_label, key="leads_version", persist_state="session",
                         help="One exact tuning of this thesis.",
                     )
 
@@ -3064,34 +3147,35 @@ def _render_startup_feed() -> None:
         ])
 
         with rail:
-            query = st.text_input("Search", key="feed_q",
+            query = st.text_input("Search", key="feed_q", persist_state="session",
                                   placeholder="name, bio, sector, tags…")
             lift_sort = f"{thesis.firm_name or 'Value-add'} lift"
             sort_by = st.selectbox("Sort by", ["Score", "Quality", "Score change", "Thesis fit",
-                                               lift_sort, "Warm paths", "Followers"])
+                                               lift_sort, "Warm paths", "Followers"],
+                                   key="feed_sort", persist_state="session")
             with st.popover(f"Filters · {n_active}" if n_active else "Filters",
                             use_container_width=True):
                 type_filter = st.multiselect("Type", ["founder", "startup", "other"],
-                                             default=FILTER_DEFAULTS["f_type"], key="f_type",
+                                             default=FILTER_DEFAULTS["f_type"], key="f_type", persist_state="session",
                                              format_func=lambda t: TYPE_LABEL[t])
                 stage_filter = st.multiselect("Stage", list(STAGES),
-                                              default=FILTER_DEFAULTS["f_stage"], key="f_stage",
+                                              default=FILTER_DEFAULTS["f_stage"], key="f_stage", persist_state="session",
                                               format_func=lambda s: STAGE_LABEL[s])
                 round_filter = st.multiselect(
                     "Funding round", list(FUNDING_STAGE_LABELS),
-                    default=FILTER_DEFAULTS["f_round"], key="f_round",
+                    default=FILTER_DEFAULTS["f_round"], key="f_round", persist_state="session",
                     format_func=lambda r: FUNDING_STAGE_LABELS[r],
                     help="The announced round. Most companies never announce, so "
                          "pick 'Unknown' to include them — filtering to Seed alone "
                          "hides every unannounced seed company.")
                 ctype_filter = st.multiselect("Customer type", list(CUSTOMER_TYPES),
-                                              default=FILTER_DEFAULTS["f_ctype"], key="f_ctype",
+                                              default=FILTER_DEFAULTS["f_ctype"], key="f_ctype", persist_state="session",
                                               format_func=lambda c: CUSTOMER_TYPE_LABEL[c],
                                               help="B2B vs B2C lens the classifier applied. "
                                                    "Unclassified leads are never hidden by this.")
-                min_score = st.slider("Minimum score", 0, 100, 0, key="f_minscore")
-                min_fit = st.slider("Minimum thesis fit", 0, 100, 0, format="%d%%", key="f_minfit")
-                hide_passed = st.toggle("Hide passed", value=True, key="f_hidepassed")
+                min_score = st.slider("Minimum score", 0, 100, 0, key="f_minscore", persist_state="session")
+                min_fit = st.slider("Minimum thesis fit", 0, 100, 0, format="%d%%", key="f_minfit", persist_state="session")
+                hide_passed = st.toggle("Hide passed", value=True, key="f_hidepassed", persist_state="session")
                 if n_active and st.button("Reset filters"):
                     st.session_state["filters_reset"] = True
                     st.rerun()
@@ -3225,6 +3309,41 @@ def _render_startup_feed() -> None:
             st.session_state["leads_limit"] = page_size
         limit = st.session_state.get("leads_limit", page_size)
 
+        # A link to one startup (Slack, quick-find, "Show it") must open THAT
+        # startup: page to it, and if the current view hides it, widen the
+        # view once — every run, every track, no filters — and say so.
+        if focus := st.session_state.get("feed_focus"):
+            idx = next((i for i, (lead, _e, sec) in enumerate(display)
+                        if focus in {lead.account.handle.lower(),
+                                     *(s.account.handle.lower() for s in sec)}), None)
+            if idx is not None:
+                st.session_state.pop("feed_focus", None)
+                st.session_state.pop("feed_focus_widened", None)
+                primary = display[idx][0].account.handle.lower()
+                st.session_state["feed_selected"] = primary
+                st.session_state["feed_selected_explicit"] = primary
+                if idx >= limit:
+                    limit = (idx // page_size + 1) * page_size
+                    st.session_state["leads_limit"] = limit
+            elif not st.session_state.get("feed_focus_widened"):
+                st.session_state["feed_focus_widened"] = True
+                _focus_lead = lead_by_handle.get(focus)
+                _route("Startups", "Feed", handle=focus, state={
+                    "leads_time_scope": "All runs", "leads_track": "Everything",
+                    "feed_q": "", "leads_thesis": None, "leads_version": None,
+                    # Every filter wide open — passed included, which the
+                    # defaults hide.
+                    "f_type": ["founder", "startup", "other"], "f_stage": list(STAGES),
+                    "f_round": list(FUNDING_STAGE_LABELS),
+                    "f_ctype": list(CUSTOMER_TYPES), "f_minscore": 0, "f_minfit": 0,
+                    "f_hidepassed": False,
+                    "toast": (f"Showing every run and track to open "
+                              f"{display_name(_focus_lead) if _focus_lead else '@' + focus}"),
+                })
+            else:
+                st.session_state.pop("feed_focus", None)
+                st.session_state.pop("feed_focus_widened", None)
+
         page = display[:limit]
         if not page:
             if track == "Startups":
@@ -3345,11 +3464,10 @@ if nav == "Shortlist":
                     )
                     if c_r.button("Open", key=f"meet_open_{handle}",
                                   use_container_width=True):
-                        st.session_state["sl_selected"] = handle
-                        st.rerun()
+                        _route("Shortlist", handle=handle)
 
         sort_mode = st.sidebar.segmented_control(
-            "Sort", ["Score", "Contested"], default="Score", key="sl_sort",
+            "Sort", ["Score", "Contested"], default="Score", key="sl_sort", persist_state="session",
         ) or "Score"
         if sort_mode == "Contested":
             sl_leads = sorted(
@@ -3553,21 +3671,22 @@ def _generate_memo(handle: str) -> None:
 
 
 if nav == "Memos":
-    # Arriving from a card's Memo button: select that startup here and, when
-    # it has no memo yet, write one on arrival.
-    memo_target = st.session_state.pop("memo_target", None)
-    if memo_target:
-        st.session_state["memo_pick"] = memo_target
+    # A Memo / Write memo click arrives with memo_generate_for set (see
+    # _open_memo); a deep link only preselects (memo_pick, via _focus).
+    # Nothing but that explicit click spends on a memo — a Slack link used
+    # to queue a paid Deep memo for the next visit.
+    gen_for = st.session_state.pop("memo_generate_for", None)
+    if gen_for:
+        st.session_state["memo_pick"] = gen_for
         st.session_state.pop("memo_editing", None)
-        if not pipeline.get(memo_target, {}).get("brief"):
-            st.session_state["memo_autogen"] = True
+    wanted = st.session_state.get("memo_pick")
 
     funnel_handles = [h for h, p in pipeline.items()
                       if (p.get("status") or "") in FUNNEL_STAGES]
     briefed = [h for h, p in pipeline.items() if p.get("brief")]
     memo_pool = _ranked(list(dict.fromkeys(funnel_handles + briefed)))
-    if memo_target and memo_target not in memo_pool:
-        memo_pool.insert(0, memo_target)
+    if wanted and wanted not in memo_pool and wanted in lead_by_handle:
+        memo_pool.insert(0, wanted)
 
     if not memo_pool:
         st.markdown(
@@ -3637,7 +3756,7 @@ if nav == "Memos":
         with dc1:
             st.session_state.setdefault("memo_depth", "Deep research")
             depth_pick = st.segmented_control(
-                "Memo depth", list(MEMO_DEPTH_INFO), key="memo_depth",
+                "Memo depth", list(MEMO_DEPTH_INFO), key="memo_depth", persist_state="session",
                 label_visibility="collapsed",
             ) or "Deep research"
         with dc2:
@@ -3649,12 +3768,25 @@ if nav == "Memos":
                 unsafe_allow_html=True,
             )
         focus_text = st.text_input(
-            "Focus", key="memo_focus", label_visibility="collapsed",
+            "Focus", key="memo_focus", persist_state="session", label_visibility="collapsed",
             placeholder="Focus the memo on… (optional — e.g. competitive moat, "
                         "GTM motion, acquirer appetite)",
         )
 
-        if st.session_state.pop("memo_autogen", False) and not picked_row.get("brief"):
+        if gen_for == pick and not picked_row.get("brief") and picked_lead is not None:
+            _worker_now = store.worker_status()
+            if _worker_now and _worker_now.get("alive"):
+                # A deep memo is minutes of live research: with a worker
+                # deployed it belongs in the queue, not in a tab that must
+                # stay open.
+                job_id = store.enqueue_job(
+                    jobs_mod.KIND_MEMO, {"handle": pick, "depth": _selected_depth()},
+                    actor=ACTOR, dedupe=True)
+                st.session_state["toast"] = (
+                    f"Queued — the worker writes {picked_name}'s memo (job {job_id}). "
+                    "You can close the tab." if job_id
+                    else f"A memo for {picked_name} is already queued.")
+                st.rerun()
             _generate_memo(pick)  # ends in st.rerun()
 
         existing_memo = picked_row.get("brief") or ""
@@ -3919,21 +4051,21 @@ def _render_run_controls() -> None:
         source = st.segmented_control(
             "Source", ["X (free scraper)", "No X", "X API (paid)"],
             default="X (free scraper)" if x_connected else "No X",
-            required=True, key="run_source",
+            required=True, key="run_source", persist_state="session",
             help="The free sources (GitHub, Hacker News, RSS, SEC Form D, YC, "
                  "arXiv) always run. X adds the query bank, bio search and the "
                  "investor follow graph.")
     with r2:
         max_accounts = st.number_input("Max accounts", 10, 2000, settings.max_accounts,
-                                       step=10, key="run_max",
+                                       step=10, key="run_max", persist_state="session",
                                        help="Most accounts this run reads from discovery.")
     with r3:
-        min_score_run = st.number_input("Min score", 0, 100, 0, step=5, key="run_minscore",
+        min_score_run = st.number_input("Min score", 0, 100, 0, step=5, key="run_minscore", persist_state="session",
                                         help="Startups scoring below this aren't saved "
                                              "from this run.")
     with r4:
         ttl = st.number_input("Skip if scored < N days", 0, 90, settings.ttl_days,
-                              key="run_ttl",
+                              key="run_ttl", persist_state="session",
                               help="Startups scored more recently than this are not "
                                    "re-scored — runs stay incremental.")
     paid_run = source == "X API (paid)"
@@ -5042,31 +5174,32 @@ def _render_database() -> None:
         t1, t2, t3, t4 = st.columns([2.6, 0.95, 1.5, 0.95])
         with t1:
             db_search = st.text_input(
-                "Search startups", key="sdb_q", label_visibility="collapsed",
+                "Search startups", key="sdb_q", persist_state="session", label_visibility="collapsed",
                 placeholder="Search startup, product, sector, status…")
         with t2:
             attr_filters: dict[str, tuple[str, set]] = {}
             n_field_filters = 0
             with st.popover("Filters"):
                 stage_pick = st.multiselect(
-                    "Stage", [STAGE_LABEL[s] for s in STAGES], key="sdb_stage",
+                    "Stage", [STAGE_LABEL[s] for s in STAGES], key="sdb_stage", persist_state="session",
                     placeholder="All stages")
                 status_pick = st.multiselect(
-                    "Status", list(STATUS_LABELS.values()), key="sdb_status",
+                    "Status", list(STATUS_LABELS.values()), key="sdb_status", persist_state="session",
                     placeholder="All statuses")
-                sdb_min = st.slider("Minimum score", 0, 100, 0, key="sdb_min")
+                sdb_min = st.slider("Minimum score", 0, 100, 0, key="sdb_min", persist_state="session")
                 for col in db_columns:
                     if col["type"] in ("select", "multiselect") and col["options"]:
                         picks = st.multiselect(
                             col["label"], col["options"],
-                            key=f"sdbf_{col['key']}", placeholder="Any")
+                            key=f"sdbf_{col['key']}", placeholder="Any",
+                            persist_state="session")
                         if picks:
                             attr_filters[col["key"]] = (col["type"], set(picks))
                             n_field_filters += 1
         with t3:
             st.session_state.setdefault("sdb_mode", "Browse")
             sdb_mode = st.segmented_control(
-                "Mode", ["Browse", "Edit"], key="sdb_mode",
+                "Mode", ["Browse", "Edit"], key="sdb_mode", persist_state="session",
                 label_visibility="collapsed") or "Browse"
         with t4:
             with st.popover("Columns"):
@@ -5109,8 +5242,16 @@ def _render_database() -> None:
             _render_db_editor(view_rows)
         else:
             df = pd.DataFrame(view_rows)
+            # Row selections are POSITIONS. Keying the table on its current
+            # order means a re-sort, a filter or a pinned score starts a fresh
+            # selection, instead of silently pointing the dossier and the bulk
+            # buttons at whichever startups now sit in those rows.
+            _order_sig = hashlib.sha1(
+                "|".join(df["handle"].astype(str)).encode() if not df.empty else b""
+            ).hexdigest()[:12]
             event = st.dataframe(
-                df, use_container_width=True, hide_index=True, key="sdb_table",
+                df, use_container_width=True, hide_index=True,
+                key=f"sdb_table_{_order_sig}",
                 on_select="rerun", selection_mode="multi-row",
                 height=min(560, 37 * (len(df) + 1) + 5),
                 column_order=["Startup", "Score", "Q", "F", "S", "Band",
@@ -5148,8 +5289,6 @@ def _render_database() -> None:
                 },
             )
             picked_rows = (event.selection.rows or []) if event is not None else []
-            # Bounds check: a selection made before a filter change can
-            # outlive the rows it pointed at.
             picked_rows = [r for r in picked_rows if r < len(df)] if not df.empty else []
 
             # Bulk triage. Selecting twenty companies and pressing one button
@@ -5362,9 +5501,10 @@ if nav == "Startups":
     st.sidebar.markdown('<div class="rail-title">Startups</div>', unsafe_allow_html=True)
     # "Feed" (not "Latest run") so it doesn't collide with the feed's own
     # Latest-run/All-runs Scope toggle below it in the same rail.
+    st.session_state.setdefault("startups_view", "Feed")
     startups_view = st.sidebar.segmented_control(
-        "View", ["Feed", "Database"], default="Feed",
-        key="startups_view", label_visibility="collapsed",
+        "View", ["Feed", "Database"],
+        key="startups_view", persist_state="session", label_visibility="collapsed",
     ) or "Feed"
     if startups_view == "Database":
         _render_database()
@@ -5450,11 +5590,11 @@ if nav == "Activity":
     who_filter = a1.selectbox(
         "Member", ["Everyone"] + [u["id"] for u in USERS],
         format_func=lambda uid: "Everyone" if uid == "Everyone" else _who(uid),
-        key="act_who",
+        key="act_who", persist_state="session",
     )
     kind_filter = a2.selectbox(
         "Kind", ["Everything", "Votes & comments", "Triage", "Memos"],
-        key="act_kind",
+        key="act_kind", persist_state="session",
     )
     verb_groups = {
         "Votes & comments": ["vote_cast", "vote_cleared", "comment_added",
@@ -5579,7 +5719,7 @@ def _evidence_pick_run(runs: list[dict]):
             f"(run {r['id']})": r
             for r in runs
         }
-        row = labels[st.selectbox("Backtest run", list(labels), key="ev_pick",
+        row = labels[st.selectbox("Backtest run", list(labels), key="ev_pick", persist_state="session",
                                   label_visibility="collapsed")]
     try:
         return row, BacktestReport.model_validate(row["report"])
@@ -5983,18 +6123,18 @@ if nav == "Graph":
                                                  key=lambda k: company_labels[k].lower()),
             format_func=lambda k: ("Whole database" if k == "Whole database"
                                    else company_labels[k]),
-            key="graph_focus",
+            key="graph_focus", persist_state="session",
             help="One company and everything within two hops of it.",
         )
         rels = g2.multiselect(
             "Relationships", list(REL_LABELS),
             default=[r for r in REL_LABELS if r != "follows"],
-            format_func=lambda r: REL_LABELS.get(r, r), key="graph_rels",
+            format_func=lambda r: REL_LABELS.get(r, r), key="graph_rels", persist_state="session",
             help="Watchlist follows are the commonest edge — add them back "
                  "when you want the smart-money layer.",
         )
         cross_only = g3.toggle(
-            "Cross-links only", value=True, key="graph_cross",
+            "Cross-links only", value=True, key="graph_cross", persist_state="session",
             help="Hide investors/people/labs that touch a single company — "
                  "they restate that card's own chips.",
         )
@@ -6065,7 +6205,7 @@ if nav == "Evidence":
         # what made it work, and is that still true.
         _evidence_view = st.sidebar.segmented_control(
             "View", ["Results", "Signals", "Over time"], default="Results",
-            key="evidence_view", label_visibility="collapsed",
+            key="evidence_view", persist_state="session", label_visibility="collapsed",
         ) or "Results"
         _evidence_row, _evidence_report = _evidence_pick_run(_evidence_runs)
         if _evidence_report is not None:
