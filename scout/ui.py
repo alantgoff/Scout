@@ -812,6 +812,9 @@ def _inject_css() -> None:
           white-space:nowrap; }
         .chip.accent { background:var(--butter); color:var(--ink); font-weight:600; }
         .chip.status { background:var(--ink); color:var(--bg); }
+        /* An alert is not a status: "acquired" must not look like "Shortlisted". */
+        .chip.alert { background:var(--bad-soft); color:var(--bad);
+          box-shadow:inset 0 0 0 1px var(--bad-line); }
         .chip.invalid { text-decoration:line-through; opacity:0.55; }
 
         .scorecap { color:var(--muted); font-size:0.7rem; text-transform:uppercase;
@@ -964,7 +967,7 @@ def _tile(label: str, value: str, sub: str = "") -> str:
 
 
 def _chips(items: list[tuple[str, str]]) -> str:
-    """items: (text, css_class) — css_class in {"", "accent", "status"}.
+    """items: (text, css_class) — css_class in {"", "accent", "status", "alert"}.
     Deduped case-insensitively (a tag often repeats the sector or model)."""
     seen: set[str] = set()
     spans = []
@@ -2521,7 +2524,7 @@ def _dossier_chips(lead: Lead, entry: LedgerEntry | None, fresh: bool) -> list[t
     if verdict and verdict.company_status in ("acquired", "merged", "shut_down"):
         label = COMPANY_STATUS_LABELS[verdict.company_status]
         note = verdict.company_status_note.strip()
-        chips.append((f"⚠ {label}" + (f" — {note}" if note else ""), "status"))
+        chips.append((f"⚠ {label}" + (f" — {note}" if note else ""), "alert"))
     if verdict is not None and (g_chip := _grounding_chip(verdict)) is not None:
         chips.append(g_chip)
     status = _status_of(lead)
