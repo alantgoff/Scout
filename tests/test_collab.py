@@ -221,6 +221,22 @@ def test_unread_counts_exclude_your_own_activity(tmp_path: Path) -> None:
     assert store.unread_count("sara@firm.com") == 1
 
 
+def test_mark_read_up_to_only_what_was_shown_and_never_backwards(tmp_path: Path) -> None:
+    """A filtered Activity view marks read only up to what it showed; a
+    stale cursor value can never move the cursor back."""
+    store = make_store(tmp_path, actor="alan@firm.com")
+    store.set_vote("acme", "yes")
+    first = store.latest_event_id()
+    store.set_vote("beta", "pass")
+    store.mark_read("sara@firm.com", up_to=first)
+    assert store.read_cursor("sara@firm.com") == first
+    assert store.unread_count("sara@firm.com") == 1
+    store.mark_read("sara@firm.com")
+    assert store.unread_count("sara@firm.com") == 0
+    store.mark_read("sara@firm.com", up_to=first)  # older — ignored
+    assert store.read_cursor("sara@firm.com") == store.latest_event_id()
+
+
 def test_notification_sweep_is_idempotent(tmp_path: Path) -> None:
     store = make_store(tmp_path)
     store.set_pipeline("acme", status="longlisted")

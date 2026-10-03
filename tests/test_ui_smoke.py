@@ -534,6 +534,9 @@ def test_comment_with_mention_is_stored_and_pinged(tmp_path, monkeypatch) -> Non
     comments = Store(db).comments_for("smoke_founder")
     assert len(comments) == 1
     assert comments[0].mentions == ["sara@firm.com"]
+    # The box clears once posted, so a second click can't double-post.
+    box = next(t for t in at.text_area if t.key == "feeddet_cmt_smoke_founder")
+    assert box.value == ""
     # And the mention pinged Slack with a deep link back to the startup.
     assert sent and "Sara" in sent[0]["text"]
     assert "https://scout.test/?s=smoke_founder" in sent[0]["text"]
@@ -653,7 +656,8 @@ def test_run_button_queues_when_a_worker_is_live(tmp_path, monkeypatch) -> None:
     assert spawned == []  # queued, not spawned
     jobs = Store(db).jobs()
     assert len(jobs) == 1 and jobs[0]["kind"] == "run_pipeline"
-    assert jobs[0]["payload"]["source"] in ("twscrape", "xapi")
+    # No cookies in the test env, so the honest default is the free sources.
+    assert jobs[0]["payload"]["source"] in ("twscrape", "free")
 
 
 class _FakeProc:
@@ -1055,3 +1059,57 @@ def test_crm_write_back_surfaces_and_triage_queues_a_push(tmp_path, monkeypatch)
     assert not at.exception, at.exception[0].message if at.exception else ""
     text = _page_text(at)
     assert "CRM write-back" in text and "Connected: <b>Attio</b>" in text
+
+
+def test_test_digest_sends_without_crashing(tmp_path, monkeypatch) -> None:
+    """"Send a test digest" raised NameError (timedelta never imported)."""
+    db = tmp_path / "digest.db"
+    monkeypatch.setenv("DB_PATH", str(db))
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "")
+    store = seed_store(db)
+    store.set_setting("slack_webhook_url", "https://hooks.slack.test/x")
+    sent: list[dict] = []
+    monkeypatch.setattr("scout.notify._post", lambda url, payload: sent.append(payload))
+    at = AppTest.from_file(str(UI_PATH), default_timeout=30)
+    at.session_state["nav"] = "Thesis"
+    at.run()
+    # The secret is never sent back to the browser.
+    hook = next(t for t in at.text_input if t.key == "set_slack_hook")
+    assert hook.value == "" and "hooks.slack.test" not in (hook.placeholder or "")
+    next(b for b in at.button if b.key == "test_digest").click().run()
+    assert not at.exception, at.exception[0].message if at.exception else ""
+    assert sent
+
+
+def test_filtered_activity_does_not_mark_hidden_events_read(tmp_path, monkeypatch) -> None:
+    db = tmp_path / "act.db"
+    monkeypatch.setenv("DB_PATH", str(db))
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "")
+    monkeypatch.setenv("SCOUT_DEV_USER", "alan@firm.com")
+    store = seed_store(db)
+    store.ensure_user("alan@firm.com", name="Alan")
+    store.set_vote("smoke_founder", "yes", actor="sara@firm.com")
+    store.set_pipeline("nora_builds", status="longlisted", actor="sara@firm.com")
+    at = AppTest.from_file(str(UI_PATH), default_timeout=30)
+    at.session_state["nav"] = "Startups"
+    at.session_state["act_kind"] = "Memos"   # a filter that hides both events
+    at.run()
+    at.session_state["nav"] = "Activity"
+    at.run()
+    assert not at.exception, at.exception[0].message if at.exception else ""
+    assert Store(db).unread_count("alan@firm.com") == 2
+
+
+def test_schedules_show_when_they_will_run(tmp_path, monkeypatch) -> None:
+    db = tmp_path / "sched.db"
+    monkeypatch.setenv("DB_PATH", str(db))
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "")
+    store = seed_store(db)
+    from scout.worker import bootstrap_schedules
+    bootstrap_schedules(store)
+    at = AppTest.from_file(str(UI_PATH), default_timeout=30)
+    at.session_state["nav"] = "Automation"
+    at.run()
+    assert not at.exception, at.exception[0].message if at.exception else ""
+    text = _page_text(at)
+    assert "next in " in text and "next just now" not in text

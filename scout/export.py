@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import csv
+import io
 from datetime import datetime
 from pathlib import Path
 
@@ -73,117 +74,123 @@ def _oneline(text: str, width: int = 140) -> str:
     return text[: width - 1].rstrip() + "…"
 
 
-def write_csv(leads: list[Lead], out_dir: Path, thesis: Thesis | None = None) -> Path:
-    """`thesis` supplies the rubric weights for the deterministic
-    quality_score / scorecard columns; None (legacy callers) leaves them
-    blank."""
+def leads_csv_bytes(leads: list[Lead], thesis: Thesis | None = None) -> bytes:
+    """The leads CSV in memory — the UI downloads it on click. `thesis`
+    supplies the rubric weights for the deterministic quality_score /
+    scorecard columns; None (legacy callers) leaves them blank."""
     # Local import — score imports models only.
     from scout.score import company_quality, scorecard_score
 
+    buf = io.StringIO()
+    writer = csv.DictWriter(buf, fieldnames=CSV_COLUMNS)
+    writer.writeheader()
+    for lead in leads:
+        llm = lead.llm
+        q_score = company_quality(llm, thesis) if thesis is not None else None
+        scorecard = scorecard_score(llm, thesis) if thesis is not None else None
+        sc_result, sc_sections = scorecard if scorecard is not None else (None, [])
+        identity = startup_identity(lead)
+        writer.writerow(
+            {
+                "rank": lead.rank if lead.rank is not None else "",
+                "startup": identity[0] if identity else "",
+                "handle": lead.account.handle,
+                "name": lead.account.name,
+                "company_name": (llm.company_name or "") if llm else "",
+                "company_url": (llm.company_url or "") if llm else "",
+                "url": lead.account.url,
+                "score": lead.score,
+                "customer_type": (llm.customer_type or "") if llm else "",
+                "quality_score": f"{q_score:.0f}" if q_score is not None else "",
+                "scorecard_rubric": sc_result.rubric_key if sc_result else "",
+                "scorecard_band": sc_result.band if sc_result else "",
+                "scorecard_sections": ";".join(
+                    f"{s.key}={s.score:.0f}"
+                    for s in sc_sections if s.score is not None
+                ),
+                "scorecard": (
+                    ";".join(f"{k}={v:.0f}" for k, v in
+                             sorted(llm.scorecard.items(), key=lambda kv: -kv[1]))
+                    if llm else ""
+                ),
+                "scorecard_reasons": (
+                    " | ".join(f"{k}: {r}" for k, r in
+                               sorted(llm.scorecard_reasons.items()))
+                    if llm else ""
+                ),
+                "quality": (
+                    ";".join(f"{k}={v:.2f}" for k, v in
+                             sorted(llm.quality.items(), key=lambda kv: -kv[1]))
+                    if llm else ""
+                ),
+                "quality_reasons": (
+                    " | ".join(f"{k}: {r}" for k, r in sorted(llm.quality_reasons.items()))
+                    if llm else ""
+                ),
+                "product_summary": (llm.product_summary or "") if llm else "",
+                "grounding": (llm.grounding or "") if llm else "",
+                "verification": (llm.verification or "") if llm else "",
+                "thesis_fit": (
+                    f"{llm.thesis_fit:.2f}"
+                    if llm and llm.thesis_fit is not None
+                    else ""
+                ),
+                "fit_reason": llm.fit_reason if llm else "",
+                "value_add_fit": (
+                    f"{llm.value_add_fit:.2f}"
+                    if llm and llm.value_add_fit is not None
+                    else ""
+                ),
+                "value_add_reason": llm.value_add_reason if llm else "",
+                "value_add_levers": (
+                    ";".join(
+                        f"{k}={v:.2f}"
+                        for k, v in sorted(
+                            llm.value_add_levers.items(), key=lambda kv: -kv[1]
+                        )
+                    )
+                    if llm
+                    else ""
+                ),
+                "stage": (llm.stage or "") if llm else "",
+                # Blank rather than "unknown" for an unannounced round:
+                # a spreadsheet filter should treat it as missing data,
+                # which it is, not as a category.
+                "funding_stage": (
+                    (llm.funding_stage or "") if llm
+                    and llm.funding_stage != "unknown" else ""
+                ),
+                "funding_amount": (llm.funding_amount or "") if llm else "",
+                "funding_investors": (
+                    ";".join(llm.funding_investors) if llm else ""
+                ),
+                "company_status": (llm.company_status or "") if llm else "",
+                "company_status_note": llm.company_status_note if llm else "",
+                "hq": (llm.hq or "") if llm else "",
+                "founded_year": (
+                    str(llm.founded_year) if llm and llm.founded_year else ""
+                ),
+                "founders": ";".join(llm.founders) if llm else "",
+                "sector": (llm.sector or "") if llm else "",
+                "subsector": (llm.subsector or "") if llm else "",
+                "business_model": (llm.business_model or "") if llm else "",
+                "tags": ";".join(llm.tags) if llm else "",
+                "one_line_summary": llm.one_line_summary if llm else "",
+                "why_interesting": llm.why_interesting if llm else "",
+                "signals_hit": ";".join(lead.signals_hit),
+                "followed_by": ";".join(lead.account.followed_by),
+                "bio": lead.account.bio,
+                "evidence_links": ";".join(lead.evidence_links),
+            }
+        )
+    return buf.getvalue().encode("utf-8")
+
+
+def write_csv(leads: list[Lead], out_dir: Path, thesis: Thesis | None = None) -> Path:
+    """leads_csv_bytes written to out_dir — the CLI's export."""
     out_dir.mkdir(parents=True, exist_ok=True)
     path = out_dir / f"leads_{_stamp()}.csv"
-    with open(path, "w", newline="", encoding="utf-8") as f:
-        writer = csv.DictWriter(f, fieldnames=CSV_COLUMNS)
-        writer.writeheader()
-        for lead in leads:
-            llm = lead.llm
-            q_score = company_quality(llm, thesis) if thesis is not None else None
-            scorecard = scorecard_score(llm, thesis) if thesis is not None else None
-            sc_result, sc_sections = scorecard if scorecard is not None else (None, [])
-            identity = startup_identity(lead)
-            writer.writerow(
-                {
-                    "rank": lead.rank if lead.rank is not None else "",
-                    "startup": identity[0] if identity else "",
-                    "handle": lead.account.handle,
-                    "name": lead.account.name,
-                    "company_name": (llm.company_name or "") if llm else "",
-                    "company_url": (llm.company_url or "") if llm else "",
-                    "url": lead.account.url,
-                    "score": lead.score,
-                    "customer_type": (llm.customer_type or "") if llm else "",
-                    "quality_score": f"{q_score:.0f}" if q_score is not None else "",
-                    "scorecard_rubric": sc_result.rubric_key if sc_result else "",
-                    "scorecard_band": sc_result.band if sc_result else "",
-                    "scorecard_sections": ";".join(
-                        f"{s.key}={s.score:.0f}"
-                        for s in sc_sections if s.score is not None
-                    ),
-                    "scorecard": (
-                        ";".join(f"{k}={v:.0f}" for k, v in
-                                 sorted(llm.scorecard.items(), key=lambda kv: -kv[1]))
-                        if llm else ""
-                    ),
-                    "scorecard_reasons": (
-                        " | ".join(f"{k}: {r}" for k, r in
-                                   sorted(llm.scorecard_reasons.items()))
-                        if llm else ""
-                    ),
-                    "quality": (
-                        ";".join(f"{k}={v:.2f}" for k, v in
-                                 sorted(llm.quality.items(), key=lambda kv: -kv[1]))
-                        if llm else ""
-                    ),
-                    "quality_reasons": (
-                        " | ".join(f"{k}: {r}" for k, r in sorted(llm.quality_reasons.items()))
-                        if llm else ""
-                    ),
-                    "product_summary": (llm.product_summary or "") if llm else "",
-                    "grounding": (llm.grounding or "") if llm else "",
-                    "verification": (llm.verification or "") if llm else "",
-                    "thesis_fit": (
-                        f"{llm.thesis_fit:.2f}"
-                        if llm and llm.thesis_fit is not None
-                        else ""
-                    ),
-                    "fit_reason": llm.fit_reason if llm else "",
-                    "value_add_fit": (
-                        f"{llm.value_add_fit:.2f}"
-                        if llm and llm.value_add_fit is not None
-                        else ""
-                    ),
-                    "value_add_reason": llm.value_add_reason if llm else "",
-                    "value_add_levers": (
-                        ";".join(
-                            f"{k}={v:.2f}"
-                            for k, v in sorted(
-                                llm.value_add_levers.items(), key=lambda kv: -kv[1]
-                            )
-                        )
-                        if llm
-                        else ""
-                    ),
-                    "stage": (llm.stage or "") if llm else "",
-                    # Blank rather than "unknown" for an unannounced round:
-                    # a spreadsheet filter should treat it as missing data,
-                    # which it is, not as a category.
-                    "funding_stage": (
-                        (llm.funding_stage or "") if llm
-                        and llm.funding_stage != "unknown" else ""
-                    ),
-                    "funding_amount": (llm.funding_amount or "") if llm else "",
-                    "funding_investors": (
-                        ";".join(llm.funding_investors) if llm else ""
-                    ),
-                    "company_status": (llm.company_status or "") if llm else "",
-                    "company_status_note": llm.company_status_note if llm else "",
-                    "hq": (llm.hq or "") if llm else "",
-                    "founded_year": (
-                        str(llm.founded_year) if llm and llm.founded_year else ""
-                    ),
-                    "founders": ";".join(llm.founders) if llm else "",
-                    "sector": (llm.sector or "") if llm else "",
-                    "subsector": (llm.subsector or "") if llm else "",
-                    "business_model": (llm.business_model or "") if llm else "",
-                    "tags": ";".join(llm.tags) if llm else "",
-                    "one_line_summary": llm.one_line_summary if llm else "",
-                    "why_interesting": llm.why_interesting if llm else "",
-                    "signals_hit": ";".join(lead.signals_hit),
-                    "followed_by": ";".join(lead.account.followed_by),
-                    "bio": lead.account.bio,
-                    "evidence_links": ";".join(lead.evidence_links),
-                }
-            )
+    path.write_bytes(leads_csv_bytes(leads, thesis))
     return path
 
 
@@ -253,17 +260,24 @@ def pipeline_rows(store, thesis: Thesis | None = None) -> list[dict]:
     return rows
 
 
+def pipeline_csv_bytes(rows: list[dict]) -> bytes:
+    """The deal-flow CSV in memory — what the UI's download button serves,
+    built only when someone clicks. User-defined database columns present in
+    the rows are appended after the fixed columns."""
+    buf = io.StringIO()
+    extra = [k for k in (rows[0] if rows else {}) if k not in PIPELINE_COLUMNS]
+    writer = csv.DictWriter(buf, fieldnames=PIPELINE_COLUMNS + extra)
+    writer.writeheader()
+    writer.writerows(rows)
+    return buf.getvalue().encode("utf-8")
+
+
 def write_pipeline_csv(rows: list[dict], out_dir: Path) -> Path:
-    """Deal-flow export (status, notes, outreach, briefs) — CRM-import-ready.
-    User-defined database columns present in the rows are appended after the
-    fixed columns."""
+    """Deal-flow export (status, notes, outreach, briefs) — CRM-import-ready,
+    written to out_dir (the CLI's form of pipeline_csv_bytes)."""
     out_dir.mkdir(parents=True, exist_ok=True)
     path = out_dir / f"pipeline_{_stamp()}.csv"
-    extra = [k for k in (rows[0] if rows else {}) if k not in PIPELINE_COLUMNS]
-    with open(path, "w", newline="", encoding="utf-8") as f:
-        writer = csv.DictWriter(f, fieldnames=PIPELINE_COLUMNS + extra)
-        writer.writeheader()
-        writer.writerows(rows)
+    path.write_bytes(pipeline_csv_bytes(rows))
     return path
 
 

@@ -2414,23 +2414,33 @@ class Store:
         """Events since this member's read cursor, excluding their own."""
         if not self.db["events"].exists():
             return 0
-        cursor = 0
-        if self.db["read_cursors"].exists():
-            row = self.db.execute(
-                "select last_event_id from read_cursors where actor = ?", [actor]
-            ).fetchone()
-            cursor = int(row[0]) if row and row[0] else 0
+        cursor = self.read_cursor(actor)
         return int(self.db.execute(
             "select count(*) from events where id > ? and actor != ?",
             [cursor, actor],
         ).fetchone()[0])
 
-    def mark_read(self, actor: str) -> None:
+    def read_cursor(self, actor: str) -> int:
+        """The newest event id this member has seen (0 = none)."""
+        if not self.db["read_cursors"].exists():
+            return 0
+        row = self.db.execute(
+            "select last_event_id from read_cursors where actor = ?", [actor]
+        ).fetchone()
+        return int(row[0]) if row and row[0] else 0
+
+    def mark_read(self, actor: str, up_to: int | None = None) -> None:
+        """Advance this member's read cursor to `up_to` (default: the newest
+        event). Never moves it backwards. Callers pass what was actually
+        shown — a filtered view must not mark hidden events as read."""
+        target = self.latest_event_id() if up_to is None else int(up_to)
         with self.write_tx():
+            if target <= self.read_cursor(actor):
+                return
             self.db["read_cursors"].upsert(
                 {
                     "actor": actor,
-                    "last_event_id": self.latest_event_id(),
+                    "last_event_id": target,
                     "updated_at": datetime.now(timezone.utc).isoformat(),
                 },
                 pk="actor",

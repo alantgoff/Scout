@@ -12,6 +12,7 @@ now the same code for both callers.
 from __future__ import annotations
 
 import asyncio
+import os
 import re
 from urllib.parse import urlparse
 
@@ -134,6 +135,10 @@ def generate_memo(
         return {"handle": handle, "written": False,
                 "reason": "generation fell back to the skeleton; kept the "
                           "existing memo"}
+    # Who asked (the worker runs this with SCOUT_ACTOR set to the member).
+    requester = os.environ.get("SCOUT_ACTOR") or store.actor or ""
+    if requester and not requester.startswith(("agent:", "system:", "schedule:")):
+        meta = {**(meta or {}), "requested_by": requester}
     store.set_memo(handle, memo, meta=meta, kind="generated", actor=actor)
     return {
         "handle": handle, "written": True, "is_ai": is_ai,

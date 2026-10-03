@@ -42,7 +42,7 @@ import signal
 import subprocess
 import sys
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -109,7 +109,7 @@ _slugify_key = slugify_key
 _editor_changes = editor_changes
 _attr_display = attr_display
 _DB_COMPUTED_LABELS = DB_COMPUTED_LABELS
-from scout.export import memo_pdf_bytes, pipeline_rows, write_pipeline_csv
+from scout.export import leads_csv_bytes, memo_pdf_bytes, pipeline_csv_bytes, pipeline_rows
 from scout.hindsight import default_limitations as hindsight_limitations
 from scout.hindsight import render_report as hindsight_report_markdown
 from scout.insights import (
@@ -135,6 +135,7 @@ from scout.models import (
     LLMVerdict,
 )
 from scout.outreach import CHANNELS, draft_outreach
+from scout.present import relative_time, run_label
 from scout import rubric as rubric_mod
 from scout.score import (
     apply_override,
@@ -544,7 +545,14 @@ def _inject_css() -> None:
           color:var(--ink); white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
         .frow-sub { color:var(--muted); font-size:11.5px; margin-top:1px; white-space:nowrap;
           overflow:hidden; text-overflow:ellipsis; }
-        .frow-tags { display:flex; gap:5px; margin-top:5px; }
+        /* One line, never more: the row is a fixed-height button, so anything
+           that wraps spills into the next row (votes used to). */
+        .frow-tags { display:flex; gap:5px; margin-top:5px; flex-wrap:nowrap;
+          overflow:hidden; align-items:center; }
+        .frow-tags .stance-inline { display:inline-flex; gap:3px; align-items:center;
+          flex-shrink:0; }
+        .frow-tags .stance-badge { width:18px; height:18px; font-size:9.5px; }
+        .frow-tags .stance-split { padding:1px 6px; font-size:9.5px; }
         .frow-tag { font-size:9px; letter-spacing:.06em; text-transform:uppercase;
           font-weight:600; padding:2px 7px; border-radius:var(--r-pill); border:1px solid var(--hair);
           color:var(--ink-2); white-space:nowrap; }
@@ -554,7 +562,7 @@ def _inject_css() -> None:
         .frow-bar { height:5px; background:var(--track); border-radius:var(--r-pill); overflow:hidden;
           margin-top:3px; }
         .frow-bar > i { display:block; height:100%; background:var(--accent); }
-        .frow-bar.gold > i { background:var(--gold); }
+        .frow-bar.gold > i { background:var(--fill); }
         .frow-sc { font-family:var(--serif); font-size:24px; font-weight:600; text-align:right;
           color:var(--ink); }
 
@@ -985,30 +993,8 @@ def _initials(name: str, handle: str) -> str:
 
 
 def _ago(ts: str | datetime | None) -> str:
-    """Compact relative time ('just now', '2h ago').
-
-    Accepts an ISO string (store rows) or a datetime (pydantic models like
-    Event/Comment parse their timestamps), so callers never have to convert.
-    """
-    if not ts:
-        return ""
-    if isinstance(ts, datetime):
-        then = ts
-    else:
-        try:
-            then = datetime.fromisoformat(ts)
-        except (ValueError, TypeError):
-            return ""
-    if then.tzinfo is None:
-        then = then.replace(tzinfo=timezone.utc)
-    seconds = (datetime.now(timezone.utc) - then).total_seconds()
-    if seconds < 90:
-        return "just now"
-    if seconds < 3600:
-        return f"{int(seconds // 60)}m ago"
-    if seconds < 86400 * 2:
-        return f"{int(seconds // 3600)}h ago"
-    return f"{int(seconds // 86400)}d ago"
+    """Compact relative time — "5m ago" or "in 10h" (scout.present)."""
+    return relative_time(ts)
 
 
 def _to_lines(items: list[str]) -> str:
@@ -1219,8 +1205,10 @@ def _estimate_scan(kind: str, max_accounts: int | None = None,
 # collapses on narrow viewports, which leaves that page looking like it simply
 # has no controls — the reopen affordance is one small arrow. Forcing expanded
 # means every fresh load starts usable; collapsing it by hand still works.
+# "auto": open beside the page on a desktop, tucked away on a phone (where
+# an open rail covered the whole list).
 st.set_page_config(page_title="Scout", page_icon="🔭", layout="wide",
-                   initial_sidebar_state="expanded")
+                   initial_sidebar_state="auto")
 _inject_css()
 
 # Toasts queued before an st.rerun() would be lost with a direct call —
@@ -1487,9 +1475,10 @@ def _my_stance(handle: str) -> str:
     return ""
 
 
-def _stance_chips_html(handle: str) -> str:
+def _stance_chips_html(handle: str, *, inline: bool = False) -> str:
     """Each partner's stance as an initial-badge row — who thinks what, at a
-    glance, without opening anything."""
+    glance, without opening anything. `inline` returns a span that sits in
+    a one-line tag row (the feed row) instead of a block of its own."""
     summary = VOTE_SUMMARIES.get(handle.lower())
     if summary is None:
         return ""
@@ -1499,6 +1488,8 @@ def _stance_chips_html(handle: str) -> str:
         for actor, stance in sorted(summary.by_actor.items())
     )
     split = '<span class="stance-split">Split</span>' if summary.contested else ""
+    if inline:
+        return f'<span class="stance-inline">{badges}{split}</span>'
     return f'<div class="stance-row">{badges}{split}</div>'
 
 
@@ -1632,6 +1623,15 @@ with _hdr_find:
 
 with _hdr_r:
     with st.container(key="topnav"):
+        # Opening Activity (unfiltered) reads everything — mark it BEFORE the
+        # badge is counted, so the badge doesn't lag a click behind. The old
+        # cursor is kept so this visit still highlights what was new.
+        if (st.session_state.get("nav") == "Activity"
+                and st.session_state.get("nav_last") != "Activity"):
+            st.session_state["act_seen_to"] = store.read_cursor(ACTOR)
+            if (st.session_state.get("act_who", "Everyone") == "Everyone"
+                    and st.session_state.get("act_kind", "Everything") == "Everything"):
+                store.mark_read(ACTOR)
         _unread = store.unread_count(ACTOR)
         nav = st.segmented_control(
             "Page", PAGES, key="nav", label_visibility="collapsed",
@@ -1661,12 +1661,12 @@ def _scan_indicator() -> None:
     scan = store.current_scan()
     if not scan:
         return
-    kind = scan.get("kind") or "scan"
+    label = run_label(scan.get("kind"))
     detail = f' · {scan["detail"]}' if scan.get("detail") else ""
     if scan.get("status") == "running":
         st.markdown(
             f'<div class="scanbar"><span class="scandot"></span>'
-            f'<b>{_e(kind.capitalize())} running</b> — {_e(scan.get("phase") or "…")}'
+            f'<b>{_e(label)} in progress</b> — {_e(scan.get("phase") or "…")}'
             f'{_e(detail)} · started {_ago(scan.get("started_at"))} · '
             f'live progress on the <b>Thesis</b> page</div>',
             unsafe_allow_html=True,
@@ -1675,14 +1675,18 @@ def _scan_indicator() -> None:
         outcome = "finished" if scan.get("status") == "done" else "failed"
         st.markdown(
             f'<div class="scanbar {"" if outcome == "finished" else "failed"}">'
-            f'<b>{_e(kind.capitalize())} {outcome}</b> {_ago(scan.get("finished_at"))}'
+            f'<b>{_e(label)} {outcome}</b> {_ago(scan.get("finished_at"))}'
             f'{_e(detail)}</div>',
             unsafe_allow_html=True,
         )
-        if scan.get("status") == "done":
-            if st.button("Refresh results", key="scan_refresh"):
-                st.session_state["page_loaded_at"] = datetime.now(timezone.utc).isoformat()
-                st.rerun(scope="app")
+        # Done → refresh to see results; failed → dismiss. Either way the
+        # banner goes away once acknowledged (it used to stay all session
+        # after a failure).
+        done = scan.get("status") == "done"
+        if st.button("Refresh results" if done else "Dismiss",
+                     key="scan_refresh" if done else "scan_dismiss"):
+            st.session_state["page_loaded_at"] = datetime.now(timezone.utc).isoformat()
+            st.rerun(scope="app")
 
 
 _scan_indicator()
@@ -2257,23 +2261,36 @@ def _render_comments(lead: Lead, key_ns: str, memo_version_id: int | None = None
             f'<div class="cmt-body">{_e(comment.body)}</div></div>',
             unsafe_allow_html=True,
         )
-    draft = st.text_area(
-        "Add a comment", key=f"{key_ns}_cmt_{hk}", height=72,
+    box_key = f"{key_ns}_cmt_{hk}"
+    st.text_area(
+        "Add a comment", key=box_key, height=72,
         placeholder="Context, a question, or @mention a partner…",
         label_visibility="collapsed",
     )
-    if st.button("Comment", key=f"{key_ns}_cmtbtn_{hk}", disabled=not draft.strip()):
-        mentions = parse_mentions(draft, USERS)
-        store.add_comment(hk, draft, mentions=mentions,
-                          memo_version_id=memo_version_id)
-        if mentions:
-            # Inline, not queued: a mention is worth a real-time ping, and
-            # post_slack swallows its own failures.
-            event = store.events(handle=hk, verbs=["comment_added"], limit=1)
-            if event:
-                notify.ping_mentions(store, event[0], display_name(lead))
-        st.session_state["toast"] = "Comment added"
-        st.rerun()
+    # A callback, not an if-block: it runs before the next render, which is
+    # the only moment the text box may be cleared — so a posted comment
+    # never sits there inviting a second click. The button is never
+    # disabled: a text area commits on blur, so a disabled button ate the
+    # first click after typing.
+    st.button("Comment", key=f"{key_ns}_cmtbtn_{hk}", on_click=_post_comment,
+              args=(lead, box_key, memo_version_id))
+
+
+def _post_comment(lead: Lead, box_key: str, memo_version_id: int | None) -> None:
+    draft = (st.session_state.get(box_key) or "").strip()
+    if not draft:
+        return
+    hk = lead.account.handle.lower()
+    mentions = parse_mentions(draft, USERS)
+    store.add_comment(hk, draft, mentions=mentions, memo_version_id=memo_version_id)
+    if mentions:
+        # Inline, not queued: a mention is worth a real-time ping, and
+        # post_slack swallows its own failures.
+        event = store.events(handle=hk, verbs=["comment_added"], limit=1)
+        if event:
+            notify.ping_mentions(store, event[0], display_name(lead))
+    st.session_state[box_key] = ""
+    st.session_state["toast"] = "Comment added"
 
 
 def _render_assignment(lead: Lead, key_ns: str) -> None:
@@ -2282,22 +2299,29 @@ def _render_assignment(lead: Lead, key_ns: str) -> None:
     current = (pipeline.get(hk, {}) or {}).get("assignee") or ""
     options = [""] + [u["id"] for u in USERS]
     labels = {"": "Unassigned", **{u["id"]: _who(u["id"]) for u in USERS}}
-    picked = st.selectbox(
+    # Keyed on the CURRENT owner: when a partner reassigns, the key changes
+    # and the select remounts showing their choice. With a fixed key the
+    # widget kept its old value and "picked != current" wrote it back over
+    # the partner's change.
+    st.selectbox(
         "Owner", options,
         index=options.index(current) if current in options else 0,
         format_func=lambda uid: labels.get(uid, uid),
-        key=f"{key_ns}_assign_{hk}",
+        key=f"{key_ns}_assign_{hk}_{current or 'none'}",
+        on_change=_assign_changed,
+        args=(lead, f"{key_ns}_assign_{hk}_{current or 'none'}"),
     )
-    if picked != current:
-        store.set_assignment(lead.account.handle, picked or None)
-        if picked and picked != ACTOR:
-            event = store.events(handle=hk, verbs=["assigned"], limit=1)
-            if event:
-                notify.ping_assignment(store, event[0], display_name(lead))
-        st.session_state["toast"] = (
-            f"Assigned to {_who(picked)}" if picked else "Owner cleared"
-        )
-        st.rerun()
+
+
+def _assign_changed(lead: Lead, widget_key: str) -> None:
+    picked = st.session_state.get(widget_key) or ""
+    hk = lead.account.handle.lower()
+    store.set_assignment(lead.account.handle, picked or None)
+    if picked and picked != ACTOR:
+        event = store.events(handle=hk, verbs=["assigned"], limit=1)
+        if event:
+            notify.ping_assignment(store, event[0], display_name(lead))
+    st.session_state["toast"] = f"Assigned to {_who(picked)}" if picked else "Owner cleared"
 
 
 def _lead_card(
@@ -2632,31 +2656,31 @@ def _feed_row(lead: Lead, selected: bool) -> bool:
     fit_pct = f"{fit:.0%}" if fit is not None else "—"
     fit_w = fit * 100 if fit is not None else 0
     gold = " gold" if (fit is not None and fit >= 0.7) else ""
-    # 2-4 orientation tags: B2B/B2C, funding round, funnel status (or stage).
+    # Orientation tags in priority order — the row is one line, so when it
+    # fills, the least useful tag is the one that doesn't show: where it is
+    # in the funnel (or its stage), a strong warm path ("we can reach them"
+    # changes what gets opened first), the round ("already priced past our
+    # entry point?"), then B2B/B2C.
     tags: list[str] = []
-    if verdict and verdict.customer_type:
-        tags.append(CUSTOMER_TYPE_LABEL.get(verdict.customer_type, verdict.customer_type))
-    # The round earns a slot whenever it is known: "is this already priced,
-    # and past our entry point" is the question a scan of the list should
-    # answer without opening anything.
-    round_label = _funding_label(verdict, with_amount=False)
-    if round_label:
-        tags.append(round_label)
     status = _status_of(lead)
     if status != "new":
         tags.append(STATUS_LABELS.get(status, status))
     elif verdict and verdict.stage:
         tags.append(STAGE_LABEL.get(verdict.stage, verdict.stage))
-    # A strong warm path earns a tag in the scan list: "we can reach them"
-    # changes what gets opened first.
     warm_paths = _warm_paths_of(lead)
     if warm_paths and warm_paths[0].strength >= 2:
         via = warm_paths[0].via
-        tags = tags[:3] + [f"🤝 {via if len(via) <= 18 else via[:17] + '…'}"]
-    tag_html = "".join(f'<span class="frow-tag">{_e(t)}</span>' for t in tags[:4])
-    # Partners' stances ride along in the scan list: a split is the thing you
-    # most want to notice without opening anything.
-    tag_html += _stance_chips_html(hk)
+        tags.append(f"🤝 {via if len(via) <= 18 else via[:17] + '…'}")
+    round_label = _funding_label(verdict, with_amount=False)
+    if round_label:
+        tags.append(round_label)
+    if verdict and verdict.customer_type:
+        tags.append(CUSTOMER_TYPE_LABEL.get(verdict.customer_type, verdict.customer_type))
+    # Partners' stances ride along first: a split is the thing you most want
+    # to notice without opening anything. They take room, so fewer tags fit.
+    stances = _stance_chips_html(hk, inline=True)
+    tag_html = stances + "".join(
+        f'<span class="frow-tag">{_e(t)}</span>' for t in tags[:2 if stances else 4])
     html = (
         f'<div class="frow">'
         f'<div class="frow-av">{_e(_initials(title, account.handle))}</div>'
@@ -2914,10 +2938,9 @@ def _render_startup_feed() -> None:
                 unsafe_allow_html=True,
             )
 
-        strategies = store.list_strategies()
         # Controls live in the left rail (sidebar) so the feed column is just
         # results — not a stack of segmented toggles stacked above every card.
-        # The rail header + Latest-run/Database switch are rendered by the
+        # The rail header + Feed/Database switch are rendered by the
         # nav-level block before this runs.
         rail = st.sidebar
         with rail:
@@ -3199,15 +3222,17 @@ def _render_startup_feed() -> None:
                     st.rerun()
                 more = (f"Show more ({len(display) - limit} remaining)", _show_more)
             _render_cockpit(page_leads, "feed_selected", more=more)
-
-        out_dir = PROJECT_ROOT / settings.out_dir
-        artifacts = sorted(out_dir.glob("*"), key=lambda p: p.stat().st_mtime, reverse=True)[:3]
-        if artifacts:
+            # The view as you filtered it, built only when clicked. (This used
+            # to list the newest files in the server's out/ folder — files a
+            # deployed workspace's members never produced or asked for.)
+            view_leads = [lead for lead, _e, _s in display]
             st.write("")
-            st.markdown('<div class="subtle">Export</div>', unsafe_allow_html=True)
-            for col, path in zip(st.columns(max(len(artifacts), 3)), artifacts):
-                col.download_button(path.name, path.read_bytes(), file_name=path.name,
-                                    use_container_width=True)
+            st.download_button(
+                f"Download this view as CSV ({len(view_leads)})",
+                data=lambda: leads_csv_bytes(view_leads, thesis),
+                file_name=f"startups_{datetime.now():%Y%m%d}.csv",
+                mime="text/csv", on_click="ignore", key="feed_csv",
+            )
 
 
 # ============================================================ LONGLIST · SHORTLIST
@@ -3314,13 +3339,13 @@ if nav == "Shortlist":
         _render_cockpit(sl_leads, sel_key="sl_selected")
 
         st.write("")
-        export_rows = pipeline_rows(store, thesis)
-        if export_rows:
-            export_path = write_pipeline_csv(export_rows, PROJECT_ROOT / settings.out_dir)
-            st.download_button(
-                f"Export pipeline CSV ({len(export_rows)} leads)",
-                export_path.read_bytes(), file_name=export_path.name,
-            )
+        # Built on click — nothing is written to the server per render.
+        st.download_button(
+            "Download pipeline CSV",
+            data=lambda: pipeline_csv_bytes(pipeline_rows(store, thesis)),
+            file_name=f"pipeline_{datetime.now():%Y%m%d}.csv",
+            mime="text/csv", on_click="ignore", key="pipeline_csv",
+        )
 
 
 # ============================================================ MEMO
@@ -3492,6 +3517,9 @@ def _generate_memo(handle: str) -> None:
     # Through set_memo, not set_pipeline: every generation appends an
     # immutable version, so a regeneration can no longer destroy a human's
     # edits — the previous text stays restorable.
+    # The author stays the agent (the words are its); who asked rides in
+    # meta, so history reads "generated by Scout for Ada".
+    meta = {**(meta or {}), "requested_by": ACTOR}
     store.set_memo(handle, memo, meta=meta, kind="generated", actor="agent:memo")
     depth_label = MEMO_DEPTH_LABEL.get(depth, depth)
     st.session_state["toast"] = (
@@ -3611,8 +3639,9 @@ if nav == "Memos":
         editing = st.session_state.get("memo_editing") == pick
 
         a1, a2, a3, a4, _asp = st.columns([1.5, 0.9, 1.3, 1.05, 1.25])
-        regen_help = ("Regenerating rewrites the memo from the current evidence — "
-                      "your manual edits are overwritten." if existing_memo else None)
+        regen_help = ("Writes a new version from the current evidence. Your "
+                      "current version — edits included — stays in Version "
+                      "history and can be restored." if existing_memo else None)
         if a1.button("Regenerate memo" if existing_memo else "Generate memo",
                      type="primary", disabled=picked_lead is None, help=regen_help,
                      key="memo_generate"):
@@ -3733,6 +3762,12 @@ if nav == "Memos":
                     store.set_memo_review(pick, "requested")
                     st.session_state["toast"] = "Review requested"
                     st.rerun()
+                if review_status == "changes_requested":
+                    r3.markdown(
+                        f'<div class="subtle" style="padding-top:8px">Changes requested '
+                        f'by <b>{_e(_who(picked_row.get("memo_reviewed_by") or ""))}</b> '
+                        f'{_e(_ago(picked_row.get("memo_reviewed_at")))} — see the '
+                        'discussion below.</div>', unsafe_allow_html=True)
             elif review_status == "requested":
                 requester = picked_row.get("memo_review_requested_by") or ""
                 # You can approve your own memo in a two-person firm — the
@@ -3763,6 +3798,12 @@ if nav == "Memos":
                 st.markdown(
                     f'<div class="subtle">Approved by <b>{_e(reviewer)}</b> {_e(when)}'
                     f'{note}</div>', unsafe_allow_html=True)
+                # An approval pins a version; once the memo moves on, the
+                # sign-off is stale and needs a way back into review.
+                if drifted and st.button("Request re-review", key="memo_rereview"):
+                    store.set_memo_review(pick, "requested")
+                    st.session_state["toast"] = "Re-review requested"
+                    st.rerun()
 
             if len(versions) > 1:
                 with st.expander(f"Version history ({len(versions)})"):
@@ -3779,7 +3820,11 @@ if nav == "Memos":
                         v1.markdown(
                             f'<div class="act-row"><div class="act-what">'
                             f'<b>v{version.version_no}</b> · {_e(version.kind)} by '
-                            f'{_e(_who(version.author))}</div>'
+                            f'{_e(_who(version.author))}'
+                            + (f' for {_e(_who(version.meta["requested_by"]))}'
+                               if (version.meta or {}).get("requested_by")
+                               and version.author != version.meta["requested_by"] else "")
+                            + '</div>'
                             f'<div class="act-when">{_e(_ago(stamp))}</div></div>',
                             unsafe_allow_html=True,
                         )
@@ -3801,23 +3846,37 @@ if nav == "Memos":
 
         st.write("")
         with st.expander("Outreach draft"):
-            channel = st.selectbox("Channel", list(CHANNELS))
-            if st.button("Draft with AI", disabled=picked_lead is None):
+            channels = list(CHANNELS)
+            saved_channel = picked_row.get("channel") or ""
+            channel = st.selectbox(
+                "Channel", channels, key=f"outreach_ch_{pick}",
+                index=channels.index(saved_channel) if saved_channel in channels else 0)
+            msg_key = f"outreach_msg_{pick}"
+            saved_msg = picked_row.get("outreach") or ""
+            typed = st.session_state.get(msg_key, saved_msg)
+            unsaved = typed.strip() and typed.strip() != saved_msg.strip()
+            if st.button("Draft with AI", key=f"outreach_draft_{pick}",
+                         disabled=picked_lead is None,
+                         help=("Replaces your unsaved message — save it first to keep it."
+                               if unsaved else "Drafts a first-touch message for this channel.")):
                 with st.spinner("Drafting…"):
                     message, is_ai = draft_outreach(picked_lead, thesis, settings, channel)
                 store.set_pipeline(pick, outreach=message, channel=channel)
-                if not is_ai:
-                    st.info("No Anthropic key — used a template.")
+                st.session_state[msg_key] = message
+                st.session_state["toast"] = (
+                    "Drafted with AI." if is_ai else
+                    "No Anthropic key — drafted from the template.")
                 st.rerun()
             if picked_row.get("outreach_at"):
                 st.markdown(f'<div class="subtle">Drafted {_ago(picked_row["outreach_at"])}</div>',
                             unsafe_allow_html=True)
-            draft = st.text_area("Message", value=picked_row.get("outreach") or "",
+            draft = st.text_area("Message", value=saved_msg, key=msg_key,
                                  height=170, label_visibility="collapsed",
                                  placeholder="Draft with AI, or write your own…")
-            if st.button("Save message"):
+            if st.button("Save message", key=f"outreach_save_{pick}"):
                 store.set_pipeline(pick, outreach=draft, channel=channel)
-                st.success("Saved.")
+                st.session_state["toast"] = "Message saved."
+                st.rerun()
 
 
 # ============================================================ THESIS
@@ -3912,9 +3971,19 @@ if nav == "Thesis":
                 'you review before anything is saved.</div>',
                 unsafe_allow_html=True)
     description = st.text_area("Thesis", value=thesis.thesis, height=90,
+                               key=f"thesis_statement_{ACTIVE_THESIS_ID}",
                                label_visibility="collapsed",
                                placeholder="e.g. Technical founders leaving top AI labs to build vertical agents on proprietary data…")
-    generate_col, _ = st.columns([1.6, 4])
+    generate_col, save_col, _ = st.columns([1.6, 1.2, 2.8])
+    # Saving the statement on its own: refining a sentence shouldn't require
+    # an AI redesign of the whole config (edits used to be lost unless the
+    # designer ran and its proposal was applied).
+    statement_changed = description.strip() != (thesis.thesis or "").strip()
+    if save_col.button("Save statement", key="thesis_statement_save",
+                       disabled=not statement_changed or not description.strip()):
+        _save_thesis(thesis.model_copy(update={"thesis": description.strip()}))
+        st.session_state["toast"] = "Thesis statement saved."
+        st.rerun()
     # No text required: an empty box designs a strategy from scratch (or from
     # the saved thesis, which the agent gets as context) — same as message
     # generation, which never needed the box filled either.
@@ -4031,25 +4100,32 @@ if nav == "Thesis":
 
     # --- Run --------------------------------------------------------------------
     st.markdown('<div class="section-title">Run discovery</div>'
-                '<div class="section-sub">X scraping plus the free sources (GitHub, Hacker News, '
-                'RSS, SEC Form D, YC) unless you pick the paid X API or leave X out. Runs are '
-                'incremental — recently scored accounts are skipped.</div>',
+                '<div class="section-sub">The free sources (GitHub, Hacker News, RSS, SEC '
+                'Form D, YC, arXiv), plus X when it\'s connected. Runs are incremental — '
+                'recently scored startups are skipped.</div>',
                 unsafe_allow_html=True)
     r1, r2, r3, r4 = st.columns([1.4, 1, 1, 1])
+    # Default to what will actually run: without X cookies the free X
+    # scraper can't start, so "No X" is the honest default (it used to say
+    # "twscrape (free)" and then explain it wouldn't use X).
+    x_connected = bool(settings.tw_cookies and Path(settings.tw_cookies).exists())
     with r1:
-        source = st.segmented_control("Source",
-                                      ["twscrape (free)", "no X", "xapi (paid)"],
-                                      default="twscrape (free)")
+        source = st.segmented_control(
+            "Source", ["X (free scraper)", "No X", "X API (paid)"],
+            default="X (free scraper)" if x_connected else "No X",
+            required=True, key="run_source",
+            help="The free sources (GitHub, Hacker News, RSS, SEC Form D, YC, "
+                 "arXiv) always run. X adds the query bank, bio search and the "
+                 "investor follow graph.")
     with r2:
         max_accounts = st.number_input("Max accounts", 10, 2000, settings.max_accounts, step=10)
     with r3:
         min_score_run = st.number_input("Min score", 0, 100, 0, step=5)
     with r4:
         ttl = st.number_input("Skip if scored < N days", 0, 90, settings.ttl_days)
-    paid_run = "xapi" in (source or "")
-    run_source = "xapi" if paid_run else ("free" if source == "no X" else "twscrape")
-    if run_source == "twscrape" and not (
-            settings.tw_cookies and Path(settings.tw_cookies).exists()):
+    paid_run = source == "X API (paid)"
+    run_source = "xapi" if paid_run else ("free" if source == "No X" else "twscrape")
+    if run_source == "twscrape" and not x_connected:
         st.markdown('<div class="subtle">X isn\'t connected (no <code>TW_COOKIES</code>) — '
                     'this run will use the free sources only.</div>',
                     unsafe_allow_html=True)
@@ -4139,7 +4215,8 @@ if nav == "Thesis":
                     "keywords": _from_lines(keywords), "target_bios": _from_lines(target_bios),
                     "launch_phrases": _from_lines(launch_phrases), "sectors": _from_lines(sectors),
                     "disqualifiers": _from_lines(disqualifiers)}))
-                st.success("Saved."); st.rerun()
+                st.session_state["toast"] = "Targeting saved."
+                st.rerun()
 
     with st.expander("Query bank — X searches and bio search"):
         # The report card first, the editors second: which of these queries
@@ -4188,7 +4265,8 @@ if nav == "Thesis":
                     "searches_hiring": _from_lines(s_hiring),
                     "searches_launch": _from_lines(s_launch),
                     "bio_searches": _from_lines(bio_searches)}), SEEDS_PATH)
-                st.success("Saved."); st.rerun()
+                st.session_state["toast"] = "Query bank saved."
+                st.rerun()
 
     with st.expander("Watchlist & discovery — follow-graph, GitHub, lists"):
         # Source yield first: which channels have produced companies the
@@ -4259,7 +4337,8 @@ if nav == "Thesis":
                     "rss_feeds": _from_lines(rss_feeds),
                     "sec_industries": _from_lines(sec_industries),
                     "lists": _from_lines(lists)}), SEEDS_PATH)
-                st.success("Saved."); st.rerun()
+                st.session_state["toast"] = "Watchlist & discovery saved."
+                st.rerun()
 
     # ---- Your taste: the same contrast machinery, run over YOUR votes.
     # Firm triage is shared state; a vote is a named judgment, so this is the
@@ -4317,12 +4396,19 @@ if nav == "Thesis":
             'overnight. Mentions and assignments ping immediately.</div>',
             unsafe_allow_html=True,
         )
+        # The webhook is a secret: never sent back to the browser. The field
+        # starts empty; typing a URL replaces the saved one, leaving it blank
+        # keeps it. (It used to be pre-filled — the whole secret sat in the
+        # page as a password field's value.)
+        saved_hook = store.get_setting("slack_webhook_url") or ""
         webhook = st.text_input(
-            "Slack incoming webhook URL",
-            value=store.get_setting("slack_webhook_url") or "",
+            "Slack incoming webhook URL", value="",
             type="password", key="set_slack_hook",
-            help="Slack → Apps → Incoming Webhooks. The URL is a secret: it "
-                 "is stored server-side and never rendered back in full.",
+            placeholder=(f"saved · …{saved_hook[-4:]} — paste a new URL to replace it"
+                         if saved_hook else "https://hooks.slack.com/services/…"),
+            help="Slack → Apps → Incoming Webhooks. Stored server-side; "
+                 "never shown again once saved.",
+            disabled=not IS_ADMIN,
         )
         base_url = st.text_input(
             "App base URL",
@@ -4330,6 +4416,7 @@ if nav == "Thesis":
             placeholder="https://scout.yourfund.com", key="set_base_url",
             help="Used to build deep links in Slack messages, so a digest "
                  "line opens the right startup.",
+            disabled=not IS_ADMIN,
         )
         threshold = st.slider(
             "Digest score threshold", 0, 100,
@@ -4337,16 +4424,22 @@ if nav == "Thesis":
             key="set_digest_threshold",
             help="Only startups scoring at least this much appear in the "
                  "digest as new candidates.",
+            disabled=not IS_ADMIN,
         )
-        n1, n2, _nsp = st.columns([1, 1.2, 3])
-        if n1.button("Save notifications", type="primary", key="save_notify"):
-            store.set_setting("slack_webhook_url", webhook.strip())
+        if not IS_ADMIN:
+            st.markdown('<div class="subtle">Firm-wide — an admin changes these.</div>',
+                        unsafe_allow_html=True)
+        n1, n2, n3, _nsp = st.columns([1, 1.2, 1, 2])
+        if n1.button("Save notifications", type="primary", key="save_notify",
+                     disabled=not IS_ADMIN):
+            if webhook.strip():
+                store.set_setting("slack_webhook_url", webhook.strip())
             store.set_setting("app_base_url", base_url.strip())
             store.set_setting("digest_score_threshold", str(threshold))
             st.session_state["toast"] = "Notification settings saved"
             st.rerun()
-        if n2.button("Send a test digest", key="test_digest",
-                     disabled=not (webhook or "").strip()):
+        if n2.button("Send a test digest", key="test_digest", disabled=not saved_hook,
+                     help="Posts the last 24 hours to the saved webhook."):
             since = datetime.now(timezone.utc) - timedelta(hours=24)
             data = notify.digest_data(store, since)
             ok = notify.post_slack(store, notify.digest_fallback_text(data),
@@ -4355,6 +4448,11 @@ if nav == "Thesis":
                 "Test digest sent." if ok
                 else "Slack rejected it — check the webhook URL."
             )
+            st.rerun()
+        if saved_hook and n3.button("Remove webhook", key="remove_slack_hook",
+                                    disabled=not IS_ADMIN):
+            store.set_setting("slack_webhook_url", "")
+            st.session_state["toast"] = "Slack webhook removed — digests stop posting."
             st.rerun()
 
         st.write("")
@@ -4532,7 +4630,8 @@ if nav == "Thesis":
                         score_weight_signals=ws,
                         value_add_weight=vw, ungrounded_multiplier=um),
                     "llm_prompt": new_prompt}))
-                st.success("Saved."); st.rerun()
+                st.session_state["toast"] = "Signals & scoring saved."
+                st.rerun()
 
         with st.expander(f"{thesis.firm_name or 'Firm'} value-add levers"):
             st.markdown(
@@ -5325,24 +5424,21 @@ if nav == "Activity":
                   "memo_approved", "memo_changes_requested"],
         "Company news": ["funding_round_detected", "company_status_changed"],
     }
-    unread = store.unread_count(ACTOR)
-    if unread:
-        a3.markdown(
-            f'<div class="subtle" style="padding-top:26px">'
-            f'<b>{unread}</b> new since you last looked</div>',
-            unsafe_allow_html=True,
-        )
     feed = store.events(
         limit=200,
         actor=None if who_filter == "Everyone" else who_filter,
         verbs=verb_groups.get(kind_filter),
     )
-    # Everything above this id is new to this member — marked before we
-    # advance the cursor, so the highlight survives this render.
-    cursor_row = store.db.execute(
-        "select last_event_id from read_cursors where actor = ?", [ACTOR]
-    ).fetchone() if store.db["read_cursors"].exists() else None
-    seen_to = int(cursor_row[0]) if cursor_row and cursor_row[0] else 0
+    # Everything above this id was new when this visit began (captured in
+    # the masthead, before the cursor moved), so the highlight survives.
+    seen_to = st.session_state.get("act_seen_to", store.read_cursor(ACTOR))
+    new_here = sum(1 for e in feed if (e.id or 0) > seen_to and e.actor != ACTOR)
+    if new_here:
+        a3.markdown(
+            f'<div class="subtle" style="padding-top:26px">'
+            f'<b>{new_here}</b> new since you last looked</div>',
+            unsafe_allow_html=True,
+        )
 
     if not feed:
         st.markdown(
@@ -5364,8 +5460,10 @@ if nav == "Activity":
             f'<div class="act-when">{_e(_ago(event.at))}</div></div>',
             unsafe_allow_html=True,
         )
-    if feed:
-        store.mark_read(ACTOR)
+    # Only an unfiltered view marks things read: a filter hides events, and
+    # hidden events are not seen.
+    if feed and who_filter == "Everyone" and kind_filter == "Everything":
+        store.mark_read(ACTOR, up_to=feed[0].id)
 
 
 # ============================================================ EVIDENCE
@@ -5637,7 +5735,7 @@ def _render_evidence_results(report) -> None:
         )
 
 
-def _render_evidence_signals(report, evaluation) -> None:
+def _render_evidence_signals(report, evaluation, row: dict) -> None:
     """Which individual signals carried the information — and what the
     evidence says the weights should be."""
     from scout.signal_eval import suggest_weights as suggest_signal_weights
@@ -5729,7 +5827,16 @@ def _render_evidence_signals(report, evaluation) -> None:
                   "why": p.reason} for p in proposals],
                 hide_index=True, use_container_width=True,
             )
-            if movers and IS_ADMIN:
+            # A backtest measures ONE thesis's weights; applying its
+            # suggestions to a different thesis would tune the wrong one.
+            measured = (getattr(report, "thesis_id", "") or "").strip()
+            other_thesis = bool(measured) and measured != ACTIVE_THESIS_ID
+            if movers and IS_ADMIN and other_thesis:
+                st.markdown(
+                    f'<div class="subtle">This backtest measured the '
+                    f'<b>{_e(measured)}</b> thesis — switch to it to apply these '
+                    'weights.</div>', unsafe_allow_html=True)
+            elif movers and IS_ADMIN:
                 if st.button("Apply these weights", key="ev_apply_w",
                              type="primary"):
                     updated = dict(thesis.weights)
@@ -5740,8 +5847,7 @@ def _render_evidence_signals(report, evaluation) -> None:
                     # the NEXT backtest can say it is scoring an exam with
                     # its own answer key. Without this the circularity is
                     # invisible and the numbers quietly improve.
-                    store.set_setting("weights_from_backtest",
-                                      str(_evidence_row["id"]))
+                    store.set_setting("weights_from_backtest", str(row["id"]))
                     st.session_state["toast"] = (
                         "Weights updated — the next backtest will flag that "
                         "they came from this one")
@@ -5863,7 +5969,7 @@ if nav == "Graph":
                 "touch a single company, or add relationship types above.",
             )
         else:
-            st.components.v1.html(
+            st.iframe(
                 graph_view.graph_page_html(nodes, links, height=620,
                                            focus_key=focus_key),
                 height=632,
@@ -5931,7 +6037,7 @@ if nav == "Evidence":
             if _evidence_view == "Results":
                 _render_evidence_results(_evidence_report)
             elif _evidence_view == "Signals":
-                _render_evidence_signals(_evidence_report, _evaluation)
+                _render_evidence_signals(_evidence_report, _evaluation, _evidence_row)
             else:
                 _render_evidence_trends(_evidence_runs, _evidence_report)
 
