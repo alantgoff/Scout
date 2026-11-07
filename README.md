@@ -97,12 +97,17 @@ before anything saves. The thesis library lets you switch between theses
 without losing either. **Tune**: every part of that configuration by hand,
 each beside the measured yield of what it controls (which queries and sources
 ever produced a startup you triaged). **Evidence**: whether any of this
-actually works. A backtest scores companies using only evidence that was
+actually works. **Forward** (the default) takes the score Scout gave each
+startup the first time it saw it — under the thesis as it was that day — and
+checks it against the raises recorded since (SEC Form D first-sale dates):
+which startups Scout caught, how many days ahead, which raisers it
+underrated, and, once enough startups have had time to raise, whether the
+high scorers raised more often. Until then the rates are withheld, not
+guessed. The **Backtest** scores companies using only evidence that was
 public on a past date, then checks where the ones that went on to raise
-actually ranked — **Results** (recall, separation, lead time, every company
-against the controls), **Signals** (which individual signals carried the
+actually ranked — with **Signals** (which individual signals carried the
 information, with confidence intervals and a check for two signals measuring
-the same thing), and **Over time** (whether a signal is wearing out). Every
+the same thing) and **Over time** (whether a signal is wearing out). Every
 report carries its own limitations — including the ones that undercut it.
 
 **Settings** — **General**: today's spend against the daily cap, whether the
@@ -323,6 +328,11 @@ schedule     --list · --add <kind> --at 06:00 --weekdays --tz Europe/London
 digest       Post the Slack digest now (the scheduled one runs via the worker)
 memo <handle>  Write one memo headlessly · --depth quick|standard|deep
 
+forward      Did Scout catch them at the time? Each startup at its FIRST
+             score, against the raises recorded since (Form D first-sale
+             dates): catches, days ahead, underrated raisers, and — once
+             enough startups have matured — AUC and lift, withheld until
+             then. --horizon (180) --all-sources --json
 hindsight    Backtest the scorer against companies that went on to raise.
              Auto-captured rounds from `scout refresh` merge in by
              themselves (curated YAML wins collisions); controls stay
@@ -471,7 +481,8 @@ and a few you correctly skipped.
   written by people who already know which companies raised. So it supports
   "would today's thesis have ranked these highly given only past evidence",
   not "would Scout have caught them at the time". Only running a frozen thesis
-  forward settles the second. Outcomes and controls are also chosen by hand,
+  forward settles the second — the forward scorecard does that, but it needs
+  months of runs and recorded raises before it can show a rate. Outcomes and controls are also chosen by hand,
   and X history cannot be reconstructed at all, so every figure is a floor
   with a selection bias on top. Each report states all of this itself; the
   Thesis → Evidence will not show a number without them.

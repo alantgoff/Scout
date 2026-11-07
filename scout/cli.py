@@ -3110,6 +3110,59 @@ def yield_cmd() -> None:
 
 
 @app.command()
+def forward(
+    horizon: Annotated[
+        int, typer.Option(help="Days after first sight a raise must land within "
+                               "to count as a catch (90, 180 or 365 are typical).")
+    ] = 180,
+    threshold: Annotated[
+        float, typer.Option(help="Score that counts as 'flagged' for precision "
+                                 "and recall.")
+    ] = 60.0,
+    all_sources: Annotated[
+        bool, typer.Option("--all-sources", help="Count rounds the tracked refresh "
+                           "detected as well as SEC Form Ds. Inflated: the refresh "
+                           "only re-researches startups you already triaged.")
+    ] = False,
+    as_json: Annotated[
+        bool, typer.Option("--json", help="Print the full report as JSON.")
+    ] = False,
+) -> None:
+    """Did Scout catch them at the time? The forward scorecard.
+
+    Each startup is frozen at its FIRST score — the one Scout gave it under
+    that day's thesis — and checked against the raises recorded since (SEC
+    Form D first-sale dates; with --all-sources, refresh-detected rounds
+    too). Only startups first seen at least --horizon days ago count as hits
+    or misses, and the rates are withheld until there are enough of both.
+    The backtest (`scout hindsight`) asks what today's thesis would have
+    ranked; this asks what Scout actually ranked, back then.
+    """
+    from rich.markdown import Markdown
+
+    from scout.forward import build_forward, inputs_from_store, render_markdown
+
+    try:
+        settings = Settings()
+        store = _open_store(settings)
+        sightings, raises = inputs_from_store(store)
+        if not sightings:
+            console.print("[dim]No startups sighted yet — run `scout run` first.[/dim]")
+            return
+        report = build_forward(
+            sightings, raises, horizon_days=horizon, threshold=threshold,
+            sources=("form_d", "detected") if all_sources else ("form_d",),
+        )
+    except Exception as exc:  # a clean message, never a traceback
+        console.print(f"[red]Forward scorecard failed:[/red] {exc}")
+        raise typer.Exit(1) from exc
+    if as_json:
+        print(report.model_dump_json(indent=2))
+        return
+    console.print(Markdown(render_markdown(report)))
+
+
+@app.command()
 def doctor(
     offline: Annotated[
         bool, typer.Option("--offline", help="Skip the network probes.")

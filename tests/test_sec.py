@@ -322,13 +322,16 @@ def test_resolver_queue_interleaves_sources_so_filings_cannot_starve_headlines(
     tmp_path: Path,
 ) -> None:
     store = Store(tmp_path / "t.db")
+    # Dated from the real clock: the queue only looks back 30 days, and a
+    # pinned date turned this test into a time bomb (it is about order).
+    now = datetime.now(timezone.utc)
     leads = [UnlinkedLead(source="sec", ref=f"https://sec/{i}", name=f"Issuer {i}",
-                          bio="SEC Form D", url=f"https://sec/{i}", found_at=NOW)
+                          bio="SEC Form D", url=f"https://sec/{i}", found_at=now)
              for i in range(5)]
     leads.append(UnlinkedLead(source="rss", ref="https://news/1", name="Acme raises",
-                              bio="Acme raises $2M", url="https://news/1", found_at=NOW))
+                              bio="Acme raises $2M", url="https://news/1", found_at=now))
     leads.append(UnlinkedLead(source="hn", ref="poster", name="poster",
-                              bio="Show HN: Beta", url="https://youtube.com/x", found_at=NOW))
+                              bio="Show HN: Beta", url="https://youtube.com/x", found_at=now))
     store.upsert_unlinked_leads(leads)
     queue = store.unresolved_leads(limit=3)
     assert [item.source for item in queue] == ["rss", "hn", "sec"]

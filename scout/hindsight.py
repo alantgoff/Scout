@@ -752,7 +752,9 @@ def default_limitations() -> list[str]:
         "companies went on to raise. So this measures 'would today's thesis "
         "have ranked these companies highly, given only past evidence', NOT "
         "'would Scout have caught them at the time'. The second claim is "
-        "stronger and this exercise cannot support it.",
+        "stronger and this exercise cannot support it — the forward "
+        "scorecard (`scout forward`, Thesis → Evidence → Forward) measures it "
+        "from the scores Scout actually gave, as data accumulates.",
         # 2. Selection, on both sides.
         "OUTCOMES ARE CHOSEN FROM MEMORY, and memorable companies are the "
         "ones with loud public footprints. A list assembled by recall is "

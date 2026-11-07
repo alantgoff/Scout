@@ -396,6 +396,16 @@ scout/
                     message shape tests without network; post_slack swallows
                     its own failures — a Slack outage must never break a
                     triage click.
+  forward.py        The forward scorecard — did Scout catch them AT THE
+                    TIME. Each company frozen at its first stored score
+                    (store.first_sightings), raises from matched Form Ds
+                    (first-sale date) and, opt-in, refresh-detected rounds;
+                    matured-only negatives, before-sight raises excluded,
+                    rates withheld below MIN_SAMPLES_PER_GROUP (see §11).
+                    Pure except inputs_from_store, the one read shared by
+                    `scout forward`, Thesis → Evidence → Forward (the
+                    default Evidence view) and the digest's "Scout first
+                    saw it N days earlier" note on raise alerts.
   hindsight.py      The backtest. Outcomes come from THREE sources:
                     hand-curated outcomes.yaml, the auto-captured rounds
                     `scout refresh` writes to store.outcomes the moment a
@@ -1184,7 +1194,7 @@ rather than engineering around them:
    raised. The supportable claim is "would today's thesis have ranked these
    highly given only past evidence", NOT "would Scout have caught them at
    the time". Only forward measurement against a frozen thesis settles the
-   second.
+   second — which is what `scout/forward.py` does (below).
 2. **Outcomes and controls are chosen by hand**, and memorable companies are
    the ones with loud public footprints. `evidence_symmetry` detects the
    worst version of this (comparing companies with GitHub orgs against
@@ -1192,6 +1202,30 @@ rather than engineering around them:
 
 `default_limitations()` renders all of this into every report. If you add a
 capability that could mislead, add its limitation there in the same commit.
+
+**The forward scorecard (`scout/forward.py`) has its own commitments**, for
+the same reason — a young, sparse outcome record is where confident wrong
+numbers come from:
+
+- **The frozen unit is the company at FIRST sight** (`store.first_sightings`),
+  not a run. A run is not a full ranking (TTL skips, `--min-score`), and a
+  rescore must never move what Scout "said at the time". demo- and manual-
+  runs are excluded: samples and hand-added companies are not catches.
+- **Only matured companies count as negatives** (first seen ≥ horizon ago).
+  A quiet company first seen last month is undecided, not a miss; its
+  fast-raising peers are listed as early hits but kept out of every rate.
+- **A raise dated at or before first sight is excluded**, never a hit.
+- **Form D is the primary source.** The refresh only re-researches triaged
+  companies and triage follows the score, so refresh-detected rounds inflate
+  the hit rate of high scorers (and carry detection, not round, dates). They
+  are opt-in (`--all-sources`), with that limitation attached.
+- **Raises join on handle**, never on `Outcome.key` name slugs ("Acme" and
+  "Acme Inc" are one company). Form D amendments are not new rounds.
+- **Withhold, don't caveat**: below `MIN_SAMPLES_PER_GROUP` raises or
+  non-raises the AUC, lift, precision/recall and median lead time are not
+  computed; the report says how many more are needed and the smallest AUC
+  the sample could detect. A zero top-fifth hit rate carries its rule-of-
+  three bound. Every rate is a floor — a raise counts only if recorded.
 
 ---
 

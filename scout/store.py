@@ -1371,6 +1371,70 @@ class Store:
                 return ts if ts.tzinfo else ts.replace(tzinfo=timezone.utc)
         return None
 
+    def raises_stamp(self) -> tuple:
+        """Content fingerprint of the recorded raises (matched filings and
+        detected rounds) — two COUNT/MAX queries, so the UI can cache the
+        forward scorecard and still rebuild it the moment a raise lands."""
+        stamp: list = []
+        for table, column, where in (
+            ("sec_filings", "recorded_at", "matched_handle is not null and matched_handle != ''"),
+            ("outcomes", "detected_at", "1 = 1"),
+        ):
+            if self.db[table].exists():
+                stamp.extend(self.db.execute(
+                    f"select count(*), max({column}) from {table} where {where}"
+                ).fetchone())
+            else:
+                stamp.extend((0, None))
+        return tuple(stamp)
+
+    def first_sightings(self) -> list[dict]:
+        """Each company's FIRST stored score — the forward scorecard's frozen
+        observation (scout/forward.py).
+
+        A run is not a full ranking (TTL skips, --min-score), so the unit
+        frozen in time is the company at first sight: the score Scout gave
+        it then, under that run's thesis version, before anyone knew whether
+        it would raise. Rows saved later never move it — leads rows are
+        append-only per run. demo- runs are samples and manual- runs are
+        companies a person added by hand; neither is something Scout found,
+        so neither counts. Oldest first: handle, run_id, created_at, score,
+        lead_json, thesis_id, thesis_version.
+        """
+        if not self.db["leads"].exists():
+            return []
+        # A fresh database has leads (a first run) before it has runs only
+        # on legacy installs; never let a missing runs table break the read.
+        if self.db["runs"].exists():
+            join = "left join runs r on r.run_id = l.run_id"
+            thesis_id, version = "coalesce(r.thesis_id, '')", "coalesce(r.thesis_version, '')"
+        else:
+            join, thesis_id, version = "", "''", "''"
+        rows = self.db.execute(
+            f"""
+            select handle, run_id, created_at, score, lead_json,
+                   thesis_id, thesis_version
+            from (
+                select l.handle, l.run_id, l.created_at, l.score, l.lead_json,
+                       {thesis_id} as thesis_id,
+                       {version} as thesis_version,
+                       row_number() over (
+                           partition by lower(l.handle)
+                           order by l.created_at, l.run_id
+                       ) as rn
+                from leads l {join}
+                where l.run_id not like 'demo-%' and l.run_id not like 'manual-%'
+            )
+            where rn = 1
+            order by created_at, run_id
+            """
+        ).fetchall()
+        return [
+            {"handle": r[0], "run_id": r[1], "created_at": r[2], "score": r[3],
+             "lead_json": r[4], "thesis_id": r[5] or "", "thesis_version": r[6] or ""}
+            for r in rows
+        ]
+
     # ----------------------------------------------------------------- ledger
 
     def load_lead_ledger(

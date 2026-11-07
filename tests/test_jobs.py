@@ -423,6 +423,22 @@ def test_digest_reports_only_what_changes_someone_s_next_hour(tmp_path: Path) ->
     assert [i["handle"] for i in notify.digest_data(store, since)["top_new"]] == ["midco"]
 
 
+def test_a_raise_alert_says_how_far_ahead_scout_was(tmp_path: Path) -> None:
+    """The forward scorecard, one company at a time: a round landing on a
+    startup Scout first saw 94 days ago says so in the digest."""
+    store = _seed_digest_store(tmp_path)
+    seen = (datetime.now(UTC) - timedelta(days=94, hours=1)).isoformat()
+    store.db.execute("update leads set created_at = ? where handle = 'hotco'", [seen])
+    store.db.conn.commit()
+    store.record_outcome("hotco", company="HotCo", round_stage="seed",
+                         amount="$3M", evidence="TechCrunch")
+    since = datetime.now(UTC) - timedelta(hours=24)
+    alert = next(a for a in notify.digest_data(store, since)["alerts"]
+                 if a["handle"] == "hotco")
+    assert "Scout first saw it 94 days earlier (score 88 then)" in alert["note"]
+    assert alert["note"].startswith("TechCrunch")
+
+
 def test_digest_carries_the_disagreement_and_the_review_queue(tmp_path: Path) -> None:
     store = _seed_digest_store(tmp_path)
     store.set_vote("hotco", "strong_yes", actor="alan@firm.com")

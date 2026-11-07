@@ -641,6 +641,27 @@ def test_ensure_user_admin_env_promotes(tmp_path: Path, monkeypatch) -> None:
     assert store.ensure_user("sara@firm.com")["role"] == "admin"
 
 
+def test_first_sightings_freeze_each_company_at_first_score(tmp_path: Path) -> None:
+    """The forward scorecard's input: one row per company — its FIRST
+    score, under that run's thesis version. Later rescoring never moves it;
+    samples and hand-added companies are not something Scout found."""
+    store = make_store(tmp_path)
+    assert store.first_sightings() == []
+    seed_run(store, "demo-1", "2026-01-01T00:00:00+00:00", [("acme", 99.0)])
+    seed_run(store, "manual-1", "2026-01-02T00:00:00+00:00", [("handpicked", 90.0)])
+    seed_run(store, "20260110-000000-000000", "2026-01-10T00:00:00+00:00",
+             [("Acme", 41.0), ("beta", 55.0)])
+    seed_run(store, "20260201-000000-000000", "2026-02-01T00:00:00+00:00",
+             [("acme", 88.0), ("gamma", 70.0)])
+    store.record_run("20260110-000000-000000", source="free", strategy_hash="v1",
+                     thesis_statement="t", thesis_id="edge-ai", thesis_version="v1")
+    rows = store.first_sightings()
+    assert [(r["handle"], r["score"], r["thesis_version"]) for r in rows] == [
+        ("Acme", 41.0, "v1"), ("beta", 55.0, "v1"), ("gamma", 70.0, "")]
+    assert rows[0]["thesis_id"] == "edge-ai"
+    assert rows[0]["created_at"].startswith("2026-01-10")
+
+
 def test_the_last_admin_cannot_be_demoted(tmp_path: Path) -> None:
     """A workspace with no admin can never change its settings, access list
     or roles again — so the store refuses, whoever asks."""

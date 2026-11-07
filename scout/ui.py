@@ -131,6 +131,7 @@ from scout.insights import (
 )
 from scout import jobs as jobs_mod
 from scout import crm as crm_mod
+from scout import forward as forward_mod
 from scout import intros as intros_mod
 from scout import nav as nav_mod
 from scout import notify
@@ -6100,55 +6101,217 @@ def _render_graph() -> None:
                     )
 
 
+# Forward first: it is the one measurement made with the thesis as it
+# actually was. The backtest's three views follow.
+EVIDENCE_VIEWS = ["Forward", "Backtest", "Signals", "Over time"]
+_FORWARD_HORIZONS = {"90 days": 90, "180 days": 180, "1 year": 365}
+
+
+@st.cache_data(show_spinner=False, max_entries=16)
+def _forward_report(db_path: str, stamp: tuple, raises: tuple, day: str,
+                    horizon: int, threshold: float, all_sources: bool):
+    """The forward scorecard, built once per (database, ledger content,
+    recorded raises, day, settings). Parsing every first sighting's lead is
+    the cost; the day is in the key because maturity moves with the clock."""
+    sightings, events = forward_mod.inputs_from_store(store)
+    return forward_mod.build_forward(
+        sightings, events, horizon_days=horizon, threshold=threshold,
+        sources=("form_d", "detected") if all_sources else ("form_d",),
+    )
+
+
+def _version_label(thesis_id: str, version: str) -> str:
+    if not version:
+        return "—"
+    if thesis_id:
+        return f"v{_version_number(thesis_id, version)}"
+    return version[:8]
+
+
+def _render_evidence_forward() -> None:
+    """Thesis → Evidence → Forward: each startup frozen at the first score
+    Scout gave it, against the raises recorded since (scout/forward.py)."""
+    st.session_state.setdefault("fwd_horizon", "180 days")
+    st.session_state.setdefault("fwd_sources", "Form D")
+    c1, c2, _c3 = st.columns([1.5, 1.7, 1.3])
+    horizon_label = c1.segmented_control(
+        "Horizon", list(_FORWARD_HORIZONS), key="fwd_horizon", persist_state="session",
+        required=True,
+        help="How soon after Scout first saw a startup a raise must land to "
+             "count as a catch.") or "180 days"
+    sources_label = c2.segmented_control(
+        "Raises", ["Form D", "Form D + detected"], key="fwd_sources",
+        persist_state="session", required=True,
+        help="Form D first-sale dates cover every company Scout knows. Rounds the "
+             "refresh detects come only from startups you already triaged, so "
+             "adding them inflates the hit rate of high scorers.") or "Form D"
+    horizon = _FORWARD_HORIZONS.get(horizon_label, forward_mod.DEFAULT_HORIZON)
+    threshold = forward_mod.DEFAULT_THRESHOLD
+    report = _forward_report(
+        str(store.db_path), store.ledger_stamp(), store.raises_stamp(),
+        datetime.now(timezone.utc).date().isoformat(), horizon, threshold,
+        sources_label != "Form D")
+    if not report.n_sighted:
+        _empty_state(
+            "Nothing to measure yet",
+            "The forward scorecard freezes each startup at the first score Scout "
+            "gave it, then checks it against the raises that follow. Press "
+            "<b>Run scout</b> on the Startups page to start the record.")
+        return
+
+    n_neg = report.n_evaluable - report.n_raised
+    t1, t2, t3, t4 = st.columns(4)
+    t1.markdown(_tile("Evaluable", str(report.n_evaluable),
+                      f"first seen ≥ {horizon} days ago · {report.n_watching} too soon"),
+                unsafe_allow_html=True)
+    t2.markdown(_tile("Raised", str(report.n_raised),
+                      f"{report.base_rate:.0%} of evaluable" if report.base_rate is not None
+                      else "nothing evaluable yet"), unsafe_allow_html=True)
+    t3.markdown(_tile("AUC", "withheld" if report.auc is None else f"{report.auc:.2f}",
+                      "too few outcomes" if report.auc is None else
+                      "interval clears a coin flip" if report.beats_chance else
+                      "interval still includes a coin flip"), unsafe_allow_html=True)
+    t4.markdown(_tile("Days ahead", "—" if report.median_days_ahead is None
+                      else f"{report.median_days_ahead:.0f}",
+                      "median, first sight → raise"), unsafe_allow_html=True)
+    st.write("")
+    if report.underpowered:
+        st.markdown(
+            f'<div class="notice"><b>Rates withheld — too few outcomes.</b> '
+            f'{_e(report.needs)} With {report.n_raised} raise'
+            f'{"s" if report.n_raised != 1 else ""} and {n_neg} startup'
+            f'{"s" if n_neg != 1 else ""} that didn\'t, no AUC below '
+            f'{report.min_detectable_auc:.2f} could be told apart from chance — '
+            'the answer is more time, not a different thesis.</div>',
+            unsafe_allow_html=True)
+    else:
+        top = (f"{report.top_hits} of {report.top_n} raised — "
+               f"{report.top_hit_rate:.0%} against {report.base_rate:.0%} overall"
+               + (f", {report.lift:.1f}× the base rate" if report.lift is not None else ""))
+        if report.top_hit_rate_bound is not None:
+            top += (f" (none raised; with {report.top_n} startups the true rate could "
+                    f"still be up to {report.top_hit_rate_bound:.0%})")
+        st.markdown(
+            f'<div class="subtle">• <b>Top fifth by first score:</b> {_e(top)}.</div>'
+            f'<div class="subtle">• <b>At score ≥ {threshold:.0f}:</b> '
+            f'{report.at_threshold_hits} of {report.at_threshold} raised'
+            + (f" ({report.precision_at_threshold:.0%})"
+               if report.precision_at_threshold is not None else "")
+            + f', catching {report.recall_at_threshold:.0%} of the raises.</div>'
+            f'<div class="subtle">• <b>AUC {report.auc:.2f}</b> (95% CI '
+            f'{report.auc_low:.2f}–{report.auc_high:.2f})'
+            + ("" if report.beats_chance else
+               " — the interval includes 0.5, so this is not yet distinguishable "
+               "from a coin flip. More matured startups narrow it.")
+            + "</div>",
+            unsafe_allow_html=True)
+
+    def _table(rows: list) -> None:
+        st.dataframe(
+            [{"Startup": r.name, "First seen": r.first_seen.date(),
+              "Score then": round(r.score), "Raise": r.raise_detail or r.raise_source,
+              "Raise date": r.raise_date.date() if r.raise_date else None,
+              "Days ahead": r.days_ahead,
+              "Status": forward_mod.STATUS_LABELS.get(r.status, r.status)}
+             for r in rows],
+            hide_index=True, width="stretch")
+
+    hits = report.hits()
+    st.write("")
+    st.markdown('<div class="section-title" style="font-size:1.15rem">Caught before '
+                'the raise</div>', unsafe_allow_html=True)
+    if hits:
+        _table(hits)
+    else:
+        st.markdown('<div class="subtle">No raise recorded after a first sighting yet. '
+                    'Form Ds are matched daily by the SEC source; detected rounds come '
+                    'from the tracked refresh.</div>', unsafe_allow_html=True)
+    misses = report.underrated()
+    if misses:
+        st.markdown(f'<div class="section-title" style="font-size:1.15rem">Raised, but '
+                    f'scored below {threshold:.0f}</div><div class="subtle">The misses '
+                    'worth reading when you tune the thesis.</div>', unsafe_allow_html=True)
+        _table(misses)
+    if len(report.by_version) > 1:
+        st.markdown('<div class="section-title" style="font-size:1.15rem">By thesis '
+                    'version</div>', unsafe_allow_html=True)
+        st.dataframe(
+            [{"Version": _version_label(v.thesis_id, v.thesis_version),
+              "Since": v.first_seen.date(), "Sighted": v.sighted,
+              "Evaluable": v.evaluable, "Raised": v.raised} for v in report.by_version],
+            hide_index=True, width="stretch")
+    if report.n_already:
+        st.markdown(f'<div class="subtle">{report.n_already} startup'
+                    f'{"s" if report.n_already != 1 else ""} had already raised when '
+                    'Scout first saw them — left out rather than counted as catches.</div>',
+                    unsafe_allow_html=True)
+    with st.expander("What this does and does not show"):
+        for line in report.limitations:
+            st.markdown(f'<div class="subtle">• {_e(line)}</div>', unsafe_allow_html=True)
+    st.download_button(
+        "Download the scorecard (Markdown)",
+        data=lambda: forward_mod.render_markdown(report).encode("utf-8"),
+        file_name=f"forward_{report.generated_at:%Y%m%d}.md", mime="text/markdown",
+        on_click="ignore", key="fwd_download")
+
+
 def _render_evidence() -> None:
     st.markdown(
         '<div class="section-title">Evidence</div>'
-        '<div class="section-sub">Whether the scoring actually works, and '
-        'which public signals are doing the work. Everything here is '
-        'measured against companies that went on to raise — it is the only '
-        'claim this workspace makes that is not an assertion.</div>',
+        '<div class="section-sub">Whether the scoring actually works. <b>Forward</b> '
+        'checks the score Scout gave each startup the first time it saw it against '
+        'the raises that followed; the <b>backtest</b> replays today\'s thesis on '
+        'evidence as it stood on a past date. Measured against companies that went '
+        'on to raise — the only claim this workspace makes that is not an '
+        'assertion.</div>',
         unsafe_allow_html=True,
     )
+    # Seeded rather than defaulted (persist_state), and reset when a stored
+    # view no longer exists ("Results" became "Backtest").
+    if st.session_state.get("evidence_view") not in EVIDENCE_VIEWS:
+        st.session_state["evidence_view"] = EVIDENCE_VIEWS[0]
+    # Under the Thesis page's own view switch in the rail. The backtest's
+    # three questions follow Forward, in the order they should be asked: did
+    # it work, what made it work, and is that still true.
+    _evidence_view = st.sidebar.segmented_control(
+        "Evidence", EVIDENCE_VIEWS, key="evidence_view", persist_state="session",
+        required=True,
+    ) or EVIDENCE_VIEWS[0]
+    if _evidence_view == "Forward":
+        _render_evidence_forward()
+        return
     _evidence_runs = store.backtests(limit=20)
     if not _evidence_runs:
         _evidence_empty_state()
+        return
+    _evidence_row, _evidence_report = _evidence_pick_run(_evidence_runs)
+    if _evidence_report is None:
+        return
+    _evidence_trust_banner(_evidence_report)
+    # Computed once per (run, weights) and cached: the bootstrap and
+    # permutation passes cost half a second, and Streamlit re-runs this
+    # script on every interaction.
+    _evaluation = _signal_evaluation(_evidence_row["report_json"], _weights_key())
+    if _evidence_view == "Backtest":
+        _render_evidence_results(_evidence_report)
+    elif _evidence_view == "Signals":
+        _render_evidence_signals(_evidence_report, _evaluation, _evidence_row)
     else:
-        # Three questions, in the order they should be asked: did it work,
-        # what made it work, and is that still true. (Under the Thesis
-        # page's own view switch in the rail.)
-        _evidence_view = st.sidebar.segmented_control(
-            "Backtest", ["Results", "Signals", "Over time"], default="Results",
-            key="evidence_view", persist_state="session",
-        ) or "Results"
-        _evidence_row, _evidence_report = _evidence_pick_run(_evidence_runs)
-        if _evidence_report is not None:
-            _evidence_trust_banner(_evidence_report)
-            # Computed once per (run, weights) and cached: the bootstrap and
-            # permutation passes cost half a second, and Streamlit re-runs
-            # this script on every interaction.
-            _evaluation = _signal_evaluation(
-                _evidence_row["report_json"], _weights_key())
-            if _evidence_view == "Results":
-                _render_evidence_results(_evidence_report)
-            elif _evidence_view == "Signals":
-                _render_evidence_signals(_evidence_report, _evaluation, _evidence_row)
-            else:
-                _render_evidence_trends(_evidence_runs, _evidence_report)
+        _render_evidence_trends(_evidence_runs, _evidence_report)
 
-            with st.expander("What this does and does not show"):
-                for _limitation in (_evidence_report.limitations
-                                    or hindsight_limitations()):
-                    st.markdown(f'<div class="subtle">• {_e(_limitation)}</div>',
-                                unsafe_allow_html=True)
-            st.write("")
-            st.download_button(
-                "Download the report (Markdown)",
-                hindsight_report_markdown(
-                    _evidence_report, signal_evaluation=_evaluation,
-                ).encode("utf-8"),
-                file_name=f"hindsight_{_evidence_report.cutoff:%Y%m%d}.md",
-                help="The shareable version, limitations included.",
-            )
+    with st.expander("What this does and does not show"):
+        for _limitation in (_evidence_report.limitations or hindsight_limitations()):
+            st.markdown(f'<div class="subtle">• {_e(_limitation)}</div>',
+                        unsafe_allow_html=True)
+    st.write("")
+    st.download_button(
+        "Download the report (Markdown)",
+        hindsight_report_markdown(
+            _evidence_report, signal_evaluation=_evaluation,
+        ).encode("utf-8"),
+        file_name=f"hindsight_{_evidence_report.cutoff:%Y%m%d}.md",
+        help="The shareable version, limitations included.",
+    )
 
 
 # ============================================================ AUTOMATION

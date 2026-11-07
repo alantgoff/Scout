@@ -713,7 +713,7 @@ def test_evidence_view_shows_backtest_results(tmp_path, monkeypatch) -> None:
                              "metrics": report.metrics().model_dump()})
 
     at = AppTest.from_file(str(UI_PATH), default_timeout=30)
-    at.session_state["_route"] = {"page": "Evidence"}
+    at.session_state["_route"] = {"page": "Evidence", "state": {"evidence_view": "Backtest"}}
     at.run()
     assert not at.exception, at.exception[0].message if at.exception else ""
     page = _page_text(at)
@@ -749,7 +749,7 @@ def test_evidence_view_flags_an_untrustworthy_backtest(tmp_path, monkeypatch) ->
                              "metrics": report.metrics().model_dump()})
 
     at = AppTest.from_file(str(UI_PATH), default_timeout=30)
-    at.session_state["_route"] = {"page": "Evidence"}
+    at.session_state["_route"] = {"page": "Evidence", "state": {"evidence_view": "Backtest"}}
     at.run()
     assert not at.exception, at.exception[0].message if at.exception else ""
     assert "not usable" in _page_text(at)
@@ -816,7 +816,7 @@ def test_evidence_page_teaches_when_there_is_no_backtest(tmp_path, monkeypatch) 
     seed_store(db)
 
     at = AppTest.from_file(str(UI_PATH), default_timeout=30)
-    at.session_state["_route"] = {"page": "Evidence"}
+    at.session_state["_route"] = {"page": "Evidence", "state": {"evidence_view": "Backtest"}}
     at.run()
     assert not at.exception, at.exception[0].message if at.exception else ""
     page = _page_text(at)
@@ -888,7 +888,7 @@ def test_evidence_results_plots_the_separation(tmp_path, monkeypatch) -> None:
                              "metrics": report.metrics().model_dump()})
 
     at = AppTest.from_file(str(UI_PATH), default_timeout=30)
-    at.session_state["_route"] = {"page": "Evidence"}
+    at.session_state["_route"] = {"page": "Evidence", "state": {"evidence_view": "Backtest"}}
     at.run()
     assert not at.exception, at.exception[0].message if at.exception else ""
     page = _page_text(at)
@@ -923,7 +923,7 @@ def test_evidence_skips_the_run_picker_when_there_is_only_one(tmp_path, monkeypa
     base = datetime(2025, 2, 1, tzinfo=timezone.utc)
     _save(base)
     at = AppTest.from_file(str(UI_PATH), default_timeout=30)
-    at.session_state["_route"] = {"page": "Evidence"}
+    at.session_state["_route"] = {"page": "Evidence", "state": {"evidence_view": "Backtest"}}
     at.run()
     assert not at.exception, at.exception[0].message if at.exception else ""
     assert not [s for s in at.selectbox if s.key == "ev_pick"]
@@ -931,7 +931,7 @@ def test_evidence_skips_the_run_picker_when_there_is_only_one(tmp_path, monkeypa
     # A second run makes the choice meaningful, so the picker appears.
     _save(base - timedelta(days=180))
     at2 = AppTest.from_file(str(UI_PATH), default_timeout=30)
-    at2.session_state["_route"] = {"page": "Evidence"}
+    at2.session_state["_route"] = {"page": "Evidence", "state": {"evidence_view": "Backtest"}}
     at2.run()
     assert not at2.exception, at2.exception[0].message if at2.exception else ""
     assert [s for s in at2.selectbox if s.key == "ev_pick"]
@@ -1434,3 +1434,46 @@ def test_database_dossier_is_the_one_dossier(tmp_path, monkeypatch) -> None:
     keys = {b.key for b in at.button}
     assert "dbdet_vote_strong_yes_goneco" in keys and "dbdet_long_goneco" in keys
     assert "dbdet_memo_goneco" in keys
+
+
+def test_forward_scorecard_is_the_first_evidence_view(tmp_path, monkeypatch) -> None:
+    """Thesis → Evidence opens on Forward: each startup at its first score,
+    against the raises recorded since. Two startups can't support a rate, so
+    the rates are withheld — but the catch itself is a fact, and is listed."""
+    from datetime import datetime, timedelta, timezone
+
+    from scout.ingest.sec_src import Filing, to_row
+
+    db = tmp_path / "smoke.db"
+    at = _app(tmp_path, monkeypatch)
+    store = Store(db)
+    now = datetime.now(timezone.utc)
+    store.db.execute("update leads set created_at = ?",
+                     [(now - timedelta(days=300)).isoformat()])
+    store.db.conn.commit()
+    store.record_filings([to_row(Filing(
+        accession="0001", issuer="SmokeCo Inc", amount_sold=3_000_000,
+        first_sale=(now - timedelta(days=200)).date().isoformat()),
+        matched_handle="smoke_founder")])
+
+    at.session_state["_route"] = {"page": "Evidence"}
+    at.run()
+    assert not at.exception, at.exception[0].message if at.exception else ""
+    assert at.session_state["evidence_view"] == "Forward"
+    text = _page_text(at)
+    assert "Rates withheld" in text and "more raises" in text
+    caught = at.dataframe[0].value
+    assert list(caught["Startup"]) == ["SmokeCo"]
+    # A first sale is dated midnight; the sighting carries its time of day.
+    assert int(caught["Days ahead"].iloc[0]) in (99, 100)
+
+
+def test_forward_scorecard_on_an_empty_workspace_says_what_to_do(tmp_path, monkeypatch) -> None:
+    db = tmp_path / "fresh.db"
+    monkeypatch.setenv("DB_PATH", str(db))
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "")
+    at = AppTest.from_file(str(UI_PATH), default_timeout=30)
+    at.session_state["_route"] = {"page": "Evidence"}
+    at.run()
+    assert not at.exception, at.exception[0].message if at.exception else ""
+    assert "Nothing to measure yet" in _page_text(at)

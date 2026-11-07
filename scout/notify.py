@@ -182,11 +182,17 @@ def digest_data(store: Store, since: datetime, window: str = "daily") -> dict:
     from scout.models import COMPANY_STATUS_LABELS
 
     alerts: list[dict] = []
+    # How far ahead Scout was, on every raise alert: the forward scorecard's
+    # question asked one company at a time. Read only when a raise is in
+    # this window (one query over the leads table).
+    sighted: dict[str, dict] | None = None
     for event in events:
         if (event.verb not in ("company_status_changed", "funding_round_detected",
                                "filing_matched")
                 or not event.handle):
             continue
+        if sighted is None and event.verb != "company_status_changed":
+            sighted = {row["handle"].lower(): row for row in store.first_sightings()}
         lead = next((e.lead for e in ledger
                      if e.lead.account.handle.lower() == event.handle), None)
         payload = event.payload or {}
@@ -216,6 +222,15 @@ def digest_data(store: Store, since: datetime, window: str = "daily") -> dict:
             label = COMPANY_STATUS_LABELS.get(
                 payload.get("new", ""), payload.get("new", "changed"))
             note = payload.get("note", "")
+        if event.verb != "company_status_changed" and sighted:
+            from scout.forward import caught_note, to_utc
+
+            seen = sighted.get(event.handle.lower())
+            raised_at = (to_utc(payload.get("first_sale")) if event.verb == "filing_matched"
+                         else None) or event.at
+            if seen and (ahead := caught_note(to_utc(seen["created_at"]), seen["score"],
+                                              to_utc(raised_at))):
+                note = " · ".join(bit for bit in (note, ahead) if bit)
         alerts.append({
             "handle": event.handle,
             "name": display_name(lead) if lead else f"@{event.handle}",
