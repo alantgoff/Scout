@@ -73,7 +73,7 @@ time.
 ## 2. Run it / test it — always via `./scout-cli` or `uv run`
 
 ```bash
-uv run pytest -q                 # ~770 tests, ~60s, no network (incl. AppTest UI smoke tests)
+uv run pytest -q                 # ~770 tests, ~30s, no network (incl. AppTest UI smoke tests)
 ./scout-cli demo                 # $0 offline end-to-end run on sample founders — best smoke test
 ./scout-cli source --strategy github,hn   # free live discovery, no scoring
 ./scout-cli ui                   # Streamlit workspace on :8501
@@ -297,6 +297,16 @@ scout/
                     rerun instead. Keying on mtime meant one triage click
                     re-parsed the whole database to record a status change;
                     triage is the highest-frequency action in the product.
+                    The workspace is st.cache_resource — SHARED by every
+                    session, never copied (cache_data's per-rerun unpickle
+                    cost more than the query at 600 startups and left ~100
+                    ms of garbage per click), so it is READ-ONLY: tuples,
+                    overridden leads copied before apply_override, rankings
+                    via sorted(). SCOUT_CACHE_GUARD=1 (on in every test via
+                    conftest) fingerprints it and raises on any mutation.
+                    Frequent clicks (row select, votes, triage moves) are
+                    on_click callbacks — button → st.rerun() ran the whole
+                    script twice per click.
                     Quick-find in the masthead is an on_change callback: an
                     exact name opens that startup, anything else searches
                     the feed (session_state["feed_q"]), via _route.
@@ -1277,6 +1287,20 @@ numbers come from:
 - **A button with `help=` renders inside a tooltip wrapper**, so a
   `.stButton>button` child selector silently stops styling it. The button CSS
   uses descendant selectors (`.stButton button`) for that reason.
+- **`st.cache_resource` is shared, not copied.** The workspace lives there
+  for speed, so any code that changes a cached `Lead`/`LedgerEntry`/edge
+  changes it for EVERY session. Copy first (`model_copy(deep=True)`), build
+  new lists (`sorted()`), and let `SCOUT_CACHE_GUARD` catch what you missed.
+  Key such caches on `store.db_path` too: tests run many databases in one
+  process.
+- **A click that writes should be a callback** (`on_click=`), not `if
+  st.button(...): write; st.rerun()` — the latter runs the script twice.
+  Callbacks run before the rerun with every widget's value already in
+  session state (read the stage/notes/reason widgets from there), and the
+  toast queue still works. A callback cannot call `st.rerun()` (it is a
+  no-op there).
+- **`use_container_width` is deprecated** — use `width="stretch"` (buttons,
+  popovers, dataframes, editors all take `width` in 1.59).
 - **Turning a page block into a function changes scope:** names it assigned
   stop being module globals. Pass what another function reads as an argument
   (`_render_evidence_signals(report, evaluation, row)`), then run
@@ -1293,6 +1317,10 @@ numbers come from:
   value that isn't one of the widget's options before the script sees it.
   Route the way links do — `at.session_state["_route"] = {"page": "Shortlist"}`
   — or set the page and its view key (`"pipeline_stage"`, `"settings_view"`…).
+- AppTest builds a fresh `ScriptCache` per run (re-rewriting and
+  recompiling ui.py, ~260 ms each); conftest.py shares one, the way a server
+  does — that halved the suite. Timings from AppTest are only meaningful with
+  that patch.
 - AppTest can't select dataframe rows. The Database dossier test wraps
   `streamlit.dataframe` to report a selection — copy that, don't add
   test-only plumbing to the page.

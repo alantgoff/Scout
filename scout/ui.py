@@ -280,7 +280,7 @@ def _render_crm_row(lead: Lead, key_ns: str) -> None:
     if domain is None or len(clean) >= len(CRM_LABELS):
         return
     if st.button(f"Send to {' + '.join(CRM_LABELS)}", key=f"{key_ns}_crm_{hk}",
-                 use_container_width=True):
+                 width="stretch"):
         worker = store.worker_status()
         if worker and worker.get("alive"):
             store.enqueue_job(jobs_mod.KIND_CRM, {"handles": [hk]}, actor=ACTOR, dedupe=True)
@@ -1217,7 +1217,20 @@ if _pending_toast := st.session_state.pop("toast", None):
     st.toast(_pending_toast)
 
 settings = Settings(_env_file=ENV_PATH if ENV_PATH.exists() else None)
-seeds = load_seeds(SEEDS_PATH)
+
+
+@st.cache_data(show_spinner=False, max_entries=4)
+def _load_seeds(path: str, mtime_ns: int):
+    """seeds.yaml, parsed once per file version — a YAML parse on every
+    click was a fixed ~3 ms of each rerun."""
+    return load_seeds(Path(path))
+
+
+try:
+    _seeds_mtime = SEEDS_PATH.stat().st_mtime_ns
+except OSError:
+    _seeds_mtime = 0  # missing: load_seeds raises its own clear error
+seeds = _load_seeds(str(SEEDS_PATH), _seeds_mtime)
 store = Store(Path(settings.db_path), cross_thread=True)
 # Firm-shared runtime knobs (spend cap, model, run sizes) live in the DB and
 # win over .env defaults, so every session and worker run agrees on them.
@@ -1282,7 +1295,7 @@ if _login_user is None:
         unsafe_allow_html=True,
     )
     _l, _c, _r = st.columns([2, 1, 2])
-    if _c.button("Sign in with Google", type="primary", use_container_width=True):
+    if _c.button("Sign in with Google", type="primary", width="stretch"):
         st.login()
     st.stop()
 
@@ -1360,8 +1373,25 @@ if st.session_state.get("thesis_synced") != (ACTIVE_THESIS_ID, ACTIVE_VERSION):
 _THESIS_ROWS = store.list_theses()
 
 
-@st.cache_data(show_spinner=False, max_entries=4)
-def _load_workspace(stamp: tuple, thesis_id: str, version: str):
+# Test mode (SCOUT_CACHE_GUARD=1): fingerprint the shared workspace when it is
+# built and check it at the end of every run, so a mutation of the cached
+# objects fails a test instead of leaking into every other session.
+_CACHE_GUARD = os.environ.get("SCOUT_CACHE_GUARD") == "1"
+
+
+def _workspace_fingerprint(leads, ledger, stale, edges) -> str:
+    digest = hashlib.sha1()
+    for lead in leads:
+        digest.update(lead.model_dump_json().encode())
+    for entry in ledger:
+        digest.update(entry.model_dump_json().encode())
+    digest.update(json.dumps(sorted(stale)).encode())
+    digest.update(json.dumps(list(edges), sort_keys=True, default=str).encode())
+    return digest.hexdigest()
+
+
+@st.cache_resource(show_spinner=False, max_entries=4)
+def _load_workspace(db_path: str, stamp: tuple, thesis_id: str, version: str):
     """The EXPENSIVE reads — the ledger window query, re-parsing ~every
     stored lead's JSON, and the edge table — as one cached unit.
 
@@ -1371,24 +1401,31 @@ def _load_workspace(stamp: tuple, thesis_id: str, version: str):
     invalidated this and re-parsed the entire database to record one status
     change. Judgment state (pipeline, votes, overrides, attrs) is read
     fresh below instead — it is small, and it is exactly what a click
-    changes. cache_data returns a fresh copy per call, so the in-place
-    override mutations below stay rerun-local."""
-    leads = store.load_latest_leads()
+    changes.
+
+    SHARED, NOT COPIED (st.cache_resource): every session and every rerun
+    gets these same objects. cache_data unpickled a fresh copy per rerun —
+    at 600 startups that cost more than re-querying, and left ~100 ms of
+    garbage per click to collect. The price is a contract: everything
+    returned here is READ-ONLY. Containers are tuples; a lead that needs
+    changing (a manual override) is copied first; rankings are new lists
+    (sorted(), never .sort()). SCOUT_CACHE_GUARD enforces it in tests.
+    """
+    leads = tuple(store.load_latest_leads())
     latest_is_demo = bool(leads) and all(x.account.source == "demo" for x in leads)
-    return (
-        leads,
-        latest_is_demo,
-        # The ledger is the person-centric view: best-known state per handle
-        # across ALL runs. It backs the "All runs" scope and — always — the
-        # Longlist, Shortlist, and Memos pages, so a triaged lead never
-        # degrades just because it missed the latest run.
-        store.load_lead_ledger(include_demo=latest_is_demo),
-        store.stale_handles(thesis_id, version),
-        # The knowledge graph, whole: one row per relationship, so the
-        # Connections block on each card is pure-python lookups, not a
-        # query per render.
-        store.all_graph_edges(),
-    )
+    # The ledger is the person-centric view: best-known state per handle
+    # across ALL runs. It backs the "All runs" scope and — always — the
+    # Pipeline and Memos pages, so a triaged lead never degrades just
+    # because it missed the latest run.
+    ledger = tuple(store.load_lead_ledger(include_demo=latest_is_demo))
+    stale = frozenset(store.stale_handles(thesis_id, version))
+    # The knowledge graph, whole: one row per relationship, so the
+    # Connections block on each dossier is pure-python lookups, not a query
+    # per render.
+    edges = tuple(store.all_graph_edges())
+    fingerprint = (_workspace_fingerprint(leads, ledger, stale, edges)
+                   if _CACHE_GUARD else "")
+    return leads, latest_is_demo, ledger, stale, edges, fingerprint
 
 
 @st.cache_data(show_spinner=False, max_entries=8)
@@ -1407,9 +1444,11 @@ def _load_filtered_ledger(
     )
 
 
+_WORKSPACE = _load_workspace(str(store.db_path), store.ledger_stamp(),
+                             ACTIVE_THESIS_ID, ACTIVE_VERSION)
 (
-    leads, latest_is_demo, ledger, _stale, GRAPH_EDGES,
-) = _load_workspace(store.ledger_stamp(), ACTIVE_THESIS_ID, ACTIVE_VERSION)
+    leads, latest_is_demo, ledger, _stale, GRAPH_EDGES, _ws_fingerprint,
+) = _WORKSPACE
 
 # Judgment state, read fresh every rerun: small dict reads (one row per
 # triaged startup), and the thing a triage click actually changes. Keeping
@@ -1552,15 +1591,30 @@ STALE_HANDLES = set(_stale)
 # The investor's manual scoring, layered on top of every loaded lead BEFORE
 # anything renders or ranks — adjusted dims/fit re-enter the score math, a
 # pinned score wins outright (score.apply_override).
+# The cached leads are shared and read-only (see _load_workspace), so an
+# overridden lead is COPIED before its numbers change — only those few;
+# everything else is the cached object itself.
+
+
+def _with_override(lead: Lead) -> Lead:
+    override = overrides.get(lead.account.handle.lower())
+    if not override:
+        return lead
+    adjusted = lead.model_copy(deep=True)
+    apply_override(adjusted, override, thesis)
+    return adjusted
+
+
 if overrides:
-    for _lead in leads:
-        apply_override(_lead, overrides.get(_lead.account.handle.lower()), thesis)
-    leads.sort(key=lambda x: -x.score)
-    for _entry in ledger:
-        apply_override(
-            _entry.lead, overrides.get(_entry.lead.account.handle.lower()), thesis
-        )
-    ledger.sort(key=lambda e: -e.lead.score)
+    leads = sorted((_with_override(x) for x in leads), key=lambda x: -x.score)
+    ledger = sorted(
+        (entry if not overrides.get(entry.lead.account.handle.lower())
+         else entry.model_copy(update={"lead": _with_override(entry.lead)})
+         for entry in ledger),
+        key=lambda e: -e.lead.score,
+    )
+else:
+    leads, ledger = list(leads), list(ledger)
 
 entry_by_handle = {e.lead.account.handle.lower(): e for e in ledger}
 lead_by_handle = {h: e.lead for h, e in entry_by_handle.items()}
@@ -2089,14 +2143,14 @@ def _override_editor(lead: Lead, ov: dict, key_ns: str) -> None:
     )
     c1, c2 = st.columns(2)
     if c1.button("Save adjustments", type="primary",
-                 key=f"{key_ns}_ovsave_{handle_key}", use_container_width=True):
+                 key=f"{key_ns}_ovsave_{handle_key}", width="stretch"):
         store.set_override(handle_key, quality=new_quality or None,
                            sections=new_sections or None,
                            fit=fit_out, score=pin_val, note=note)
         st.session_state["toast"] = f"Scoring adjusted — {display_name(lead)}"
         st.rerun()
     if ov and c2.button("Clear", key=f"{key_ns}_ovclear_{handle_key}",
-                        use_container_width=True):
+                        width="stretch"):
         store.clear_override(handle_key)
         st.session_state["toast"] = f"Back to Claude's scoring — {display_name(lead)}"
         st.rerun()
@@ -2315,6 +2369,18 @@ def _score_math_html(lead: Lead, manual_score: float | None = None) -> str:
             f'<div style="margin-top:2px">{steps}</div>')
 
 
+def _cast_vote(handle: str, stance: str, why_key: str, name: str) -> None:
+    """A stance (or "" to clear it) with the reason typed so far — a
+    callback, so the click's own rerun shows it. `name` empty = the reason
+    alone was saved."""
+    store.set_vote(handle, stance, st.session_state.get(why_key, ""),
+                   thesis_id=ACTIVE_THESIS_ID)
+    st.session_state["toast"] = (
+        "Reason saved" if not name else
+        f"Vote cleared — {name}" if not stance else
+        f"{STANCE_LABELS[stance]} — {name}")
+
+
 def _render_vote_row(lead: Lead, key_ns: str) -> None:
     """The four stance buttons + your rationale.
 
@@ -2330,37 +2396,28 @@ def _render_vote_row(lead: Lead, key_ns: str) -> None:
     # narrow dossier pane "Strong yes" broke mid-word into "STRO NG YES".
     with st.container(key=f"voterow_{key_ns}_{hk}"):
         cols = st.columns([1.5, 1, 1.2, 1][: len(STANCES)] or [1] * len(STANCES))
+    why_key = f"{key_ns}_why_{hk}"
     for col, (stance, _value) in zip(cols, STANCES.items()):
         selected = stance == mine
-        if col.button(
+        # Clicking your current stance clears it — no separate control.
+        col.button(
             STANCE_LABELS[stance],
             key=f"{key_ns}_vote_{stance}_{hk}",
             type="primary" if selected else "secondary",
-            use_container_width=True,
+            width="stretch",
             help="Click again to clear your vote" if selected else None,
-        ):
-            # Clicking your current stance clears it — no separate control.
-            store.set_vote(
-                handle, "" if selected else stance,
-                st.session_state.get(f"{key_ns}_why_{hk}", ""),
-                thesis_id=ACTIVE_THESIS_ID,
-            )
-            st.session_state["toast"] = (
-                f"Vote cleared — {display_name(lead)}" if selected
-                else f"{STANCE_LABELS[stance]} — {display_name(lead)}"
-            )
-            st.rerun()
+            on_click=_cast_vote,
+            args=(handle, "" if selected else stance, why_key, display_name(lead)),
+        )
     my_vote = next((v for v in votes_by_handle.get(hk, []) if v.actor == ACTOR), None)
     why = st.text_input(
         "Why (optional)", value=(my_vote.rationale if my_vote else ""),
-        key=f"{key_ns}_why_{hk}", placeholder="One line — the reason you'd defend",
+        key=why_key, placeholder="One line — the reason you'd defend",
         label_visibility="collapsed",
     )
     if my_vote is not None and why.strip() != (my_vote.rationale or ""):
-        if st.button("Save reason", key=f"{key_ns}_savewhy_{hk}"):
-            store.set_vote(handle, my_vote.stance, why, thesis_id=ACTIVE_THESIS_ID)
-            st.session_state["toast"] = "Reason saved"
-            st.rerun()
+        st.button("Save reason", key=f"{key_ns}_savewhy_{hk}", on_click=_cast_vote,
+                  args=(handle, my_vote.stance, why_key, ""))
     # Everyone else's stance, with their reasons — the disagreement, in full.
     others = [v for v in votes_by_handle.get(hk, []) if v.actor != ACTOR]
     if others:
@@ -2453,14 +2510,20 @@ def _assign_changed(lead: Lead, widget_key: str) -> None:
     st.session_state["toast"] = f"Assigned to {_who(picked)}" if picked else "Owner cleared"
 
 
-def _feed_row(lead: Lead, selected: bool) -> bool:
+def _select_row(sel_key: str, handle: str) -> None:
+    """Row click (a callback: the click's own rerun renders the selection —
+    a button → st.rerun() cost a second full pass per click)."""
+    st.session_state[sel_key] = handle
+
+
+def _feed_row(lead: Lead, selected: bool, sel_key: str) -> None:
     """One compact, clickable lead row for the cockpit list (left column). The
     whole row is a real st.button (reliable click target); the warm-row visual
     is painted as a decorative markdown overlay on top of it (pointer-events:
     none, scoped by the container's st-key class), so a click anywhere on the
     row registers. Selection is shown by rendering the button as `primary`.
-    Returns True if this row was clicked this run. The full dossier renders in
-    the detail pane; the row shows just enough to scan and pick."""
+    A click selects the row through _select_row. The full dossier renders
+    in the detail pane; the row shows just enough to scan and pick."""
     account, verdict = lead.account, lead.llm
     hk = account.handle.lower()
     identity = startup_identity(lead)
@@ -2505,11 +2568,10 @@ def _feed_row(lead: Lead, selected: bool) -> bool:
         f'<div class="frow-sc">{lead.score:.0f}</div></div>'
     )
     with st.container(key=f"frow_{hk}"):
-        clicked = st.button(title or account.handle, key=f"fpick_{hk}",
-                            use_container_width=True,
-                            type="primary" if selected else "secondary")
+        st.button(title or account.handle, key=f"fpick_{hk}", width="stretch",
+                  type="primary" if selected else "secondary",
+                  on_click=_select_row, args=(sel_key, hk))
         st.markdown(html, unsafe_allow_html=True)
-    return clicked
 
 
 def _dossier_chips(lead: Lead, entry: LedgerEntry | None, fresh: bool) -> list[tuple[str, str]]:
@@ -2555,52 +2617,62 @@ def _dossier_chips(lead: Lead, entry: LedgerEntry | None, fresh: bool) -> list[t
     return chips
 
 
+def _triage_move(handle: str, status: str, toast: str,
+                 stage_key: str | None = None, notes_key: str | None = None) -> None:
+    """One funnel move, as a callback (no second full pass). A Save reads
+    the stage and notes widgets' values from session state."""
+    fields = {}
+    if stage_key is not None:
+        status = LABEL_TO_STATUS.get(st.session_state.get(stage_key), "shortlisted")
+    if notes_key is not None:
+        fields["notes"] = st.session_state.get(notes_key, "")
+    _set_status(handle, status=status, **fields)
+    st.session_state["toast"] = toast
+
+
 def _triage_actions(lead: Lead, ns: str) -> None:
     """The funnel move for this startup — one state machine wherever a
     dossier renders: new → Longlist / Pass; longlisted → Shortlist /
     Remove; in the pipeline → stage + notes; passed → Restore. Every move
-    goes through _set_status (the CRM hook)."""
+    goes through _set_status (the CRM hook), from a click callback."""
     account = lead.account
     hk = account.handle.lower()
     name = display_name(lead)
     status = _status_of(lead)
 
-    def move(new_status: str, toast: str, **fields) -> None:
-        _set_status(account.handle, status=new_status, **fields)
-        st.session_state["toast"] = toast
-        st.rerun()
+    def move(col, label: str, key: str, new_status: str, toast: str,
+             primary: bool = False, **extra) -> None:
+        col.button(label, key=key, type="primary" if primary else "secondary",
+                   width="stretch", on_click=_triage_move,
+                   args=(account.handle, new_status, toast), kwargs=extra)
 
     if status == "longlisted":
         c1, c2 = st.columns(2)
-        if c1.button("Shortlist", key=f"{ns}_short_{hk}", type="primary", use_container_width=True):
-            move("shortlisted", f"Shortlisted {name}")
-        if c2.button("Remove", key=f"{ns}_rm_{hk}", use_container_width=True):
-            move("new", f"Removed {name} from the longlist")
+        move(c1, "Shortlist", f"{ns}_short_{hk}", "shortlisted", f"Shortlisted {name}",
+             primary=True)
+        move(c2, "Remove", f"{ns}_rm_{hk}", "new", f"Removed {name} from the longlist")
     elif status in WIN_STAGES:
         # In the funnel: move the stage (including back to Longlist) and keep
         # notes right here.
         stage_opts = [STATUS_LABELS["longlisted"]] + [STATUS_LABELS[s] for s in WIN_STAGES]
         cur_label = STATUS_LABELS.get(status, STATUS_LABELS["shortlisted"])
-        new_stage = st.selectbox("Pipeline stage", stage_opts,
-                                 index=stage_opts.index(cur_label) if cur_label in stage_opts else 0,
-                                 key=f"{ns}_stage_{hk}")
-        notes = st.text_area("Notes", value=(pipeline.get(hk, {}).get("notes") or ""),
-                             key=f"{ns}_notes_{hk}", height=84,
-                             placeholder="Call notes, next step, owner…")
+        st.selectbox("Pipeline stage", stage_opts,
+                     index=stage_opts.index(cur_label) if cur_label in stage_opts else 0,
+                     key=f"{ns}_stage_{hk}")
+        st.text_area("Notes", value=(pipeline.get(hk, {}).get("notes") or ""),
+                     key=f"{ns}_notes_{hk}", height=84,
+                     placeholder="Call notes, next step, owner…")
         c1, c2 = st.columns(2)
-        if c1.button("Save", key=f"{ns}_save_{hk}", type="primary", use_container_width=True):
-            move(LABEL_TO_STATUS.get(new_stage, "shortlisted"), f"Saved {name}", notes=notes)
-        if c2.button("Remove", key=f"{ns}_rm_{hk}", use_container_width=True):
-            move("new", f"Removed {name} from the pipeline")
+        move(c1, "Save", f"{ns}_save_{hk}", status, f"Saved {name}", primary=True,
+             stage_key=f"{ns}_stage_{hk}", notes_key=f"{ns}_notes_{hk}")
+        move(c2, "Remove", f"{ns}_rm_{hk}", "new", f"Removed {name} from the pipeline")
     elif status == "passed":
-        if st.button("Restore", key=f"{ns}_restore_{hk}", use_container_width=True):
-            move("new", f"Restored {name}")
+        move(st, "Restore", f"{ns}_restore_{hk}", "new", f"Restored {name}")
     else:
         c1, c2 = st.columns(2)
-        if c1.button("Longlist", key=f"{ns}_long_{hk}", type="primary", use_container_width=True):
-            move("longlisted", f"Longlisted {name}")
-        if c2.button("Pass on it", key=f"{ns}_pass_{hk}", use_container_width=True):
-            move("passed", f"Passed on {name}")
+        move(c1, "Longlist", f"{ns}_long_{hk}", "longlisted", f"Longlisted {name}",
+             primary=True)
+        move(c2, "Pass on it", f"{ns}_pass_{hk}", "passed", f"Passed on {name}")
 
 
 def _detail_pane(lead: Lead, *, entry: LedgerEntry | None = None, key_ns: str = "feeddet",
@@ -2700,11 +2772,11 @@ def _detail_pane(lead: Lead, *, entry: LedgerEntry | None = None, key_ns: str = 
     ov = overrides.get(hk) or {}
     m1, m2 = st.columns(2)
     memo_label = "Open memo" if pipeline.get(hk, {}).get("brief") else "Write memo"
-    if m1.button(memo_label, key=f"{ns}_memo_{hk}", use_container_width=True,
+    if m1.button(memo_label, key=f"{ns}_memo_{hk}", width="stretch",
                  help="The investment memo lives on the Memos page — this opens "
                       "it there, or starts one."):
         _open_memo(hk)
-    with m2.popover("Adjust scoring", use_container_width=True):
+    with m2.popover("Adjust scoring", width="stretch"):
         _override_editor(lead, ov, ns)
 
     # Where it stands in the firm's CRM — only for startups in the funnel.
@@ -2835,7 +2907,7 @@ def _render_cockpit(leads: list[Lead], sel_key: str, more=None,
                         + ("" if missing else " Scout has no data on it yet.")
                         + '</div>', unsafe_allow_html=True)
             if missing is not None and c2.button("Show it", key=f"{sel_key}_showit",
-                                                 use_container_width=True):
+                                                 width="stretch"):
                 _route("Startups", "Feed", handle=sel)
         sel = handles[0]
         st.session_state[sel_key] = sel
@@ -2846,12 +2918,11 @@ def _render_cockpit(leads: list[Lead], sel_key: str, more=None,
     with list_col:
         with st.container(height=640, border=False):
             for lead in leads:
-                if _feed_row(lead, selected=lead.account.handle.lower() == sel):
-                    st.session_state[sel_key] = lead.account.handle.lower()
-                    st.rerun()
+                _feed_row(lead, selected=lead.account.handle.lower() == sel,
+                          sel_key=sel_key)
             if more is not None:
                 label, cb = more
-                if st.button(label, use_container_width=True, key=f"{sel_key}_more"):
+                if st.button(label, width="stretch", key=f"{sel_key}_more"):
                     cb()
     with detail_col:
         with st.container(height=640, border=False):
@@ -2984,7 +3055,7 @@ def _render_startup_feed() -> None:
                                                lift_sort, "Warm paths", "Followers"],
                                    key="feed_sort", persist_state="session")
             with st.popover(f"Filters · {n_active}" if n_active else "Filters",
-                            use_container_width=True):
+                            width="stretch"):
                 type_filter = st.multiselect("Type", ["founder", "startup", "other"],
                                              default=FILTER_DEFAULTS["f_type"], key="f_type", persist_state="session",
                                              format_func=lambda t: TYPE_LABEL[t])
@@ -3290,7 +3361,7 @@ def _page_pipeline() -> None:
                     '</div></div>',
                     unsafe_allow_html=True,
                 )
-                if c_r.button("Open", key=f"meet_open_{handle}", use_container_width=True):
+                if c_r.button("Open", key=f"meet_open_{handle}", width="stretch"):
                     _route("Pipeline", handle=handle)
 
     if not handles:
@@ -3718,7 +3789,7 @@ def _page_memos() -> None:
         _worker = store.worker_status()
         if _worker and _worker["alive"] and not editing:
             if st.button(f"Queue a {_selected_depth()} memo for the worker",
-                         key="memo_queue", use_container_width=True):
+                         key="memo_queue", width="stretch"):
                 job_id = store.enqueue_job(
                     jobs_mod.KIND_MEMO,
                     {"handle": pick, "depth": _selected_depth(),
@@ -3747,7 +3818,7 @@ def _page_memos() -> None:
             r1, r2, r3 = st.columns([1.3, 1.3, 2.4])
             if review_status in ("none", "changes_requested"):
                 if r1.button("Request review", key="memo_req_review",
-                             use_container_width=True):
+                             width="stretch"):
                     store.set_memo_review(pick, "requested")
                     st.session_state["toast"] = "Review requested"
                     st.rerun()
@@ -3762,7 +3833,7 @@ def _page_memos() -> None:
                 # You can approve your own memo in a two-person firm — the
                 # point is the record of who signed off, not a gate.
                 if r1.button("Approve", key="memo_approve", type="primary",
-                             use_container_width=True):
+                             width="stretch"):
                     store.set_memo_review(
                         pick, "approved",
                         version_no=versions[0].version_no if versions else None,
@@ -3770,7 +3841,7 @@ def _page_memos() -> None:
                     st.session_state["toast"] = f"Memo approved — {picked_name}"
                     st.rerun()
                 if r2.button("Request changes", key="memo_changes",
-                             use_container_width=True):
+                             width="stretch"):
                     store.set_memo_review(pick, "changes_requested")
                     st.session_state["toast"] = "Changes requested"
                     st.rerun()
@@ -3819,7 +3890,7 @@ def _page_memos() -> None:
                         )
                         if version.version_no != versions[0].version_no:
                             if v2.button("Restore", key=f"memo_restore_{version.version_no}",
-                                         use_container_width=True):
+                                         width="stretch"):
                                 store.restore_memo_version(pick, version.version_no)
                                 st.session_state["toast"] = (
                                     f"Restored v{version.version_no}")
@@ -3881,7 +3952,7 @@ def _render_run_controls() -> None:
     x_connected = bool(settings.tw_cookies and Path(settings.tw_cookies).exists())
     scan_active = ((store.current_scan() or {}).get("status") == "running")
     info_col, opts_col, run_col = st.columns([4.2, 1.25, 1.1], vertical_alignment="center")
-    with opts_col.popover("Run options", use_container_width=True):
+    with opts_col.popover("Run options", width="stretch"):
         source = st.segmented_control(
             "Source", ["X (free scraper)", "No X", "X API (paid)"],
             default="X (free scraper)" if x_connected else "No X",
@@ -3937,12 +4008,12 @@ def _render_run_controls() -> None:
             )
         st.divider()
         if st.button("Preview discovery (free, no scoring)", key="run_preview",
-                     disabled=scan_active, use_container_width=True):
+                     disabled=scan_active, width="stretch"):
             _launch_scan(["source", "--max-accounts", str(int(max_accounts))], "source",
                          job_kind=jobs_mod.KIND_PREVIEW,
                          payload={"max_accounts": int(max_accounts)})
         if st.button(
-            "Rescore latest run", key="run_rescore", use_container_width=True,
+            "Rescore latest run", key="run_rescore", width="stretch",
             disabled=scan_active or not (leads or ledger),
             help="Re-run Claude classification + the adversarial audit on the latest "
                  "run's startups — no discovery, cache-first, minutes not an hour. Use "
@@ -3967,7 +4038,7 @@ def _render_run_controls() -> None:
         info += " Confirm the X API spend under <b>Run options</b> to start a paid run."
     info_col.markdown(f'<div class="subtle">{info}</div>', unsafe_allow_html=True)
     if run_col.button("Run scout", key="run_scout", type="primary",
-                      disabled=not run_ready, use_container_width=True):
+                      disabled=not run_ready, width="stretch"):
         _launch_scan(["run", "--source", run_source,
                       "--max-accounts", str(int(max_accounts)),
                       "--min-score", str(int(min_score_run)), "--ttl-days", str(int(ttl))],
@@ -4392,7 +4463,7 @@ def _thesis_tune() -> None:
                       "proposed": value,
                       "change": round(value - thesis.weights.get(name, 0.0), 1)}
                      for name, value in sorted(weight_proposal.weights.items())],
-                    hide_index=True, use_container_width=True,
+                    hide_index=True, width="stretch",
                 )
                 w1, w2, _w3 = st.columns([1.1, 1, 3])
                 if w1.button("Apply weights", type="primary"):
@@ -4923,7 +4994,7 @@ def _render_db_editor(view_rows: list[dict]) -> None:
             config[label] = st.column_config.TextColumn(label, width="medium")
 
     edited = st.data_editor(
-        ed_rows, hide_index=True, use_container_width=True, key="sdb_editor",
+        ed_rows, hide_index=True, width="stretch", key="sdb_editor",
         height=min(560, 37 * (len(ed_rows) + 1) + 5),
         disabled=["Startup", "Score", "What they do"],
         column_config=config,
@@ -5151,7 +5222,7 @@ def _render_database() -> None:
                 "|".join(df["handle"].astype(str)).encode() if not df.empty else b""
             ).hexdigest()[:12]
             event = st.dataframe(
-                df, use_container_width=True, hide_index=True,
+                df, width="stretch", hide_index=True,
                 key=f"sdb_table_{_order_sig}",
                 on_select="rerun", selection_mode="multi-row",
                 height=min(560, 37 * (len(df) + 1) + 5),
@@ -5210,7 +5281,7 @@ def _render_database() -> None:
                         (b3, "Pass", "passed", "secondary")]
                 for col, label, new_status, kind in bulk:
                     if col.button(label, key=f"bulk_{new_status}",
-                                  type=kind, use_container_width=True):
+                                  type=kind, width="stretch"):
                         for handle in picked_handles:
                             _set_status(handle, status=new_status)
                         st.session_state["toast"] = (
@@ -5367,7 +5438,7 @@ def _render_raw_tables() -> None:
                     unsafe_allow_html=True)
         # Height hugs the rows (35px each + header) instead of padding the
         # grid with empty rows; caps at ~12 rows then scrolls.
-        st.dataframe(df, use_container_width=True, hide_index=True,
+        st.dataframe(df, width="stretch", hide_index=True,
                      height=min(460, 37 * (len(df) + 1) + 5))
 
         st.download_button(
@@ -5390,7 +5461,7 @@ def _render_raw_tables() -> None:
                         # sqlite3 executes a single statement — a piggybacked
                         # second statement raises rather than running.
                         sql_df = pd.read_sql_query(statement, db.conn)
-                        st.dataframe(sql_df, use_container_width=True, hide_index=True)
+                        st.dataframe(sql_df, width="stretch", hide_index=True)
                         st.markdown(f'<div class="subtle">{len(sql_df):,} rows</div>',
                                     unsafe_allow_html=True)
                     except Exception as exc:  # surface SQL errors inline
@@ -5786,7 +5857,7 @@ def _render_evidence_results(report) -> None:
                   "lift vs random": f"{row.lift:.1f}×",
                   "companies read per find": row.reviewed_per_find}
                  for row in realistic_performance(metrics)],
-                hide_index=True, use_container_width=True,
+                hide_index=True, width="stretch",
             )
             st.markdown(
                 '<div class="subtle">Lift is the honest headline. Precision '
@@ -5860,7 +5931,7 @@ def _render_evidence_signals(report, evaluation, row: dict) -> None:
             }
             for f in evaluation.ranked
         ],
-        hide_index=True, use_container_width=True,
+        hide_index=True, width="stretch",
         column_config={
             # A bar makes the distance from 0.5 legible at a glance, which
             # a bare float does not.
@@ -5921,7 +5992,7 @@ def _render_evidence_signals(report, evaluation, row: dict) -> None:
                 [{"signal": p.name, "current": p.current,
                   "suggested": p.suggested, "change": p.delta,
                   "why": p.reason} for p in proposals],
-                hide_index=True, use_container_width=True,
+                hide_index=True, width="stretch",
             )
             # A backtest measures ONE thesis's weights; applying its
             # suggestions to a different thesis would tune the wrong one.
@@ -5998,7 +6069,7 @@ def _render_evidence_trends(runs: list[dict], report) -> None:
         [{"signal": t.name,
           **{point[0]: point[1] for point in t.points},
           "reading": t.summary} for t in trends],
-        hide_index=True, use_container_width=True,
+        hide_index=True, width="stretch",
     )
 
 
@@ -6485,7 +6556,7 @@ def _render_automation() -> None:
                      key=f"sched_on_{row['id']}_{int(row['enabled'])}") != row["enabled"]:
             store.set_schedule_enabled(row["id"], not row["enabled"])
             st.rerun()
-        if s4.button("Edit", key=f"sched_edit_{row['id']}", use_container_width=True):
+        if s4.button("Edit", key=f"sched_edit_{row['id']}", width="stretch"):
             st.session_state[f"sched_{row['id']}_open"] = True
         if st.session_state.get(f"sched_{row['id']}_open"):
             with st.container(border=True):
@@ -6522,7 +6593,7 @@ def _render_automation() -> None:
         (q2, jobs_mod.KIND_DIGEST, "Send a digest", True),
         (q3, jobs_mod.KIND_VERIFY, "Verify the latest run", verify_ok),
     ):
-        if not col.button(label, key=f"queue_{kind}", use_container_width=True,
+        if not col.button(label, key=f"queue_{kind}", width="stretch",
                           disabled=not enabled):
             continue
         payload = jobs_mod.default_payload(kind)
@@ -6568,7 +6639,7 @@ def _render_automation() -> None:
             unsafe_allow_html=True,
         )
         if job["status"] == "queued" and j2.button(
-            "Cancel", key=f"job_cancel_{job['id']}", use_container_width=True
+            "Cancel", key=f"job_cancel_{job['id']}", width="stretch"
         ):
             store.cancel_job(job["id"], actor=ACTOR)
             st.rerun()
@@ -6901,3 +6972,7 @@ _PAGE_RENDERERS = {
     "Settings": _page_settings,
 }
 _PAGE_RENDERERS[nav]()
+
+if _CACHE_GUARD and _ws_fingerprint != _workspace_fingerprint(*(_WORKSPACE[i] for i in (0, 2, 3, 4))):
+    raise RuntimeError("The shared workspace cache was mutated during this run — "
+                       "copy a cached lead before changing it (see _load_workspace).")
