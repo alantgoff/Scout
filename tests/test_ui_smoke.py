@@ -1477,3 +1477,19 @@ def test_forward_scorecard_on_an_empty_workspace_says_what_to_do(tmp_path, monke
     at.run()
     assert not at.exception, at.exception[0].message if at.exception else ""
     assert "Nothing to measure yet" in _page_text(at)
+
+
+def test_a_full_run_never_carries_the_cockpit_redraw_flag(tmp_path, monkeypatch) -> None:
+    """Passing a startup from the feed asks for a whole-page redraw (the
+    feed's hidden-by-passed count lives outside the cockpit fragment). A full
+    run IS that redraw, so the flag must be gone after it — a stale flag
+    would make the next cockpit click redraw the page for nothing."""
+    db = tmp_path / "smoke.db"
+    at = _app(tmp_path, monkeypatch)
+    at.session_state["nav"] = "Startups"
+    at.run()
+    at.button(key="feeddet_pass_smoke_founder").click().run()
+    assert not at.exception, at.exception[0].message if at.exception else ""
+    assert "_full_rerun" not in at.session_state
+    assert Store(db).get_pipeline("smoke_founder")["status"] == "passed"
+    assert any("Passed on SmokeCo" in t.value for t in at.toast)

@@ -99,3 +99,26 @@ def stage_for_status(status: str | None) -> str | None:
         if status in statuses:
             return stage
     return None
+
+
+# The cockpit (list + dossier) re-renders on its own after a click — a
+# Streamlit fragment — so a write must say when the WHOLE page is stale
+# instead: when it changes which startups a list holds, or something drawn
+# outside the cockpit (Pipeline's stage counts and partner meeting, the
+# feed's "hidden by passed" count). `surface` is where the dossier sits:
+# "feed", "pipeline" or "database" (the Database isn't a fragment, so its
+# clicks rerun the page anyway).
+
+
+def triage_needs_full_rerun(surface: str, old_status: str, new_status: str) -> bool:
+    """Every Pipeline move changes a stage list and its count; in the feed
+    only passing (or un-passing) a startup changes what the page shows."""
+    if surface != "feed":
+        return True
+    return "passed" in (old_status, new_status)
+
+
+def vote_needs_full_rerun(surface: str) -> bool:
+    """The partner meeting above the Pipeline cockpit is built from votes;
+    the feed draws votes only inside the cockpit."""
+    return surface != "feed"

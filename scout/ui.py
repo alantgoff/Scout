@@ -1215,6 +1215,9 @@ _inject_css()
 # actions stash the message here and it fires on the following run.
 if _pending_toast := st.session_state.pop("toast", None):
     st.toast(_pending_toast)
+# A cockpit click that needs the whole page redrawn sets this (see
+# _render_cockpit); a full run is that redraw, so it never carries over.
+st.session_state.pop("_full_rerun", None)
 
 settings = Settings(_env_file=ENV_PATH if ENV_PATH.exists() else None)
 
@@ -2369,7 +2372,8 @@ def _score_math_html(lead: Lead, manual_score: float | None = None) -> str:
             f'<div style="margin-top:2px">{steps}</div>')
 
 
-def _cast_vote(handle: str, stance: str, why_key: str, name: str) -> None:
+def _cast_vote(handle: str, stance: str, why_key: str, name: str,
+               surface: str = "feed") -> None:
     """A stance (or "" to clear it) with the reason typed so far — a
     callback, so the click's own rerun shows it. `name` empty = the reason
     alone was saved."""
@@ -2379,6 +2383,8 @@ def _cast_vote(handle: str, stance: str, why_key: str, name: str) -> None:
         "Reason saved" if not name else
         f"Vote cleared — {name}" if not stance else
         f"{STANCE_LABELS[stance]} — {name}")
+    if nav_mod.vote_needs_full_rerun(surface):
+        st.session_state["_full_rerun"] = True
 
 
 def _render_vote_row(lead: Lead, key_ns: str) -> None:
@@ -2407,7 +2413,8 @@ def _render_vote_row(lead: Lead, key_ns: str) -> None:
             width="stretch",
             help="Click again to clear your vote" if selected else None,
             on_click=_cast_vote,
-            args=(handle, "" if selected else stance, why_key, display_name(lead)),
+            args=(handle, "" if selected else stance, why_key, display_name(lead),
+                  _SURFACE.get(key_ns, "feed")),
         )
     my_vote = next((v for v in votes_by_handle.get(hk, []) if v.actor == ACTOR), None)
     why = st.text_input(
@@ -2417,7 +2424,7 @@ def _render_vote_row(lead: Lead, key_ns: str) -> None:
     )
     if my_vote is not None and why.strip() != (my_vote.rationale or ""):
         st.button("Save reason", key=f"{key_ns}_savewhy_{hk}", on_click=_cast_vote,
-                  args=(handle, my_vote.stance, why_key, ""))
+                  args=(handle, my_vote.stance, why_key, "", _SURFACE.get(key_ns, "feed")))
     # Everyone else's stance, with their reasons — the disagreement, in full.
     others = [v for v in votes_by_handle.get(hk, []) if v.actor != ACTOR]
     if others:
@@ -2617,10 +2624,17 @@ def _dossier_chips(lead: Lead, entry: LedgerEntry | None, fresh: bool) -> list[t
     return chips
 
 
+# Where a dossier sits, from its widget namespace — what decides whether a
+# click inside the cockpit fragment needs the whole page redrawn.
+_SURFACE = {"feeddet": "feed", "pipedet": "pipeline", "dbdet": "database"}
+
+
 def _triage_move(handle: str, status: str, toast: str,
-                 stage_key: str | None = None, notes_key: str | None = None) -> None:
+                 stage_key: str | None = None, notes_key: str | None = None,
+                 surface: str = "feed", old_status: str = "new") -> None:
     """One funnel move, as a callback (no second full pass). A Save reads
-    the stage and notes widgets' values from session state."""
+    the stage and notes widgets' values from session state. A move that
+    changes what the page lists asks for a full redraw (nav rules)."""
     fields = {}
     if stage_key is not None:
         status = LABEL_TO_STATUS.get(st.session_state.get(stage_key), "shortlisted")
@@ -2628,6 +2642,8 @@ def _triage_move(handle: str, status: str, toast: str,
         fields["notes"] = st.session_state.get(notes_key, "")
     _set_status(handle, status=status, **fields)
     st.session_state["toast"] = toast
+    if nav_mod.triage_needs_full_rerun(surface, old_status, status):
+        st.session_state["_full_rerun"] = True
 
 
 def _triage_actions(lead: Lead, ns: str) -> None:
@@ -2640,11 +2656,14 @@ def _triage_actions(lead: Lead, ns: str) -> None:
     name = display_name(lead)
     status = _status_of(lead)
 
+    surface = _SURFACE.get(ns, "feed")
+
     def move(col, label: str, key: str, new_status: str, toast: str,
              primary: bool = False, **extra) -> None:
         col.button(label, key=key, type="primary" if primary else "secondary",
                    width="stretch", on_click=_triage_move,
-                   args=(account.handle, new_status, toast), kwargs=extra)
+                   args=(account.handle, new_status, toast),
+                   kwargs={**extra, "surface": surface, "old_status": status})
 
     if status == "longlisted":
         c1, c2 = st.columns(2)
@@ -2884,12 +2903,46 @@ def _detail_pane(lead: Lead, *, entry: LedgerEntry | None = None, key_ns: str = 
             )
 
 
+def _refresh_judgment_state() -> None:
+    """Re-read what a cockpit click can change, for a fragment rerun.
+
+    A fragment rerun executes with the module namespace of the FULL run that
+    registered it, so these globals would still hold that run's pipeline and
+    votes — the list would show the state from before the click. Assigning
+    them here updates that shared namespace, so every helper the cockpit
+    calls (_status_of, _stance_chips_html, _detail_pane…) sees the write.
+    On a full run it re-reads what was just read: about a millisecond."""
+    global pipeline, votes_by_handle, VOTE_SUMMARIES, comment_counts
+    pipeline = store.all_pipeline()
+    votes_by_handle = store.all_votes()
+    VOTE_SUMMARIES = {h: summary for h, vs in votes_by_handle.items()
+                      if (summary := vote_summary(vs)) is not None}
+    comment_counts = store.all_comment_counts()
+
+
+@st.fragment
 def _render_cockpit(leads: list[Lead], sel_key: str, more=None,
                     secondaries: dict[str, list[Lead]] | None = None) -> None:
     """Shared triage cockpit: a scannable warm-row list (left) drives the
     selected lead's dossier (right). `sel_key` persists the selection per page,
-    so the Feed, Longlist, and Shortlist each keep their own. `more`, when set,
-    is a (label, callback) rendered as a Show-more button under the list."""
+    so the Feed and the Pipeline each keep their own. `more`, when set, is a
+    (label, callback) rendered as a Show-more button under the list.
+
+    A FRAGMENT: a click in here (row, vote, comment, owner, feed Longlist)
+    re-renders only the list and the dossier — not the masthead, the styles
+    or the rest of the page. That is safe because the state it draws from is
+    re-read on entry (_refresh_judgment_state) and its toasts fire here. A
+    write that changes what the page lists sets "_full_rerun" (rules in
+    nav.py) and the whole page is redrawn instead; button handlers that call
+    st.rerun() (memo, scoring, CRM, Show more) rerun the app as before.
+    AppTest only runs full reruns — check fragment behaviour in a browser."""
+    if st.session_state.pop("_full_rerun", False):
+        st.rerun(scope="app")
+    _refresh_judgment_state()
+    # Module code doesn't run on a fragment rerun, so a toast a callback
+    # queued would otherwise wait for the next full run.
+    if message := st.session_state.pop("toast", None):
+        st.toast(message)
     if not leads:
         return
     handles = [l.account.handle.lower() for l in leads]

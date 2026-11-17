@@ -306,7 +306,15 @@ scout/
                     conftest) fingerprints it and raises on any mutation.
                     Frequent clicks (row select, votes, triage moves) are
                     on_click callbacks — button → st.rerun() ran the whole
-                    script twice per click.
+                    script twice per click. The cockpit (_render_cockpit:
+                    list + dossier) is an @st.fragment: a row tap, vote,
+                    comment, owner change or feed Longlist reruns only it
+                    (~20 ms server time at 600 startups). It re-reads the
+                    judgment state on entry (_refresh_judgment_state) and
+                    fires its own toasts; a write that changes what the page
+                    lists sets "_full_rerun" (rules: nav.triage_needs_
+                    full_rerun / vote_needs_full_rerun) and the whole page is
+                    redrawn instead.
                     Quick-find in the masthead is an on_change callback: an
                     exact name opens that startup, anything else searches
                     the feed (session_state["feed_q"]), via _route.
@@ -1299,6 +1307,22 @@ numbers come from:
   session state (read the stage/notes/reason widgets from there), and the
   toast queue still works. A callback cannot call `st.rerun()` (it is a
   no-op there).
+- **A fragment rerun runs with the GLOBALS OF THE FULL RUN that registered
+  it.** Module code does not re-execute, so `pipeline`, `votes_by_handle`
+  and friends still hold the state from before the click — and so does
+  every helper reading them. Re-read what the fragment draws on entry
+  (`global` assignments update that shared namespace) and fire queued
+  toasts there (the module-level toast pop doesn't run either).
+- **A fragment can't tell the page it's stale from a callback** (`st.rerun`
+  is a no-op in callbacks). Set a session flag in the callback; the
+  fragment body pops it and calls `st.rerun(scope="app")`, and module code
+  pops it on every full run so it never leaks. Never use
+  `st.rerun(scope="fragment")`: it raises in a full run — which is every
+  run AppTest makes.
+- **AppTest cannot exercise fragment reruns** — every `at.run()` is a full
+  run. Fragment consistency is verified in a browser (Playwright on a
+  seeded 600-startup DB: which clicks rerun only the cockpit, which escalate,
+  and that chips, tags, counts and toasts agree afterwards).
 - **`use_container_width` is deprecated** — use `width="stretch"` (buttons,
   popovers, dataframes, editors all take `width` in 1.59).
 - **Turning a page block into a function changes scope:** names it assigned

@@ -59,3 +59,19 @@ def test_every_status_has_one_pipeline_stage():
 def test_every_page_with_a_list_has_a_selection_key():
     assert set(nav.SELECTION_KEYS) <= set(nav.PAGES)
     assert len(set(nav.SELECTION_KEYS.values())) == len(nav.SELECTION_KEYS)
+
+
+def test_which_cockpit_writes_redraw_the_whole_page():
+    # Feed: Longlist / Shortlist / a stage save stay inside the cockpit…
+    assert not nav.triage_needs_full_rerun("feed", "new", "longlisted")
+    assert not nav.triage_needs_full_rerun("feed", "longlisted", "shortlisted")
+    assert not nav.triage_needs_full_rerun("feed", "meeting", "diligence")
+    # …but passing changes the list and the "hidden by passed" count.
+    assert nav.triage_needs_full_rerun("feed", "new", "passed")
+    assert nav.triage_needs_full_rerun("feed", "passed", "new")
+    # Every Pipeline move changes a stage list; the Database isn't a fragment.
+    assert nav.triage_needs_full_rerun("pipeline", "longlisted", "shortlisted")
+    assert nav.triage_needs_full_rerun("database", "new", "longlisted")
+    # Votes feed the partner meeting above the Pipeline cockpit only.
+    assert not nav.vote_needs_full_rerun("feed")
+    assert nav.vote_needs_full_rerun("pipeline")
